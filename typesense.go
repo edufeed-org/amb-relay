@@ -7,18 +7,18 @@ import (
 	"io"
 	"log"
 	"net/http"
-)
+	"net/url"
+	"regexp"
+	"strings"
 
-const (
-	typesenseHost  = "http://localhost:8108"
-	apiKey         = "xyz"
-	// collectionName = "amb-test"
+	"github.com/nbd-wtf/go-nostr"
 )
 
 type CollectionSchema struct {
 	Name                string  `json:"name"`
 	Fields              []Field `json:"fields"`
 	DefaultSortingField string  `json:"default_sorting_field"`
+	EnableNestedFields  bool    `json:"enable_nested_fields"`
 }
 
 type Field struct {
@@ -26,6 +26,13 @@ type Field struct {
 	Type     string `json:"type"`
 	Facet    bool   `json:"facet,omitempty"`
 	Optional bool   `json:"optional,omitempty"`
+}
+
+type SearchResponse struct {
+	Found   int                      `json:"found"`
+	Hits    []map[string]interface{} `json:"hits"`
+	Page    int                      `json:"page"`
+	Request map[string]interface{}   `json:"request"`
 }
 
 // CheckOrCreateCollection checks if a collection exists and creates it if it doesn't
@@ -45,7 +52,7 @@ func CheckOrCreateCollection(collectionName string) error {
 		fmt.Printf("Collection %s already exists\n", collectionName)
 	}
 
-  return nil
+	return nil
 }
 
 func collectionExists(name string) (bool, error) {
@@ -79,26 +86,67 @@ func collectionExists(name string) (bool, error) {
 	return true, nil
 }
 
+// create a typesense collection
 func createCollection(name string) error {
 	url := fmt.Sprintf("%s/collections", typesenseHost)
 
 	schema := CollectionSchema{
 		Name: name,
 		Fields: []Field{
-			{
-				Name: "name",
-				Type: "string",
-			},
-			{
-				Name: "description",
-				Type: "string",
-			},
-      {
-				Name: "event_date_created",
-				Type: "int64",
-			},
+			// Base information
+			{Name: "id", Type: "string"},
+			{Name: "d", Type: "string"},
+			{Name: "type", Type: "string"},
+			{Name: "name", Type: "string"},
+			{Name: "description", Type: "string", Optional: true},
+			{Name: "about", Type: "object[]", Optional: true},
+			{Name: "keywords", Type: "string[]", Optional: true},
+			{Name: "inLanguage", Type: "string[]", Optional: true},
+			{Name: "image", Type: "string", Optional: true},
+			{Name: "trailer", Type: "object[]", Optional: true},
+
+			// Provenience
+			{Name: "creator", Type: "object[]", Optional: true},
+			{Name: "contributor", Type: "object[]", Optional: true},
+			{Name: "dateCreated", Type: "string", Optional: true},
+			{Name: "datePublished", Type: "string", Optional: true},
+			{Name: "dateModified", Type: "string", Optional: true},
+			{Name: "publisher", Type: "object[]", Optional: true},
+			{Name: "funder", Type: "object[]", Optional: true},
+
+			// Costs and Rights
+			{Name: "isAccessibleForFree", Type: "bool", Optional: true},
+			{Name: "license", Type: "object", Optional: true},
+			{Name: "conditionsOfAccess", Type: "object", Optional: true},
+
+			// Educational Metadata
+			{Name: "learningResourceType", Type: "object[]", Optional: true},
+			{Name: "audience", Type: "object[]", Optional: true},
+			{Name: "teaches", Type: "object[]", Optional: true},
+			{Name: "assesses", Type: "object[]", Optional: true},
+			{Name: "competencyRequired", Type: "object[]", Optional: true},
+			{Name: "educationalLevel", Type: "object[]", Optional: true},
+			{Name: "interactivityType", Type: "object", Optional: true},
+
+			// Relation
+			{Name: "isBasedOn", Type: "object[]", Optional: true},
+			{Name: "isPartOf", Type: "object[]", Optional: true},
+			{Name: "hasPart", Type: "object[]", Optional: true},
+
+			// Technical
+			{Name: "duration", Type: "string", Optional: true},
+
+			// Nostr Event
+			{Name: "eventID", Type: "string"},
+			{Name: "eventKind", Type: "int32"},
+			{Name: "eventPubKey", Type: "string"},
+			{Name: "eventSignature", Type: "string"},
+			{Name: "eventCreatedAt", Type: "int64"},
+			{Name: "eventContent", Type: "string"},
+			{Name: "eventRaw", Type: "string"},
 		},
-		DefaultSortingField: "event_date_created",
+		DefaultSortingField: "eventCreatedAt",
+		EnableNestedFields:  true,
 	}
 
 	jsonData, err := json.Marshal(schema)
@@ -127,4 +175,263 @@ func createCollection(name string) error {
 	}
 
 	return nil
+}
+
+// IndexNostrEvent converts a Nostr event to AMB metadata and indexes it in Typesense
+func IndexNostrEvent(collectionName string, event *nostr.Event) error {
+	ambData, err := NostrToAMB(event)
+	if err != nil {
+		return fmt.Errorf("error converting Nostr event to AMB metadata: %v", err)
+	}
+
+	// check if event is already there, if so replace it, else index it
+	alreadyIndexed, err := eventAlreadyIndexed(collectionName, ambData)
+	return indexDocument(collectionName, ambData, alreadyIndexed)
+}
+
+func eventAlreadyIndexed(collectionName string, doc *AMBMetadata) (bool, error) {
+	url := fmt.Sprintf("%s/collections/%s/documents/%s", typesenseHost, collectionName, url.QueryEscape(doc.ID))
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return false, err
+	}
+
+	req.Header.Set("X-TYPESENSE-API-KEY", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return false, fmt.Errorf("failed to index document, status: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	return true, err
+
+}
+
+// Index a document in Typesense
+func indexDocument(collectionName string, doc *AMBMetadata, update bool) error {
+	if update {
+		fmt.Println("updating", doc)
+	} else {
+		fmt.Println("indexing", doc)
+	}
+
+	url := fmt.Sprintf("%s/collections/%s/documents", typesenseHost, collectionName)
+
+	jsonData, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+
+	method := http.MethodPost
+	if update {
+		method = http.MethodPatch
+	}
+
+	req, err := http.NewRequest(method, url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("X-TYPESENSE-API-KEY", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+
+	// Do the request
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("failed to index document, status: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// SearchQuery represents a parsed search query with raw terms and field filters
+type SearchQuery struct {
+	RawTerms     []string
+	FieldFilters map[string]string
+}
+
+// ParseSearchQuery parses a search string with support for quoted terms and field:value pairs
+func ParseSearchQuery(searchStr string) SearchQuery {
+	var query SearchQuery
+	query.RawTerms = []string{}
+	query.FieldFilters = make(map[string]string)
+
+	// Regular expression to match quoted strings and field:value pairs
+	// This regex handles:
+	// 1. Quoted strings (preserving spaces and everything inside)
+	// 2. Field:value pairs
+	// 3. Regular words
+	re := regexp.MustCompile(`"([^"]+)"|(\S+\.\S+):(\S+)|(\S+)`)
+	matches := re.FindAllStringSubmatch(searchStr, -1)
+
+	for _, match := range matches {
+		if match[1] != "" {
+			// This is a quoted string, add it to raw terms
+			query.RawTerms = append(query.RawTerms, match[1])
+		} else if match[2] != "" && match[3] != "" {
+			// This is a field:value pair
+			fieldName := match[2]
+			fieldValue := match[3]
+			query.FieldFilters[fieldName] = fieldValue
+		} else if match[4] != "" {
+			// This is a regular word, check if it's a simple field:value
+			parts := strings.SplitN(match[4], ":", 2)
+			if len(parts) == 2 && !strings.Contains(parts[0], ".") {
+				// Simple field:value without dot notation
+				query.FieldFilters[parts[0]] = parts[1]
+			} else {
+				// Regular search term
+				query.RawTerms = append(query.RawTerms, match[4])
+			}
+		}
+	}
+
+	return query
+}
+
+// BuildTypesenseQuery builds a Typesense search query from a parsed SearchQuery
+func BuildTypesenseQuery(query SearchQuery) (string, map[string]string, error) {
+	// Join raw terms for the main query
+	mainQuery := strings.Join(query.RawTerms, " ")
+
+	// Parameters for filter_by and other Typesense parameters
+	params := make(map[string]string)
+
+	// Build filter expressions for field filters
+	var filterExpressions []string
+
+	for field, value := range query.FieldFilters {
+		// Handle special fields with dot notation
+		if strings.Contains(field, ".") {
+			parts := strings.SplitN(field, ".", 2)
+			fieldName := parts[0]
+			subField := parts[1]
+
+			filterExpressions = append(filterExpressions, fmt.Sprintf("%s.%s:%s", fieldName, subField, value))
+		} else {
+			filterExpressions = append(filterExpressions, fmt.Sprintf("%s:%s", field, value))
+		}
+	}
+
+	// Combine all filter expressions
+	if len(filterExpressions) > 0 {
+		params["filter_by"] = strings.Join(filterExpressions, " && ")
+	}
+
+	return mainQuery, params, nil
+}
+
+// SearchResources searches for resources and returns both the AMB metadata and converted Nostr events
+func SearchResources(collectionName, searchStr string) ([]nostr.Event, error) {
+	parsedQuery := ParseSearchQuery(searchStr)
+
+	mainQuery, params, err := BuildTypesenseQuery(parsedQuery)
+	if err != nil {
+		return nil, fmt.Errorf("error building Typesense query: %v", err)
+	}
+
+	// URL encode the main query
+	encodedQuery := url.QueryEscape(mainQuery)
+
+	// Default fields to search in
+	queryBy := "name,description"
+
+	// Start building the search URL
+	searchURL := fmt.Sprintf("%s/collections/%s/documents/search?q=%s&query_by=%s",
+		typesenseHost, collectionName, encodedQuery, queryBy)
+
+	// Add additional parameters
+	for key, value := range params {
+		searchURL += fmt.Sprintf("&%s=%s", key, url.QueryEscape(value))
+	}
+
+	// Debug information
+	fmt.Printf("Search URL: %s\n", searchURL)
+
+	// Create request
+	req, err := http.NewRequest(http.MethodGet, searchURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating search request: %v", err)
+	}
+	req.Header.Set("X-TYPESENSE-API-KEY", apiKey)
+
+	// Execute the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error executing search request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response body: %v", err)
+	}
+
+	// Check for errors
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("search failed with status code %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse the search response
+	var searchResponse SearchResponse
+	if err := json.Unmarshal(body, &searchResponse); err != nil {
+		return nil, fmt.Errorf("error parsing search response: %v", err)
+	}
+
+	nostrResults := make([]nostr.Event, 0, len(searchResponse.Hits))
+
+	for _, hit := range searchResponse.Hits {
+		// Extract the document from the hit
+		docMap, ok := hit["document"].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid document format in search results")
+		}
+
+		// Convert the map to AMB metadata
+		docJSON, err := json.Marshal(docMap)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling document: %v", err)
+		}
+
+		var ambData AMBMetadata
+		if err := json.Unmarshal(docJSON, &ambData); err != nil {
+			return nil, fmt.Errorf("error unmarshaling to AMBMetadata: %v", err)
+		}
+
+		// Convert the AMB metadata to a Nostr event
+		nostrEvent, err := StringifiedJSONToNostrEvent(ambData.EventRaw)
+		if err != nil {
+			fmt.Printf("Warning: failed to convert AMB to Nostr: %v\n", err)
+			continue
+		}
+
+		nostrResults = append(nostrResults, nostrEvent)
+	}
+
+	// Print the number of results for logging
+	fmt.Printf("Found %d results\n",
+		len(nostrResults))
+
+	return nostrResults, nil
 }
