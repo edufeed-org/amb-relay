@@ -14,6 +14,8 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
+// TODO fix all the request stuff and put it in a dedicated function
+
 type CollectionSchema struct {
 	Name                string  `json:"name"`
 	Fields              []Field `json:"fields"`
@@ -234,10 +236,6 @@ func IndexNostrEvent(collectionName string, event *nostr.Event) error {
 }
 
 func eventAlreadyIndexed(collectionName string, doc *AMBMetadata) (*nostr.Event, error) {
-	// TODO das muss eine Query nach d-tag und hexkey werden
-	// als Ergebnis kommt dann die eventID zurück
-	// wenn es eine Event ID gibt, wird die zuerst bei indexDocument gelöscht und dann die neue angelegt
-	// function für query event by d-tag and hex key
 	url := fmt.Sprintf(
 		"%s/collections/%s/documents/search?filter_by=d:=%s&&eventPubKey:=%s&q=&query_by=d,eventPubKey",
 		typesenseHost, collectionName, doc.D, doc.EventPubKey)

@@ -243,7 +243,7 @@ func NostrToAMB(event *nostr.Event) (*AMBMetadata, error) {
 		switch tag[0] {
 		case "d":
 			if len(tag) >= 2 {
-				amb.ID = tag[1]
+				amb.ID = event.ID
         amb.D = tag[1]
 			}
 		case "name":
