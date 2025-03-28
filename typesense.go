@@ -177,6 +177,40 @@ func createCollection(name string) error {
 	return nil
 }
 
+// Delete a nostr event from the index
+func DeleteNostrEvent(collectionName string, event *nostr.Event) error {
+	fmt.Println("handle delete")
+	d := event.Tags.GetD()
+
+	url := fmt.Sprintf(
+		"%s/collections/%s/documents?filter_by=d:=%s&&eventPubKey:=%s",
+		typesenseHost, collectionName, d, event.PubKey)
+	fmt.Println("url", url)
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("X-TYPESENSE-API-KEY", apiKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+
+	// Any status code other than 200 is an error
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
 // IndexNostrEvent converts a Nostr event to AMB metadata and indexes it in Typesense
 func IndexNostrEvent(collectionName string, event *nostr.Event) error {
 	ambData, err := NostrToAMB(event)

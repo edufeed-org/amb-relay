@@ -39,9 +39,9 @@ func main() {
 
 	relay.StoreEvent = append(relay.StoreEvent)
 	relay.QueryEvents = append(relay.QueryEvents, handleQuery)
-	relay.CountEvents = append(relay.CountEvents, dbts.CountEvents)
-	relay.DeleteEvent = append(relay.DeleteEvent, dbts.DeleteEvent)
-	relay.ReplaceEvent = append(relay.ReplaceEvent, dbts.ReplaceEvent, handleEvent) // use badger for counting events -> TODO switch to typesense?
+	relay.CountEvents = append(relay.CountEvents, dbts.CountEvents) // use badger for counting events -> TODO switch to typesense?
+	relay.DeleteEvent = append(relay.DeleteEvent, handleDelete)
+	relay.ReplaceEvent = append(relay.ReplaceEvent, handleReplaceEvent)
 	relay.Negentropy = true
 
 	relay.RejectEvent = append(relay.RejectEvent,
@@ -57,7 +57,12 @@ func main() {
 	http.ListenAndServe(":3334", relay)
 }
 
-func handleEvent(ctx context.Context, event *nostr.Event) error {
+func handleDelete(ctx context.Context, event *nostr.Event) error {
+	DeleteNostrEvent(collectionName, event)
+	return nil
+}
+
+func handleReplaceEvent(ctx context.Context, event *nostr.Event) error {
 	IndexNostrEvent(collectionName, event)
 	return nil
 }
@@ -77,7 +82,5 @@ func handleQuery(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, e
 		}
 		close(ch)
 	}()
-
 	return ch, nil
 }
-
