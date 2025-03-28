@@ -177,9 +177,19 @@ func createCollection(name string) error {
 	return nil
 }
 
+// TODO Count events
+func CountEvents(collectionName string, filter nostr.Filter) (int64, error) {
+	fmt.Println("filter", filter)
+	// search by author
+
+	// search by d-tag
+
+	return 0, nil
+}
+
 // Delete a nostr event from the index
 func DeleteNostrEvent(collectionName string, event *nostr.Event) error {
-	fmt.Println("handle delete")
+  fmt.Println("deleting event")
 	d := event.Tags.GetD()
 
 	url := fmt.Sprintf(
@@ -223,12 +233,19 @@ func IndexNostrEvent(collectionName string, event *nostr.Event) error {
 	return indexDocument(collectionName, ambData, alreadyIndexed)
 }
 
-func eventAlreadyIndexed(collectionName string, doc *AMBMetadata) (bool, error) {
-	url := fmt.Sprintf("%s/collections/%s/documents/%s", typesenseHost, collectionName, url.QueryEscape(doc.ID))
+func eventAlreadyIndexed(collectionName string, doc *AMBMetadata) (*nostr.Event, error) {
+	// TODO das muss eine Query nach d-tag und hexkey werden
+	// als Ergebnis kommt dann die eventID zurück
+	// wenn es eine Event ID gibt, wird die zuerst bei indexDocument gelöscht und dann die neue angelegt
+	// function für query event by d-tag and hex key
+	url := fmt.Sprintf(
+		"%s/collections/%s/documents/search?filter_by=d:=%s&&eventPubKey:=%s&q=&query_by=d,eventPubKey",
+		typesenseHost, collectionName, doc.D, doc.EventPubKey)
+	fmt.Println("url", url)
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
 	req.Header.Set("X-TYPESENSE-API-KEY", apiKey)
@@ -238,26 +255,35 @@ func eventAlreadyIndexed(collectionName string, doc *AMBMetadata) (bool, error) 
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return false, fmt.Errorf("failed to index document, status: %d, body: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("failed to index document, status: %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	return true, err
+	events, err := parseSearchResponse(body)
+	if err != nil {
+    return nil, fmt.Errorf("got parsing search response: %v", err)
+	}
+	fmt.Println("response", events)
 
+  // Check if we found any events
+	if len(events) == 0 {
+		return nil, nil
+	}
+	return &events[0], nil
 }
 
 // Index a document in Typesense
-func indexDocument(collectionName string, doc *AMBMetadata, update bool) error {
-	if update {
-		fmt.Println("updating", doc)
-	} else {
-		fmt.Println("indexing", doc)
+func indexDocument(collectionName string, doc *AMBMetadata, alreadyIndexedEvent *nostr.Event) error {
+	if alreadyIndexedEvent != nil {
+    // delete it
+		fmt.Println("updating")
+    DeleteNostrEvent(collectionName, alreadyIndexedEvent)
 	}
 
 	url := fmt.Sprintf("%s/collections/%s/documents", typesenseHost, collectionName)
@@ -266,11 +292,7 @@ func indexDocument(collectionName string, doc *AMBMetadata, update bool) error {
 	if err != nil {
 		return err
 	}
-
 	method := http.MethodPost
-	if update {
-		method = http.MethodPatch
-	}
 
 	req, err := http.NewRequest(method, url, bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -427,9 +449,12 @@ func SearchResources(collectionName, searchStr string) ([]nostr.Event, error) {
 		return nil, fmt.Errorf("search failed with status code %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Parse the search response
+	return parseSearchResponse(body)
+}
+
+func parseSearchResponse(responseBody []byte) ([]nostr.Event, error) {
 	var searchResponse SearchResponse
-	if err := json.Unmarshal(body, &searchResponse); err != nil {
+	if err := json.Unmarshal(responseBody, &searchResponse); err != nil {
 		return nil, fmt.Errorf("error parsing search response: %v", err)
 	}
 

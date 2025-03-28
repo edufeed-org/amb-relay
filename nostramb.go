@@ -156,8 +156,9 @@ type NostrMetadata struct {
 
 // AMBMetadata represents the full metadata structure
 type AMBMetadata struct {
-	// Document ID, same a d-tag
+  // Event ID
 	ID          string     `json:"id"`
+	// Document ID
 	D           string     `json:"d"`
 	Type        string     `json:"type"`
 	Name        string     `json:"name"`

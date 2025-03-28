@@ -37,9 +37,8 @@ func main() {
 		khatru.RequestAuth(ctx)
 	})
 
-	relay.StoreEvent = append(relay.StoreEvent)
 	relay.QueryEvents = append(relay.QueryEvents, handleQuery)
-	relay.CountEvents = append(relay.CountEvents, dbts.CountEvents) // use badger for counting events -> TODO switch to typesense?
+	relay.CountEvents = append(relay.CountEvents, handleCount) 
 	relay.DeleteEvent = append(relay.DeleteEvent, handleDelete)
 	relay.ReplaceEvent = append(relay.ReplaceEvent, handleReplaceEvent)
 	relay.Negentropy = true
@@ -55,16 +54,6 @@ func main() {
 
 	fmt.Println("running on :3334")
 	http.ListenAndServe(":3334", relay)
-}
-
-func handleDelete(ctx context.Context, event *nostr.Event) error {
-	DeleteNostrEvent(collectionName, event)
-	return nil
-}
-
-func handleReplaceEvent(ctx context.Context, event *nostr.Event) error {
-	IndexNostrEvent(collectionName, event)
-	return nil
 }
 
 func handleQuery(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, error) {
@@ -84,3 +73,20 @@ func handleQuery(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, e
 	}()
 	return ch, nil
 }
+
+func handleCount(ctx context.Context, filter nostr.Filter) (int64, error) {
+  CountEvents(collectionName, filter)
+  return 0, nil
+}
+
+func handleDelete(ctx context.Context, event *nostr.Event) error {
+  fmt.Println("delete event", event)
+	DeleteNostrEvent(collectionName, event)
+	return nil
+}
+
+func handleReplaceEvent(ctx context.Context, event *nostr.Event) error {
+	IndexNostrEvent(collectionName, event)
+	return nil
+}
+
