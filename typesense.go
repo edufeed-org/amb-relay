@@ -14,8 +14,6 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
-// TODO fix all the request stuff and put it in a dedicated function
-
 type CollectionSchema struct {
 	Name                string  `json:"name"`
 	Fields              []Field `json:"fields"`
@@ -31,10 +29,10 @@ type Field struct {
 }
 
 type SearchResponse struct {
-	Found   int                      `json:"found"`
-	Hits    []map[string]interface{} `json:"hits"`
-	Page    int                      `json:"page"`
-	Request map[string]interface{}   `json:"request"`
+	Found   int              `json:"found"`
+	Hits    []map[string]any `json:"hits"`
+	Page    int              `json:"page"`
+	Request map[string]any   `json:"request"`
 }
 
 // CheckOrCreateCollection checks if a collection exists and creates it if it doesn't
@@ -90,8 +88,6 @@ func collectionExists(name string) (bool, error) {
 
 // create a typesense collection
 func createCollection(name string) error {
-	url := fmt.Sprintf("%s/collections", typesenseHost)
-
 	schema := CollectionSchema{
 		Name: name,
 		Fields: []Field{
@@ -151,25 +147,14 @@ func createCollection(name string) error {
 		EnableNestedFields:  true,
 	}
 
+	url := fmt.Sprintf("%s/collections", typesenseHost)
+
 	jsonData, err := json.Marshal(schema)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("X-TYPESENSE-API-KEY", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+	resp, err := makehttpRequest(url, http.MethodPost, jsonData)
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
@@ -179,40 +164,47 @@ func createCollection(name string) error {
 	return nil
 }
 
+// Makes an http request to typesense
+func makehttpRequest(url string, method string, reqBody []byte) (*http.Response, error) {
+	req, err := http.NewRequest(method, url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("X-TYPESENSE-API-KEY", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	return resp, nil
+}
+
 // TODO Count events
 func CountEvents(collectionName string, filter nostr.Filter) (int64, error) {
 	fmt.Println("filter", filter)
 	// search by author
-
 	// search by d-tag
-
 	return 0, nil
 }
 
 // Delete a nostr event from the index
 func DeleteNostrEvent(collectionName string, event *nostr.Event) error {
-  fmt.Println("deleting event")
+	fmt.Println("deleting event")
 	d := event.Tags.GetD()
 
 	url := fmt.Sprintf(
 		"%s/collections/%s/documents?filter_by=d:=%s&&eventPubKey:=%s",
 		typesenseHost, collectionName, d, event.PubKey)
-	fmt.Println("url", url)
-	req, err := http.NewRequest(http.MethodDelete, url, nil)
+
+	resp, err := makehttpRequest(url, http.MethodDelete, nil)
 	if err != nil {
 		return err
 	}
-
-	req.Header.Set("X-TYPESENSE-API-KEY", apiKey)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-
-	if err != nil {
-		return err
-	}
-
-	defer resp.Body.Close()
 
 	// Any status code other than 200 is an error
 	if resp.StatusCode != http.StatusOK {
@@ -239,37 +231,20 @@ func eventAlreadyIndexed(collectionName string, doc *AMBMetadata) (*nostr.Event,
 	url := fmt.Sprintf(
 		"%s/collections/%s/documents/search?filter_by=d:=%s&&eventPubKey:=%s&q=&query_by=d,eventPubKey",
 		typesenseHost, collectionName, doc.D, doc.EventPubKey)
-	fmt.Println("url", url)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("X-TYPESENSE-API-KEY", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
+	resp, err := makehttpRequest(url, http.MethodGet, nil)
 	body, _ := io.ReadAll(resp.Body)
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("failed to index document, status: %d, body: %s", resp.StatusCode, string(body))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Search for event failed, status: %d, body: %s", resp.StatusCode, string(body))
 	}
 
 	events, err := parseSearchResponse(body)
 	if err != nil {
-    return nil, fmt.Errorf("got parsing search response: %v", err)
+		return nil, fmt.Errorf("Error while parsing search response: %v", err)
 	}
-	fmt.Println("response", events)
 
-  // Check if we found any events
+	// Check if we found any events
 	if len(events) == 0 {
 		return nil, nil
 	}
@@ -279,9 +254,8 @@ func eventAlreadyIndexed(collectionName string, doc *AMBMetadata) (*nostr.Event,
 // Index a document in Typesense
 func indexDocument(collectionName string, doc *AMBMetadata, alreadyIndexedEvent *nostr.Event) error {
 	if alreadyIndexedEvent != nil {
-    // delete it
-		fmt.Println("updating")
-    DeleteNostrEvent(collectionName, alreadyIndexedEvent)
+		fmt.Println("deleting old event for new one")
+		DeleteNostrEvent(collectionName, alreadyIndexedEvent)
 	}
 
 	url := fmt.Sprintf("%s/collections/%s/documents", typesenseHost, collectionName)
@@ -290,25 +264,7 @@ func indexDocument(collectionName string, doc *AMBMetadata, alreadyIndexedEvent 
 	if err != nil {
 		return err
 	}
-	method := http.MethodPost
-
-	req, err := http.NewRequest(method, url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("X-TYPESENSE-API-KEY", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-
-	// Do the request
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
+	resp, err := makehttpRequest(url, http.MethodPost, jsonData)
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
@@ -422,20 +378,7 @@ func SearchResources(collectionName, searchStr string) ([]nostr.Event, error) {
 	// Debug information
 	fmt.Printf("Search URL: %s\n", searchURL)
 
-	// Create request
-	req, err := http.NewRequest(http.MethodGet, searchURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error creating search request: %v", err)
-	}
-	req.Header.Set("X-TYPESENSE-API-KEY", apiKey)
-
-	// Execute the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("error executing search request: %v", err)
-	}
-	defer resp.Body.Close()
+	resp, err := makehttpRequest(searchURL, http.MethodGet, nil)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -460,7 +403,7 @@ func parseSearchResponse(responseBody []byte) ([]nostr.Event, error) {
 
 	for _, hit := range searchResponse.Hits {
 		// Extract the document from the hit
-		docMap, ok := hit["document"].(map[string]interface{})
+		docMap, ok := hit["document"].(map[string]AMBMetadata)
 		if !ok {
 			return nil, fmt.Errorf("invalid document format in search results")
 		}
