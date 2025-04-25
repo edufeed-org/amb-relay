@@ -7,3 +7,40 @@ services:
     volumes:
       - ./typesense-data:/data
     command: '--data-dir /data --api-key=xyz --enable-cors'
+    networks:
+      - amb-network
+
+  amb-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.relay
+    restart: on-failure
+    ports:
+      - "3334:3334"
+    depends_on:
+      - typesense
+    environment:
+      - NAME=${NAME}
+      - PUBKEY=${PUBKEY}
+      - DESCRIPTION=${DESCRIPTION}
+      - ICON=${ICON}
+      - TS_APIKEY=${TS_APIKEY}
+      - TS_HOST=http://typesense:8108
+      - TS_COLLECTION=${TS_COLLECTION}
+    networks:
+      - amb-network
+    # Use a custom entry point that checks if Typesense is ready before starting the relay
+    entrypoint: >
+      /bin/sh -c "
+        echo 'Waiting for Typesense to be ready...'
+        while ! nc -z typesense 8108; do
+          sleep 1
+        done
+        echo 'Typesense is ready! Starting AMB relay...'
+        ./amb-relay
+      "
+
+networks:
+  amb-network:
+    driver: bridge
+
