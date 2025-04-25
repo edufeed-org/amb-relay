@@ -5,8 +5,12 @@ go 1.24.1
 require (
 	github.com/fiatjaf/eventstore v0.16.4
 	github.com/fiatjaf/khatru v0.17.5
-	github.com/nbd-wtf/go-nostr v0.51.7
+	github.com/nbd-wtf/go-nostr v0.51.8
 )
+
+require github.com/edufeed-org/eventstore v0.0.0-00010101000000-000000000000
+
+replace github.com/edufeed-org/eventstore => ../eventstore
 
 require (
 	fiatjaf.com/lib v0.2.0 // indirect
@@ -28,6 +32,7 @@ require (
 	github.com/fasthttp/websocket v1.5.12 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/flatbuffers v24.12.23+incompatible // indirect
+	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
