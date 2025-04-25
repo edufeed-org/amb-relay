@@ -1,3 +1,6 @@
 typesense-data/
 .env
 
+go.work
+go.work.sum
+

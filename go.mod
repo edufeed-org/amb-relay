@@ -8,9 +8,7 @@ require (
 	github.com/nbd-wtf/go-nostr v0.51.8
 )
 
-require github.com/edufeed-org/eventstore v0.0.0-00010101000000-000000000000
-
-replace github.com/edufeed-org/eventstore => ../eventstore
+require github.com/edufeed-org/eventstore v0.0.1
 
 require (
 	fiatjaf.com/lib v0.2.0 // indirect
