@@ -28,8 +28,8 @@ github.com/decred/dcrd/crypto/blake256 v1.1.0/go.mod h1:2OfgNZ5wDpcsFmHmCK5gZTPc
 github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 h1:NMZiJj8QnKe1LgsbDayM4UoHwbvwDRwnI3hwNaAHRnc=
 github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0/go.mod h1:ZXNYxsqcloTdSy/rNShjYzMhyjf0LaoftYK0p+A3h40=
 github.com/dvyukov/go-fuzz v0.0.0-20200318091601-be3528f3a813/go.mod h1:11Gm+ccJnvAhCNLlf5+cS9KjtbaD5I5zaZpFMsTHWTw=
-github.com/edufeed-org/eventstore v0.0.1 h1:uBtL9KktAs/VmpudpInn+qwof/wkQQpjCzBrWX7jcwQ=
-github.com/edufeed-org/eventstore v0.0.1/go.mod h1:XXV7NvExPvxqkr8nCEv7eVLTlaGV+pCwIp3ACb2yr/M=
+github.com/edufeed-org/eventstore v0.0.2 h1:/oILNei+YePPLtJxdHXrI1tDLbRJDYX7Pixmf4JwByk=
+github.com/edufeed-org/eventstore v0.0.2/go.mod h1:/eL0tFR6WFDXSMglhbcF2tKKanr4vdzMlIcS3jBKFdY=
 github.com/fasthttp/websocket v1.5.12 h1:e4RGPpWW2HTbL3zV0Y/t7g0ub294LkiuXXUuTOUInlE=
 github.com/fasthttp/websocket v1.5.12/go.mod h1:I+liyL7/4moHojiOgUOIKEWm9EIxHqxZChS+aMFltyg=
 github.com/fiatjaf/eventstore v0.16.4 h1:pENYeuhawxMxlJk8HpRy3pb2oap0fwbphzUgsy7QPws=
