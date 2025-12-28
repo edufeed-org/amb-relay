@@ -43,4 +43,3 @@ services:
 networks:
   amb-network:
     driver: bridge
-

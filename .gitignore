@@ -4,3 +4,5 @@ typesense-data/
 go.work
 go.work.sum
 
+amb-relay.code-workspace
+amb-relay
