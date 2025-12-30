@@ -9,6 +9,63 @@ Based on the [khatru](https://github.com/fiatjaf/khatru) relay.
 3. Start typesense with `docker compose up -d typesense`
 4. Start relay with `go run .`
 
+## Environment Configuration
+
+When deploying, you need to configure the following environment variables in your `.env` file:
+
+### Relay Metadata
+- `NAME`: Your relay's display name (e.g., "AMB Relay")
+- `PUBKEY`: Your Nostr public key
+- `DESCRIPTION`: A description of your relay (e.g., "AMB Metadata Relay")
+- `ICON`: URL to your relay's icon image
+
+### Typesense Configuration
+
+#### `TS_APIKEY`
+The API key for authenticating with Typesense.
+
+- **For local development/default docker-compose**: Use `xyz` (as configured in `docker-compose.yml` via `--api-key=xyz`)
+- **For production**: Generate a secure random string and use the same value in both your Typesense server config and this variable
+
+#### `TS_HOST`
+The URL where Typesense is accessible.
+
+- **For local development** (running relay with `go run .`): `http://localhost:8108`
+- **For Docker Compose deployment**: This is automatically set to `http://typesense:8108` in docker-compose.yml, so you can leave it empty in `.env`
+- **For external Typesense instance**: Use the full URL (e.g., `https://your-typesense-server.com:8108`)
+
+#### `TS_COLLECTION`
+The name of the Typesense collection to store/query events. This is a logical name you choose.
+
+- **Suggested value**: `amb_events` or `nostr_events` or any descriptive name
+- This collection will be created automatically if it doesn't exist
+
+### Example `.env` files
+
+**For local development:**
+```env
+NAME="AMB Relay"
+PUBKEY="your-nostr-pubkey"
+DESCRIPTION="AMB Metadata Relay"
+ICON="https://example.com/icon.png"
+TS_APIKEY="xyz"
+TS_HOST="http://localhost:8108"
+TS_COLLECTION="amb_events"
+```
+
+**For Docker Compose:**
+```env
+NAME="AMB Relay"
+PUBKEY="your-nostr-pubkey"
+DESCRIPTION="AMB Metadata Relay"
+ICON="https://example.com/icon.png"
+TS_APIKEY="xyz"
+TS_HOST=""
+TS_COLLECTION="amb_events"
+```
+
+> **Security Note**: For production deployments, change the default `xyz` API key in both `docker-compose.yml` and your `.env` file to a secure random string.
+
 ## Development vs Production
 
 ### Local Development
