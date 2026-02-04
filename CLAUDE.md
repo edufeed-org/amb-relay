@@ -30,20 +30,33 @@ cd ../nostrlib/eventstore/typesense30142 && go test ./...
 ## Architecture
 
 ```
-Nostr Client → Khatru Relay (:3334) → TSBackend → Typesense (:8108)
+Nostr Client → Khatru Relay (:3334) ─┬→ Typesense (:8108)  [search index]
+              NIP-86 HTTP API ────────┘  BoltDB             [raw events + bans]
 ```
 
-**Main Entry Point:** `main.go` - Sets up khatru relay, connects TSBackend via `UseEventstore()`, enables NIP-42 auth and Negentropy protocol.
+**Main Entry Point:** `main.go` - Sets up khatru relay with dual-write to Typesense (search) and BoltDB (raw persistence), NIP-42 auth, NIP-86 management API, and Negentropy protocol.
+
+**Management:** `management.go` - BoltDB-backed store for ban lists (pubkeys, events) and Typesense schema configuration, sharing the same bbolt database as the event store.
+
+**Reindexer:** `reindex.go` - Async reindex from BoltDB to Typesense with progress tracking, triggered via NIP-86 `reindex` method.
 
 **Event Flow:**
+- Banned pubkeys are rejected on submission (checked before validation)
 - Only accepts kind 30142 events (AMB educational metadata)
-- Events are indexed in Typesense with full-text search capability
+- Events are saved to both BoltDB (raw) and Typesense (indexed)
+- Queries go through Typesense for full-text search capability
 - Queries support NIP-01 filter fields, tag filters, and NIP-50 search — see [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md) for full query documentation
+
+**Typesense Schema Management:**
+- Custom NIP-86 methods (`getcollectionschema`, `updatecollectionschema`, `resetcollectionschema`, `reindex`, `getreindexstatus`) via khatru's `Generic` handler
+- Schema config persisted in BoltDB; on startup, custom schema (if stored) overrides the hardcoded default
+- Reindex drops the Typesense collection and rebuilds from BoltDB events
 
 ## Key Dependencies
 
 - **nostrlib** (`fiatjaf.com/nostr`): Fork of nostr libraries including khatru relay framework and eventstore — hosted at [git.edufeed.org/edufeed/nostrlib](https://git.edufeed.org/edufeed/nostrlib)
 - **eventstore/typesense30142**: Typesense wrapper for kind 30142 events (part of nostrlib)
+- **eventstore/boltdb**: BoltDB wrapper for raw event persistence (part of nostrlib)
 
 ## Local Development with eventstore
 
@@ -91,6 +104,8 @@ Required in `.env` (copy from `.env.example`):
 - `TS_APIKEY`: Typesense API key (default: `xyz` for local dev)
 - `TS_HOST`: Typesense URL (`http://localhost:8108` for local dev)
 - `TS_COLLECTION`: Collection name for events
+- `DB_PATH`: BoltDB file path (default: `./data/relay.db`)
+- `ADMIN_PUBKEYS`: Comma-separated hex pubkeys for NIP-86 management API access (in addition to `PUBKEY`)
 
 ## Testing
 

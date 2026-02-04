@@ -1,4 +1,5 @@
 typesense-data/
+data/
 .env
 
 go.work

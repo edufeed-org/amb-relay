@@ -25,6 +25,13 @@ The relay listens on `:3334`, Typesense on `:8108`.
 | `TS_HOST` | Typesense URL | `http://localhost:8108` | leave empty (auto-set to `http://typesense:8108`) |
 | `TS_COLLECTION` | Collection name | `amb_events` | `amb_events` |
 
+### Storage & Management
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DB_PATH` | Path to BoltDB file for raw event persistence | `./data/relay.db` |
+| `ADMIN_PUBKEYS` | Comma-separated hex pubkeys for NIP-86 management API access (in addition to `PUBKEY`) | empty |
+
 ## Deployment
 
 Docker Compose runs both Typesense and the relay:
@@ -129,14 +136,54 @@ The relay only accepts kind 30142 events and requires:
 - A `d` tag (resource identifier)
 - A `name` tag (resource title)
 
-Events missing these tags are rejected.
+Events from banned pubkeys are rejected. Events missing these tags are also rejected.
+
+## NIP-86 Management API
+
+The relay supports [NIP-86](https://github.com/nostr-protocol/nips/blob/master/86.md) for remote management via HTTP. Send a POST request to the relay URL with `Content-Type: application/nostr+json+rpc` and a [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md) `Authorization` header.
+
+Only the relay operator (`PUBKEY`) and additional admins (`ADMIN_PUBKEYS`) are authorized.
+
+### Supported methods
+
+| Method | Description |
+|--------|-------------|
+| `supportedmethods` | List available methods |
+| `banpubkey` | Ban a pubkey from publishing |
+| `listbannedpubkeys` | List all banned pubkeys |
+| `allowpubkey` | Remove a pubkey ban |
+| `banevent` | Ban an event by ID |
+| `listbannedevents` | List all banned event IDs |
+| `allowevent` | Remove an event ban |
+| `changerelayname` | Update relay name (in memory) |
+| `changerelaydescription` | Update relay description |
+| `changerelayicon` | Update relay icon URL |
+| `stats` | Get relay statistics |
+
+Ban lists are persisted in BoltDB and survive restarts.
+
+### Typesense management methods
+
+These custom methods control the Typesense search index schema, reindexing, and collection settings.
+
+| Method | Params | Description |
+|--------|--------|-------------|
+| `getcollectionschema` | none | Returns the current Typesense collection schema (custom or default) |
+| `updatecollectionschema` | `[{fields: [...], default_sorting_field: "...", enable_nested_fields: bool}]` | Stores a new schema in BoltDB. Does **not** apply until `reindex` is called |
+| `resetcollectionschema` | none | Removes the custom schema, reverting to the hardcoded default |
+| `reindex` | none | Drops the Typesense collection, recreates it with the stored schema, and re-indexes all events from BoltDB. Runs asynchronously |
+| `getreindexstatus` | none | Returns `{running, total, indexed, errors, error}` |
+
+Schema changes are deferred — `updatecollectionschema` only stores the schema, and `reindex` applies it. During reindex the relay cannot serve search results (drop + rebuild approach).
 
 ## Architecture
 
 ```
-Nostr Client → Khatru Relay (:3334) → TSBackend → Typesense (:8108)
+Nostr Client → Khatru Relay (:3334) ─┬→ Typesense (:8108)  [search index]
+                                      └→ BoltDB             [raw event storage]
 ```
 
 - **Khatru**: Nostr relay framework (part of nostrlib fork)
-- **TSBackend**: Typesense eventstore for kind 30142 (part of nostrlib fork)
-- **Typesense**: Full-text search engine with nested field support
+- **Typesense**: Full-text search engine — queries go here
+- **BoltDB**: Embedded key-value store — raw event persistence for backup/reindexing
+- **NIP-86**: HTTP management API for banning, relay metadata, and stats
