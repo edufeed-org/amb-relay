@@ -1,173 +1,142 @@
-# Typesense Relay for AMB Metadata
+# AMB Relay
 
-Based on the [khatru](https://github.com/fiatjaf/khatru) relay.
+A Nostr relay for AMB (Learning Resource Metadata) events (kind 30142). Built on the [khatru](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/khatru) relay framework with [Typesense](https://typesense.org/) as the full-text search backend.
 
 ## Quick Start
 
-1. Copy `.env.example` to `.env`
-2. Add metadata to your relay and typesense connection info
-3. Start typesense with `docker compose up -d typesense`
-4. Start relay with `go run .`
+1. Copy `.env.example` to `.env` and fill in your values
+2. Run `docker compose up`
 
-## Environment Configuration
+The relay listens on `:3334`, Typesense on `:8108`.
 
-When deploying, you need to configure the following environment variables in your `.env` file:
+## Environment Variables
 
 ### Relay Metadata
-- `NAME`: Your relay's display name (e.g., "AMB Relay")
-- `PUBKEY`: Your Nostr public key
-- `DESCRIPTION`: A description of your relay (e.g., "AMB Metadata Relay")
+- `NAME`: Your relay's display name
+- `PUBKEY`: Your Nostr public key (hex)
+- `DESCRIPTION`: A description of your relay
 - `ICON`: URL to your relay's icon image
 
 ### Typesense Configuration
 
-#### `TS_APIKEY`
-The API key for authenticating with Typesense.
+| Variable | Description | Local dev | Docker Compose |
+|----------|-------------|-----------|----------------|
+| `TS_APIKEY` | Typesense API key | `xyz` | `xyz` (change for production) |
+| `TS_HOST` | Typesense URL | `http://localhost:8108` | leave empty (auto-set to `http://typesense:8108`) |
+| `TS_COLLECTION` | Collection name | `amb_events` | `amb_events` |
 
-- **For local development/default docker-compose**: Use `xyz` (as configured in `docker-compose.yml` via `--api-key=xyz`)
-- **For production**: Generate a secure random string and use the same value in both your Typesense server config and this variable
+## Deployment
 
-#### `TS_HOST`
-The URL where Typesense is accessible.
-
-- **For local development** (running relay with `go run .`): `http://localhost:8108`
-- **For Docker Compose deployment**: This is automatically set to `http://typesense:8108` in docker-compose.yml, so you can leave it empty in `.env`
-- **For external Typesense instance**: Use the full URL (e.g., `https://your-typesense-server.com:8108`)
-
-#### `TS_COLLECTION`
-The name of the Typesense collection to store/query events. This is a logical name you choose.
-
-- **Suggested value**: `amb_events` or `nostr_events` or any descriptive name
-- This collection will be created automatically if it doesn't exist
-
-### Example `.env` files
-
-**For local development:**
-```env
-NAME="AMB Relay"
-PUBKEY="your-nostr-pubkey"
-DESCRIPTION="AMB Metadata Relay"
-ICON="https://example.com/icon.png"
-TS_APIKEY="xyz"
-TS_HOST="http://localhost:8108"
-TS_COLLECTION="amb_events"
-```
-
-**For Docker Compose:**
-```env
-NAME="AMB Relay"
-PUBKEY="your-nostr-pubkey"
-DESCRIPTION="AMB Metadata Relay"
-ICON="https://example.com/icon.png"
-TS_APIKEY="xyz"
-TS_HOST=""
-TS_COLLECTION="amb_events"
-```
-
-> **Security Note**: For production deployments, change the default `xyz` API key in both `docker-compose.yml` and your `.env` file to a secure random string.
-
-## Development vs Production
-
-### Local Development
-
-For local development, you want changes to the `eventstore` module to be immediately available without publishing to GitHub.
-
-**Prerequisites:**
-
-1. Clone both repos side-by-side:
-   ```
-   coding/edufeed/
-   ├── amb-relay/
-   └── eventstore/
-   ```
-
-2. Create a `go.work` file in `amb-relay/`:
-   ```go
-   go 1.24.1
-
-   use (
-       .
-       ../eventstore
-   )
-   ```
-   
-   > **Note:** `go.work` is already in `.gitignore` - never commit it.
-
-**Running locally:**
-
-```bash
-# Start only Typesense in Docker
-docker compose up -d typesense
-
-# Set the Typesense host (or add to .env)
-export TS_HOST=http://localhost:8108
-
-# Run the relay directly
-go run .
-```
-
-**Why this works:** The `go.work` file tells Go to use the local `../eventstore` directory instead of downloading from GitHub. Any changes you make to `eventstore` are immediately available when you restart the relay.
-
-### Production Deployment
-
-For production, Docker Compose runs both services:
+Docker Compose runs both Typesense and the relay:
 
 ```bash
 docker compose up -d --build
 ```
 
-**How dependencies work:**
-- Docker builds use `go.mod` (not `go.work`)
-- `go.mod` downloads dependencies from GitHub
-- `go.work` is ignored because it's in `.dockerignore` and `.gitignore`
+The Docker build downloads all dependencies from git.edufeed.org — no additional repos or local files needed.
 
-**When you need to update the eventstore dependency:**
+## Development
 
-1. Push and tag a new version in the eventstore repo:
-   ```bash
-   cd ../eventstore
-   git add .
-   git commit -m "Your changes"
-   git tag v0.0.X
-   git push origin main --tags
+### Setup
+
+After cloning, enable the pre-push hook that runs E2E tests before every push:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+To skip the hook when needed: `git push --no-verify`
+
+### Simple: everything in Docker
+
+```bash
+docker compose up
+```
+
+### With local eventstore changes
+
+The eventstore (`typesense30142`) lives in the [nostrlib](https://git.edufeed.org/edufeed/nostrlib) fork. To develop both simultaneously:
+
+1. Clone both repos side-by-side:
+   ```
+   edufeed/
+   ├── go.work          # workspace file
+   ├── amb-relay/
+   └── nostrlib/
    ```
 
-2. Update go.mod in amb-relay:
-   ```bash
-   cd ../amb-relay
-   go get github.com/edufeed-org/eventstore@v0.0.X
+2. Create `edufeed/go.work`:
+   ```go
+   go 1.25
+
+   use (
+       ./amb-relay
+       ./nostrlib
+   )
    ```
 
-3. Rebuild Docker images:
+3. Run Typesense in Docker, relay locally:
    ```bash
-   docker compose up -d --build
+   docker compose up -d typesense
+   go run .
    ```
 
-### Common Pitfall
+The `go.work` file tells Go to use local nostrlib instead of the version from git.edufeed.org. Changes to the eventstore are immediately available on restart.
 
-**Problem:** "I made changes to eventstore but Docker isn't using them!"
+### Updating the nostrlib dependency
 
-**Cause:** Docker builds ignore `go.work` and use `go.mod`, which downloads the published version from GitHub.
+After pushing changes to nostrlib on git.edufeed.org:
 
-**Solution:** 
-- For development: Run the relay with `go run .` (not in Docker)
-- For production: Tag and push a new eventstore version, update go.mod, then rebuild
+```bash
+# Get the new pseudo-version
+GOWORK=off go list -m git.edufeed.org/edufeed/nostrlib@latest
 
-## Examples
+# Update go.mod replace directive with the new version
+# Then run:
+GOWORK=off go mod tidy
+```
+
+## Testing
+
+### nak CLI
 
 ```bash
 # Full-text search
-nak req --search "pythagoras" ws://localhost:3334 | jq .
+nak req --search "mathematik" -k 30142 ws://localhost:3334
 
-# Query by kind
-nak req -k 30142 -l 2 ws://localhost:3334 | jq .
+# Field-specific search
+nak req --search "publisher.name:e-teaching.org" -k 30142 ws://localhost:3334
 
-# Field-specific search (publisher name)
-nak req -k 30142 --search "publisher.name:e-teaching.org" ws://localhost:3334 | jq .
+# Time range filter
+nak req --since 1700000000 --until 1800000000 -k 30142 ws://localhost:3334
+
+# Filter by tagged pubkey
+nak req -p <pubkey> -k 30142 ws://localhost:3334
 ```
+
+**Note:** `nak` does not support colon-delimited tag names (`#about:id`, `#learningResourceType:id`). For these filters, use a Go client with `nostr.TagMap`. See the [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md) for full query documentation.
+
+### Direct Typesense debugging
+
+```bash
+curl -H "X-TYPESENSE-API-KEY: $TS_APIKEY" \
+  "$TS_HOST/collections/$TS_COLLECTION/documents/search?q=*&per_page=1"
+```
+
+## Event Validation
+
+The relay only accepts kind 30142 events and requires:
+- A `d` tag (resource identifier)
+- A `name` tag (resource title)
+
+Events missing these tags are rejected.
 
 ## Architecture
 
+```
+Nostr Client → Khatru Relay (:3334) → TSBackend → Typesense (:8108)
+```
+
+- **Khatru**: Nostr relay framework (part of nostrlib fork)
+- **TSBackend**: Typesense eventstore for kind 30142 (part of nostrlib fork)
 - **Typesense**: Full-text search engine with nested field support
-- **Khatru**: Nostr relay framework
-- **eventstore**: Custom Typesense wrapper for Nostr kind:30142 events (AMB metadata)

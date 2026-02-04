@@ -7,8 +7,11 @@ services:
     volumes:
       - ./typesense-data:/data
     command: '--data-dir /data --api-key=xyz --enable-cors'
-    networks:
-      - amb-network
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8108'"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   amb-relay:
     build:
@@ -18,7 +21,8 @@ services:
     ports:
       - "3334:3334"
     depends_on:
-      - typesense
+      typesense:
+        condition: service_healthy
     environment:
       - NAME=${NAME}
       - PUBKEY=${PUBKEY}
@@ -27,19 +31,3 @@ services:
       - TS_APIKEY=${TS_APIKEY}
       - TS_HOST=http://typesense:8108
       - TS_COLLECTION=${TS_COLLECTION}
-    networks:
-      - amb-network
-    # Use a custom entry point that checks if Typesense is ready before starting the relay
-    entrypoint: >
-      /bin/sh -c "
-        echo 'Waiting for Typesense to be ready...'
-        while ! nc -z typesense 8108; do
-          sleep 1
-        done
-        echo 'Typesense is ready! Starting AMB relay...'
-        ./amb-relay
-      "
-
-networks:
-  amb-network:
-    driver: bridge

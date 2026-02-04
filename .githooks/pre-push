@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+echo "=== Running E2E tests before push ==="
+# Redirect stdin from /dev/null — git passes push data on stdin which
+# would leak into nak and other subprocesses, causing query failures.
+bash test_e2e.sh < /dev/null
