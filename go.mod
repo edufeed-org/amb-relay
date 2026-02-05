@@ -2,11 +2,12 @@ module github.com/edufeed-org/amb-relay
 
 go 1.25
 
-replace fiatjaf.com/nostr => git.edufeed.org/edufeed/nostrlib v0.0.0-20260202132631-6b946df7e0d3
+replace fiatjaf.com/nostr => git.edufeed.org/edufeed/nostrlib v0.0.0-20260204112302-c0df2dabfcad
 
 require (
 	fiatjaf.com/nostr v0.0.0
 	github.com/joho/godotenv v1.5.1
+	go.etcd.io/bbolt v1.4.2
 )
 
 require (
@@ -38,4 +39,5 @@ require (
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
 	golang.org/x/net v0.41.0 // indirect
 	golang.org/x/sync v0.15.0 // indirect
+	golang.org/x/sys v0.35.0 // indirect
 )

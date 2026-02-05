@@ -42,8 +42,9 @@ Nostr Client → Khatru Relay (:3334) ─┬→ Typesense (:8108)  [search index
 
 **Event Flow:**
 - Banned pubkeys are rejected on submission (checked before validation)
-- Only accepts kind 30142 events (AMB educational metadata)
-- Events are saved to both BoltDB (raw) and Typesense (indexed)
+- Accepts kind 30142 events (AMB educational metadata) and kind 5 deletion events (NIP-09)
+- Kind 30142 events are saved to both BoltDB (raw) and Typesense (indexed); kind 5 events are stored in BoltDB only
+- Deletion events remove the referenced event from both BoltDB and Typesense (author must match)
 - Queries go through Typesense for full-text search capability
 - Queries support NIP-01 filter fields, tag filters, and NIP-50 search — see [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md) for full query documentation
 
@@ -120,6 +121,9 @@ nak req --search "publisher.name:e-teaching.org" -k 30142 ws://localhost:3334
 
 # Time range filter
 nak req --since 1700000000 --until 1800000000 -k 30142 ws://localhost:3334
+
+# Delete an event (NIP-09) — by addressable event reference
+nak event -k 5 -t "a=30142:<author-pubkey>:<d-tag>" --sec <your-secret> ws://localhost:3334
 ```
 
 **Limitation:** `nak` does not support colon-delimited tag names (`#about:id`, `#learningResourceType:id`). For these filters, use a Go client with `nostr.TagMap`:

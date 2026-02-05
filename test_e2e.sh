@@ -153,6 +153,15 @@ publish_as() {
   echo "$result"
 }
 
+delete_event() {
+  local sec="$1"
+  local tag_type="$2"   # "e" or "a"
+  local tag_value="$3"
+  local result
+  result=$(nak event -k 5 -t "${tag_type}=${tag_value}" --sec "$sec" --auth "$RELAY" 2>&1) || true
+  echo "$result"
+}
+
 query_count() {
   local count
   count=$(nak req "$@" --sec "$SEC" --auth "$RELAY" 2>/dev/null | wc -l) || true
@@ -403,6 +412,123 @@ assert_count "time range since/until" 3 \
 # 10. Limit
 assert_count "limit=1" 1 \
   -k 30142 -l 1
+
+# ============================================================
+# Combination filter tests (AND between different attributes)
+# ============================================================
+echo ""
+echo "--- Combination filter tests ---"
+
+# 11. Author + keyword
+assert_count "author + keyword (AND)" 1 \
+  -k 30142 -a "$PUB" -t "t=physics"
+
+# 12. Author + d-tag
+assert_count "author + d-tag (AND)" 1 \
+  -k 30142 -a "$PUB" -d "https://example.org/courses/math-201"
+
+# 13. Keyword + time range
+assert_count "keyword + time range (AND)" 1 \
+  -k 30142 -t "t=chemistry" --since "$BEFORE" --until "$AFTER"
+
+# 14. Search + author
+assert_count "search + author (AND)" 1 \
+  -k 30142 --search "physics" -a "$PUB"
+
+# 15. p-tag + keyword
+assert_count "p-tag + keyword (AND)" 1 \
+  -k 30142 -p "$TAGGED_PUB" -t "t=mathematics"
+
+# 16. Author + non-existent keyword (AND yields empty)
+assert_count "author + nonexistent keyword (AND=0)" 0 \
+  -k 30142 -a "$PUB" -t "t=nonexistent"
+
+# 17. Search + time range
+assert_count "search + time range (AND)" 1 \
+  -k 30142 --search "chemistry" --since "$BEFORE" --until "$AFTER"
+
+# 18. Multiple keywords (OR within same tag attribute)
+assert_count "multiple keywords (OR within #t)" 2 \
+  -k 30142 -t "t=physics" -t "t=chemistry"
+
+# ============================================================
+# NIP-09 Deletion tests
+# ============================================================
+echo ""
+echo "--- NIP-09 Deletion tests ---"
+
+# Publish a dedicated event for deletion
+DELETE_TEST_EVENT=$(cat <<EOF
+{
+  "tags": [
+    ["d", "https://example.org/courses/delete-test-resource"],
+    ["type", "LearningResource"],
+    ["name", "Delete Test Resource"],
+    ["inLanguage", "en"],
+    ["t", "deletetest"]
+  ],
+  "content": "This resource will be deleted"
+}
+EOF
+)
+echo "  Publishing event for deletion test..."
+publish "$DELETE_TEST_EVENT"
+sleep 2
+
+# Verify it exists via relay query
+assert_count "deletion target exists via relay" 1 \
+  -k 30142 -d "https://example.org/courses/delete-test-resource"
+
+# Verify it exists in Typesense directly
+TS_HITS=$(curl -s -G -H "X-TYPESENSE-API-KEY: xyz" \
+  "http://localhost:8108/collections/amb_e2e_test/documents/search" \
+  --data-urlencode "q=*" \
+  --data-urlencode "filter_by=d:=https://example.org/courses/delete-test-resource" \
+  | jq '.found')
+if [ "$TS_HITS" -eq 1 ]; then
+  printf "${GREEN}PASS${NC}: deletion target exists in Typesense\n"
+  PASS=$((PASS + 1))
+else
+  printf "${RED}FAIL${NC}: deletion target not found in Typesense (found: %s)\n" "$TS_HITS"
+  FAIL=$((FAIL + 1))
+fi
+
+# Delete via a-tag (addressable event reference)
+echo "  Sending deletion event..."
+DEL_OUTPUT=$(delete_event "$SEC" "a" "30142:${PUB}:https://example.org/courses/delete-test-resource")
+if echo "$DEL_OUTPUT" | grep -q "success"; then
+  printf "${GREEN}PASS${NC}: deletion event accepted\n"
+  PASS=$((PASS + 1))
+else
+  printf "${RED}FAIL${NC}: deletion event not accepted (got: %s)\n" "$DEL_OUTPUT"
+  FAIL=$((FAIL + 1))
+fi
+sleep 1
+
+# Verify event gone from relay
+assert_count "deleted event gone from relay" 0 \
+  -k 30142 -d "https://example.org/courses/delete-test-resource"
+
+# Verify event gone from Typesense
+TS_HITS_AFTER=$(curl -s -G -H "X-TYPESENSE-API-KEY: xyz" \
+  "http://localhost:8108/collections/amb_e2e_test/documents/search" \
+  --data-urlencode "q=*" \
+  --data-urlencode "filter_by=d:=https://example.org/courses/delete-test-resource" \
+  | jq '.found')
+if [ "$TS_HITS_AFTER" -eq 0 ]; then
+  printf "${GREEN}PASS${NC}: deleted event gone from Typesense\n"
+  PASS=$((PASS + 1))
+else
+  printf "${RED}FAIL${NC}: deleted event still in Typesense (found: %s)\n" "$TS_HITS_AFTER"
+  FAIL=$((FAIL + 1))
+fi
+
+# Non-author cannot delete someone else's event
+echo "  Testing non-author deletion rejection..."
+NON_AUTHOR_DEL=$(delete_event "$NONADMIN_SEC" "a" "30142:${PUB}:https://example.org/courses/physics-101")
+# Event A should still exist
+assert_count "event survives non-author deletion attempt" 1 \
+  -k 30142 -d "https://example.org/courses/physics-101"
 
 # ============================================================
 # Rejection tests

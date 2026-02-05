@@ -20,10 +20,11 @@ import (
 )
 
 func main() {
-	// Load .env file
-	err := godotenv.Load()
-	if err != nil {
-		fmt.Printf("Error loading .env file: %v\n", err)
+	// Load .env file (optional — Docker passes env vars directly)
+	if err := godotenv.Load(); err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Printf("Error loading .env file: %v\n", err)
+		}
 	}
 
 	relay := khatru.NewRelay()
@@ -120,7 +121,10 @@ func main() {
 	}
 	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error {
 		boltDB.SaveEvent(event)
-		return tsDB.SaveEvent(event)
+		if event.Kind == 30142 {
+			return tsDB.SaveEvent(event)
+		}
+		return nil
 	}
 	relay.ReplaceEvent = func(ctx context.Context, event nostr.Event) error {
 		boltDB.ReplaceEvent(event)
@@ -137,6 +141,9 @@ func main() {
 	relay.OnEvent = func(ctx context.Context, event nostr.Event) (reject bool, msg string) {
 		if mgmt.IsPubKeyBanned(event.PubKey) {
 			return true, "pubkey is banned"
+		}
+		if event.Kind == nostr.KindDeletion {
+			return false, ""
 		}
 		if event.Kind != 30142 {
 			return true, "only kind 30142 events are accepted"

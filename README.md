@@ -119,6 +119,15 @@ nak req --since 1700000000 --until 1800000000 -k 30142 ws://localhost:3334
 
 # Filter by tagged pubkey
 nak req -p <pubkey> -k 30142 ws://localhost:3334
+
+# Delete an event (NIP-09) — by addressable event reference
+nak event -k 5 -t "a=30142:<author-pubkey>:<d-tag>" --sec <your-secret> ws://localhost:3334
+
+# Count events (NIP-45)
+nak count -k 30142 ws://localhost:3334
+
+# Count with filters
+nak count -k 30142 --search "physics" ws://localhost:3334
 ```
 
 **Note:** `nak` does not support colon-delimited tag names (`#about:id`, `#learningResourceType:id`). For these filters, use a Go client with `nostr.TagMap`. See the [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md) for full query documentation.
@@ -132,11 +141,15 @@ curl -H "X-TYPESENSE-API-KEY: $TS_APIKEY" \
 
 ## Event Validation
 
-The relay only accepts kind 30142 events and requires:
+The relay accepts kind 30142 events and kind 5 deletion events ([NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md)).
+
+Kind 30142 events require:
 - A `d` tag (resource identifier)
 - A `name` tag (resource title)
 
-Events from banned pubkeys are rejected. Events missing these tags are also rejected.
+Deletion events (kind 5) allow authors to delete their own events by referencing them with `a` tags (addressable) or `e` tags (by ID). Only the original author can delete an event.
+
+Events from banned pubkeys are rejected.
 
 ## NIP-86 Management API
 
