@@ -31,3 +31,5 @@ services:
       - TS_APIKEY=${TS_APIKEY}
       - TS_HOST=http://typesense:8108
       - TS_COLLECTION=${TS_COLLECTION}
+      - EMBED_ENDPOINT=${EMBED_ENDPOINT}
+      - EMBED_TOKEN=${EMBED_TOKEN}
