@@ -38,8 +38,9 @@ The relay listens on `:3334`, Typesense on `:8108`.
 |----------|-------------|---------|
 | `EMBED_ENDPOINT` | URL of embedding service (e.g., `https://embed.edufeed.org/embed`) | empty (disabled) |
 | `EMBED_TOKEN` | Bearer token for embedding service | empty |
+| `SEMANTIC_SEARCH_ENABLED` | Auto-enable semantic search on startup | `false` |
 
-When configured, the relay can perform hybrid search (keyword + vector similarity). Enable via NIP-86 after startup.
+When configured with `SEMANTIC_SEARCH_ENABLED=true`, the relay performs hybrid search (keyword + vector similarity) automatically. Can also be enabled/disabled at runtime via NIP-86.
 
 ## Deployment
 

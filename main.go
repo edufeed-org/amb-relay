@@ -116,6 +116,14 @@ func main() {
 		semanticCfg = DefaultSemanticConfig()
 	}
 
+	// Override enabled state from env var if set
+	if os.Getenv("SEMANTIC_SEARCH_ENABLED") == "true" && embedder != nil {
+		if !semanticCfg.Enabled {
+			semanticCfg.Enabled = true
+			mgmt.SaveSemanticConfig(semanticCfg) // Persist so NIP-86 reflects it
+		}
+	}
+
 	if semanticCfg.Enabled && embedder != nil {
 		tsDB.Embedder = embedder
 		tsDB.EmbedFields = semanticCfg.EmbedFields
