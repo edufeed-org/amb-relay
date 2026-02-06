@@ -32,6 +32,15 @@ The relay listens on `:3334`, Typesense on `:8108`.
 | `DB_PATH` | Path to BoltDB file for raw event persistence | `./data/relay.db` |
 | `ADMIN_PUBKEYS` | Comma-separated hex pubkeys for NIP-86 management API access (in addition to `PUBKEY`) | empty |
 
+### Semantic Search (Optional)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `EMBED_ENDPOINT` | URL of embedding service (e.g., `https://embed.edufeed.org/embed`) | empty (disabled) |
+| `EMBED_TOKEN` | Bearer token for embedding service | empty |
+
+When configured, the relay can perform hybrid search (keyword + vector similarity). Enable via NIP-86 after startup.
+
 ## Deployment
 
 Docker Compose runs both Typesense and the relay:
@@ -128,6 +137,10 @@ nak count -k 30142 ws://localhost:3334
 
 # Count with filters
 nak count -k 30142 --search "physics" ws://localhost:3334
+
+# Semantic search (if enabled)
+# Finds "quantum mechanics" even when searching for related terms
+nak req --search "Heisenberg uncertainty principle" -k 30142 ws://localhost:3334
 ```
 
 **Note:** `nak` does not support colon-delimited tag names (`#about:id`, `#learningResourceType:id`). For these filters, use a Go client with `nostr.TagMap`. See the [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md) for full query documentation.
@@ -188,6 +201,19 @@ These custom methods control the Typesense search index schema, reindexing, and 
 | `getreindexstatus` | none | Returns `{running, total, indexed, errors, error}` |
 
 Schema changes are deferred — `updatecollectionschema` only stores the schema, and `reindex` applies it. During reindex the relay cannot serve search results (drop + rebuild approach).
+
+### Semantic search methods
+
+| Method | Params | Description |
+|--------|--------|-------------|
+| `getsemanticsearchconfig` | none | Returns `{enabled, embed_fields}` |
+| `updatesemanticsearchconfig` | `[{enabled: bool, embed_fields: [...]}]` | Update config and toggle embedding |
+| `enablesemanticsearch` | none | Shortcut to enable with default fields |
+| `disablesemanticsearch` | none | Shortcut to disable |
+
+**Default embed fields:** `name`, `description`, `keywords`, `about`
+
+When enabled, new events are embedded on save and queries use hybrid search (30% vector, 70% keyword weight). Existing events need `reindex` to add embeddings.
 
 ## Architecture
 
