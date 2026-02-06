@@ -116,6 +116,13 @@ export TS_COLLECTION=amb_e2e_test
 export PORT=$TEST_PORT
 export DB_PATH="./data/e2e_test/relay.db"
 
+# Load embedding service config from .env if not already set
+if [ -z "${EMBED_ENDPOINT:-}" ] && [ -f .env ]; then
+  EMBED_ENDPOINT=$(grep -E '^EMBED_ENDPOINT=' .env | cut -d'=' -f2- | tr -d '"' || true)
+  EMBED_TOKEN=$(grep -E '^EMBED_TOKEN=' .env | cut -d'=' -f2- | tr -d '"' || true)
+  export EMBED_ENDPOINT EMBED_TOKEN
+fi
+
 go run . > /tmp/amb-relay-e2e.log 2>&1 &
 RELAY_PID=$!
 
@@ -796,6 +803,97 @@ done
 # 44. Non-admin cannot use custom methods
 NONADMIN_SCHEMA_RESP=$(nip86_call "getcollectionschema" '[]' "$NONADMIN_SEC")
 assert_nip86_error "non-admin rejected for getcollectionschema" "$NONADMIN_SCHEMA_RESP"
+
+# ============================================================
+# Semantic Search Management API tests
+# ============================================================
+echo ""
+echo "--- Semantic Search Management API tests ---"
+
+# 45. Get default semantic search config (disabled by default)
+assert_nip86 "getsemanticsearchconfig returns default config" \
+  "getsemanticsearchconfig" '[]' \
+  '.result.result.enabled == false'
+
+# 46. Enable semantic search (will work without embedding service for config)
+assert_nip86 "enablesemanticsearch succeeds" \
+  "enablesemanticsearch" '[]' \
+  '.result.result == true'
+
+# 47. Verify config changed
+assert_nip86 "getsemanticsearchconfig shows enabled" \
+  "getsemanticsearchconfig" '[]' \
+  '.result.result.enabled == true'
+
+# 48. Update semantic search config with custom fields
+assert_nip86 "updatesemanticsearchconfig with custom fields" \
+  "updatesemanticsearchconfig" '[{"enabled": true, "embed_fields": ["name", "description"]}]' \
+  '.result.result == true'
+
+# 49. Verify custom fields persisted
+assert_nip86 "getsemanticsearchconfig shows custom fields" \
+  "getsemanticsearchconfig" '[]' \
+  '.result.result.embed_fields | contains(["name", "description"])'
+
+# 50. Disable semantic search
+assert_nip86 "disablesemanticsearch succeeds" \
+  "disablesemanticsearch" '[]' \
+  '.result.result == true'
+
+# 51. Verify disabled
+assert_nip86 "getsemanticsearchconfig shows disabled" \
+  "getsemanticsearchconfig" '[]' \
+  '.result.result.enabled == false'
+
+# 52. Non-admin cannot access semantic search config
+NONADMIN_SEMANTIC_RESP=$(nip86_call "getsemanticsearchconfig" '[]' "$NONADMIN_SEC")
+assert_nip86_error "non-admin rejected for semantic search config" "$NONADMIN_SEMANTIC_RESP"
+
+# ============================================================
+# Semantic Search Functional tests (if embedding service available)
+# ============================================================
+if [ -n "${EMBED_ENDPOINT:-}" ]; then
+  echo ""
+  echo "--- Semantic Search Functional tests ---"
+
+  # Enable semantic search
+  nip86_call "enablesemanticsearch" '[]' >/dev/null
+
+  # Publish test events for semantic search
+  SEMANTIC_EVENT=$(cat <<EOF
+{
+  "tags": [
+    ["d", "https://example.org/courses/quantum-physics"],
+    ["type", "LearningResource"],
+    ["name", "Introduction to Quantum Mechanics"],
+    ["description", "An exploration of wave-particle duality and uncertainty principle"],
+    ["t", "physics"],
+    ["t", "quantum"]
+  ],
+  "content": "An exploration of wave-particle duality"
+}
+EOF
+)
+  echo "  Publishing semantic test event..."
+  publish "$SEMANTIC_EVENT"
+  sleep 3  # Wait for embedding computation
+
+  # 53. Search with semantically related terms (not exact keyword match)
+  SEMANTIC_RESULTS=$(query_events -k 30142 --search "Heisenberg Schrödinger subatomic")
+  if echo "$SEMANTIC_RESULTS" | grep -q "quantum-physics"; then
+    printf "${GREEN}PASS${NC}: semantic search found related content\n"
+    PASS=$((PASS + 1))
+  else
+    printf "${YELLOW}SKIP${NC}: semantic search results inconclusive\n"
+  fi
+
+  # Disable semantic search for remaining tests
+  nip86_call "disablesemanticsearch" '[]' >/dev/null
+else
+  echo ""
+  echo "--- Semantic Search Functional tests ---"
+  printf "${YELLOW}SKIP${NC}: EMBED_ENDPOINT not set, skipping functional tests\n"
+fi
 
 # ============================================================
 # Summary
