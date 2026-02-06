@@ -101,6 +101,29 @@ func main() {
 		panic(err)
 	}
 
+	// Initialize embedding client if configured
+	var embedder *EmbeddingClient
+	if endpoint := os.Getenv("EMBED_ENDPOINT"); endpoint != "" {
+		token := os.Getenv("EMBED_TOKEN")
+		embedder = NewEmbeddingClient(endpoint, token)
+		fmt.Printf("Embedding service configured: %s\n", endpoint)
+	}
+
+	// Load semantic config and configure TSBackend
+	semanticCfg, err := mgmt.LoadSemanticConfig()
+	if err != nil {
+		fmt.Printf("Warning: failed to load semantic config: %v\n", err)
+		semanticCfg = DefaultSemanticConfig()
+	}
+
+	if semanticCfg.Enabled && embedder != nil {
+		tsDB.Embedder = embedder
+		tsDB.EmbedFields = semanticCfg.EmbedFields
+		fmt.Printf("Semantic search enabled with fields: %v\n", semanticCfg.EmbedFields)
+	} else {
+		fmt.Println("Semantic search disabled")
+	}
+
 	// Reindexer for rebuilding Typesense from BoltDB
 	reindexer := NewReindexer(&tsDB, &boltDB, &mgmt)
 
@@ -259,6 +282,61 @@ func main() {
 
 		case "getreindexstatus":
 			return nip86.Response{Result: reindexer.GetStatus()}, nil
+
+		case "getsemanticsearchconfig":
+			cfg, err := mgmt.LoadSemanticConfig()
+			if err != nil {
+				return nip86.Response{}, err
+			}
+			return nip86.Response{Result: cfg}, nil
+
+		case "updatesemanticsearchconfig":
+			if len(request.Params) == 0 {
+				return nip86.Response{Error: "missing config parameter"}, nil
+			}
+			cfgJSON, err := json.Marshal(request.Params[0])
+			if err != nil {
+				return nip86.Response{Error: fmt.Sprintf("invalid config: %v", err)}, nil
+			}
+			var cfg SemanticConfig
+			if err := json.Unmarshal(cfgJSON, &cfg); err != nil {
+				return nip86.Response{Error: fmt.Sprintf("invalid config JSON: %v", err)}, nil
+			}
+			if err := mgmt.SaveSemanticConfig(cfg); err != nil {
+				return nip86.Response{}, err
+			}
+			// Update TSBackend config at runtime
+			if cfg.Enabled && embedder != nil {
+				tsDB.Embedder = embedder
+				tsDB.EmbedFields = cfg.EmbedFields
+			} else {
+				tsDB.Embedder = nil
+				tsDB.EmbedFields = nil
+			}
+			return nip86.Response{Result: true}, nil
+
+		case "enablesemanticsearch":
+			if embedder == nil {
+				return nip86.Response{Error: "embedding service not configured (EMBED_ENDPOINT not set)"}, nil
+			}
+			cfg, _ := mgmt.LoadSemanticConfig()
+			cfg.Enabled = true
+			if err := mgmt.SaveSemanticConfig(cfg); err != nil {
+				return nip86.Response{}, err
+			}
+			tsDB.Embedder = embedder
+			tsDB.EmbedFields = cfg.EmbedFields
+			return nip86.Response{Result: true}, nil
+
+		case "disablesemanticsearch":
+			cfg, _ := mgmt.LoadSemanticConfig()
+			cfg.Enabled = false
+			if err := mgmt.SaveSemanticConfig(cfg); err != nil {
+				return nip86.Response{}, err
+			}
+			tsDB.Embedder = nil
+			tsDB.EmbedFields = nil
+			return nip86.Response{Result: true}, nil
 
 		default:
 			return nip86.Response{Error: fmt.Sprintf("unknown method '%s'", request.Method)}, nil

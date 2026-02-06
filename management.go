@@ -10,12 +10,28 @@ import (
 )
 
 var (
-	bucketBannedPubKeys  = []byte("banned_pubkeys")
-	bucketBannedEvents   = []byte("banned_events")
+	bucketBannedPubKeys   = []byte("banned_pubkeys")
+	bucketBannedEvents    = []byte("banned_events")
 	bucketTypesenseSchema = []byte("typesense_schema")
+	bucketSemanticConfig  = []byte("semantic_config")
 )
 
 const schemaKey = "current"
+const semanticConfigKey = "config"
+
+// SemanticConfig stores the configuration for semantic search.
+type SemanticConfig struct {
+	Enabled     bool     `json:"enabled"`
+	EmbedFields []string `json:"embed_fields"`
+}
+
+// DefaultSemanticConfig returns the default semantic search configuration.
+func DefaultSemanticConfig() SemanticConfig {
+	return SemanticConfig{
+		Enabled:     false, // Disabled by default until explicitly enabled
+		EmbedFields: []string{"name", "description", "keywords", "about"},
+	}
+}
 
 type ManagementStore struct {
 	DB *bbolt.DB
@@ -24,7 +40,7 @@ type ManagementStore struct {
 func (m *ManagementStore) Init(db *bbolt.DB) error {
 	m.DB = db
 	return db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range [][]byte{bucketBannedPubKeys, bucketBannedEvents, bucketTypesenseSchema} {
+		for _, bucket := range [][]byte{bucketBannedPubKeys, bucketBannedEvents, bucketTypesenseSchema, bucketSemanticConfig} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
@@ -145,4 +161,30 @@ func (m *ManagementStore) DeleteSchema() error {
 	return m.DB.Update(func(tx *bbolt.Tx) error {
 		return tx.Bucket(bucketTypesenseSchema).Delete([]byte(schemaKey))
 	})
+}
+
+// SaveSemanticConfig stores the semantic search configuration in BoltDB.
+func (m *ManagementStore) SaveSemanticConfig(cfg SemanticConfig) error {
+	val, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return m.DB.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketSemanticConfig).Put([]byte(semanticConfigKey), val)
+	})
+}
+
+// LoadSemanticConfig loads the semantic search configuration from BoltDB.
+// Returns the default configuration if none is stored.
+func (m *ManagementStore) LoadSemanticConfig() (SemanticConfig, error) {
+	var cfg SemanticConfig
+	err := m.DB.View(func(tx *bbolt.Tx) error {
+		val := tx.Bucket(bucketSemanticConfig).Get([]byte(semanticConfigKey))
+		if val == nil {
+			cfg = DefaultSemanticConfig()
+			return nil
+		}
+		return json.Unmarshal(val, &cfg)
+	})
+	return cfg, err
 }
