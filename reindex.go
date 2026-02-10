@@ -11,7 +11,10 @@ import (
 	"fiatjaf.com/nostr/eventstore/typesense30142"
 )
 
-const reindexMaxEvents = 10_000_000
+const (
+	reindexMaxEvents  = 10_000_000
+	reindexBatchSize  = 100
+)
 
 type ReindexStatus struct {
 	Running bool   `json:"running"`
@@ -74,21 +77,36 @@ func (r *Reindexer) run() {
 		return
 	}
 
-	log.Println("reindex: collection recreated, starting event re-indexing")
+	log.Println("reindex: collection recreated, starting event re-indexing with batching")
 
-	// Count events first by iterating (BoltDB has no cheap count)
-	// We'll just track as we go
+	// Collect events in batches for efficient bulk upsert
+	var batch []nostr.Event
 
 	// Iterate all events from BoltDB
 	for event := range r.boltDB.QueryEvents(nostr.Filter{Kinds: []nostr.Kind{30142}}, reindexMaxEvents) {
 		r.total.Add(1)
+		batch = append(batch, event)
 
-		if err := r.tsDB.ReplaceEvent(event); err != nil {
-			r.errors.Add(1)
-			log.Printf("reindex: error indexing event %s: %v", event.ID.Hex(), err)
-			continue
+		// Process batch when full
+		if len(batch) >= reindexBatchSize {
+			indexed, errs := r.tsDB.BatchUpsertEvents(batch)
+			r.indexed.Add(int64(indexed))
+			r.errors.Add(int64(len(errs)))
+			for _, err := range errs {
+				log.Printf("reindex: batch error: %v", err)
+			}
+			batch = batch[:0] // Reset batch, reuse backing array
 		}
-		r.indexed.Add(1)
+	}
+
+	// Process remaining events in final batch
+	if len(batch) > 0 {
+		indexed, errs := r.tsDB.BatchUpsertEvents(batch)
+		r.indexed.Add(int64(indexed))
+		r.errors.Add(int64(len(errs)))
+		for _, err := range errs {
+			log.Printf("reindex: batch error: %v", err)
+		}
 	}
 
 	log.Printf("reindex: completed. total=%d indexed=%d errors=%d",
