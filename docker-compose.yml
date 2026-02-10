@@ -16,7 +16,6 @@ services:
   amb-relay:
     build:
       context: .
-      dockerfile: Dockerfile.relay
     restart: on-failure
     ports:
       - "3334:3334"
