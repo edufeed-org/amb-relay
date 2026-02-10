@@ -116,6 +116,10 @@ export TS_COLLECTION=amb_e2e_test
 export PORT=$TEST_PORT
 export DB_PATH="./data/e2e_test/relay.db"
 
+# Disable semantic search for deterministic test results
+# (semantic search finds related content, making exact-match assertions unreliable)
+export SEMANTIC_SEARCH_ENABLED=false
+
 # Load embedding service config from .env if not already set
 if [ -z "${EMBED_ENDPOINT:-}" ] && [ -f .env ]; then
   EMBED_ENDPOINT=$(grep -E '^EMBED_ENDPOINT=' .env | cut -d'=' -f2- | tr -d '"' || true)
