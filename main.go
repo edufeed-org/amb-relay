@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"fiatjaf.com/nostr/eventstore/boltdb"
 	"fiatjaf.com/nostr/eventstore/typesense30142"
 	"fiatjaf.com/nostr/khatru"
+	"fiatjaf.com/nostr/nip11"
 	"fiatjaf.com/nostr/nip86"
 	"github.com/joho/godotenv"
 )
@@ -31,6 +33,28 @@ func main() {
 	relay.Info.Name = os.Getenv("NAME")
 	relay.Info.Description = os.Getenv("DESCRIPTION")
 	relay.Info.Icon = os.Getenv("ICON")
+
+	// NIP-11: Software identification
+	relay.Info.Software = "https://git.edufeed.org/edufeed/amb-relay"
+	relay.Info.Version = getVersion()
+
+	// NIP-11: Supported NIPs (khatru defaults: 1, 11, 42, 70, 86)
+	relay.Info.AddSupportedNIPs([]int{9, 45, 50}) // deletion, count, search
+	// AMB-NIP reference (custom NIP for kind 30142 educational metadata)
+	relay.Info.SupportedNIPs = append(relay.Info.SupportedNIPs,
+		"naddr1qvzqqqrcvypzp0wzr7fmrcktw4sgemxh5zsq5auh08vnvlwf0x9anusn7pkft0zgqy28wumn8ghj7un9d3shjtnyv9kh2uewd9hsqzm9v36kvet9vskkzmtzvjvrtf")
+
+	// NIP-11: Limitations
+	relay.Info.Limitation = &nip11.RelayLimitationDocument{
+		MaxLimit:         250,
+		RestrictedWrites: true,
+		AuthRequired:     false,
+	}
+
+	// NIP-11: Retention (only kind 30142 is indexed)
+	relay.Info.Retention = []*nip11.RelayRetentionDocument{
+		{Kinds: [][]int{{30142}}},
+	}
 
 	// Parse relay operator pubkey
 	var operatorPK nostr.PubKey
@@ -360,3 +384,18 @@ func main() {
 }
 
 var startTime = time.Now()
+
+// getVersion returns the git commit hash from build info, or "dev" if unavailable.
+func getVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				if len(setting.Value) > 7 {
+					return setting.Value[:7]
+				}
+				return setting.Value
+			}
+		}
+	}
+	return "dev"
+}
