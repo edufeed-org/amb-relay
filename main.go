@@ -51,9 +51,9 @@ func main() {
 		AuthRequired:     false,
 	}
 
-	// NIP-11: Retention (only kind 30142 is indexed)
+	// NIP-11: Retention
 	relay.Info.Retention = []*nip11.RelayRetentionDocument{
-		{Kinds: [][]int{{30142}}},
+		{Kinds: [][]int{{5}, {30142}}},
 	}
 
 	// Parse relay operator pubkey
