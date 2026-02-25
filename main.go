@@ -18,17 +18,9 @@ import (
 	"fiatjaf.com/nostr/khatru"
 	"fiatjaf.com/nostr/nip11"
 	"fiatjaf.com/nostr/nip86"
-	"github.com/joho/godotenv"
 )
 
 func main() {
-	// Load .env file (optional — Docker passes env vars directly)
-	if err := godotenv.Load(); err != nil {
-		if !os.IsNotExist(err) {
-			fmt.Printf("Error loading .env file: %v\n", err)
-		}
-	}
-
 	relay := khatru.NewRelay()
 	relay.Info.Name = os.Getenv("NAME")
 	relay.Info.Description = os.Getenv("DESCRIPTION")
