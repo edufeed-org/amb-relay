@@ -16,6 +16,7 @@ import (
 	"fiatjaf.com/nostr/eventstore/boltdb"
 	"fiatjaf.com/nostr/eventstore/typesense30142"
 	"fiatjaf.com/nostr/khatru"
+	"fiatjaf.com/nostr/khatru/landing"
 	"fiatjaf.com/nostr/nip11"
 	"fiatjaf.com/nostr/nip86"
 	"github.com/joho/godotenv"
@@ -374,6 +375,8 @@ func main() {
 			return nip86.Response{Error: fmt.Sprintf("unknown method '%s'", request.Method)}, nil
 		}
 	}
+
+	landing.Setup(relay)
 
 	port := os.Getenv("PORT")
 	if port == "" {

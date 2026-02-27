@@ -61,6 +61,7 @@ fi
 # Start Typesense (clean state)
 # ============================================================
 echo "--- Starting Typesense (clean state) ---"
+export TS_APIKEY=xyz
 docker compose down -v 2>/dev/null || true
 docker run --rm -v "$(pwd)/typesense-data:/data" alpine rm -rf /data/* 2>/dev/null || true
 docker compose up -d typesense
@@ -80,7 +81,7 @@ for i in $(seq 1 30); do
 done
 
 # Drop stale collection from any previous run
-curl -sf -X DELETE -H "X-TYPESENSE-API-KEY: xyz" \
+curl -sf -X DELETE -H "X-TYPESENSE-API-KEY: $TS_APIKEY" \
   "http://localhost:8108/collections/amb_e2e_test" >/dev/null 2>&1 || true
 
 # ============================================================
@@ -110,7 +111,6 @@ export NAME="E2E Test Relay"
 export PUBKEY="$PUB"
 export DESCRIPTION="e2e test relay"
 export ICON=""
-export TS_APIKEY=xyz
 export TS_HOST=http://localhost:8108
 export TS_COLLECTION=amb_e2e_test
 export PORT=$TEST_PORT
@@ -491,7 +491,7 @@ assert_count "deletion target exists via relay" 1 \
   -k 30142 -d "https://example.org/courses/delete-test-resource"
 
 # Verify it exists in Typesense directly
-TS_HITS=$(curl -s -G -H "X-TYPESENSE-API-KEY: xyz" \
+TS_HITS=$(curl -s -G -H "X-TYPESENSE-API-KEY: $TS_APIKEY" \
   "http://localhost:8108/collections/amb_e2e_test/documents/search" \
   --data-urlencode "q=*" \
   --data-urlencode "filter_by=d:=https://example.org/courses/delete-test-resource" \
@@ -521,7 +521,7 @@ assert_count "deleted event gone from relay" 0 \
   -k 30142 -d "https://example.org/courses/delete-test-resource"
 
 # Verify event gone from Typesense
-TS_HITS_AFTER=$(curl -s -G -H "X-TYPESENSE-API-KEY: xyz" \
+TS_HITS_AFTER=$(curl -s -G -H "X-TYPESENSE-API-KEY: $TS_APIKEY" \
   "http://localhost:8108/collections/amb_e2e_test/documents/search" \
   --data-urlencode "q=*" \
   --data-urlencode "filter_by=d:=https://example.org/courses/delete-test-resource" \
