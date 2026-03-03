@@ -25,6 +25,12 @@ The relay listens on `:3334`, Typesense on `:8108`.
 | `TS_HOST` | Typesense URL | `http://localhost:8108` | leave empty (auto-set to `http://typesense:8108`) |
 | `TS_COLLECTION` | Collection name | `amb_events` | `amb_events` |
 
+### Networking
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SERVICE_URL` | Public-facing WebSocket URL (e.g. `wss://your-relay.example.com`). Set when running behind a reverse proxy so NIP-98 auth `u` tag validation uses the correct URL instead of the auto-detected `ws://` | auto-detected |
+
 ### Storage & Management
 
 | Variable | Description | Default |

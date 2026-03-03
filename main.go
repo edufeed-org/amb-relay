@@ -32,6 +32,9 @@ func main() {
 	}
 
 	relay := khatru.NewRelay()
+	if serviceURL := os.Getenv("SERVICE_URL"); serviceURL != "" {
+		relay.ServiceURL = serviceURL
+	}
 	relay.Info.Name = os.Getenv("NAME")
 	relay.Info.Description = os.Getenv("DESCRIPTION")
 	relay.Info.Icon = os.Getenv("ICON")
