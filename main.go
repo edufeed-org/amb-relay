@@ -107,6 +107,14 @@ func main() {
 		panic(err)
 	}
 
+	// Allowlist-based access control
+	acl := NewAllowlistManager(&mgmt)
+	if err := acl.Init(); err != nil {
+		panic(err)
+	}
+	acl.StartRefreshLoop(5 * time.Minute)
+	defer acl.Stop()
+
 	// Typesense backend (search index)
 	tsDB := typesense30142.TSBackend{
 		ApiKey:         os.Getenv("TS_APIKEY"),
@@ -198,6 +206,9 @@ func main() {
 		if mgmt.IsPubKeyBanned(event.PubKey) {
 			return true, "pubkey is banned"
 		}
+		if acl.IsWriteRestricted() && !admins[event.PubKey] && !acl.IsWriteAllowed(event.PubKey.Hex()) {
+			return true, "restricted: pubkey not on write allowlist"
+		}
 		if event.Kind == nostr.KindDeletion {
 			return false, ""
 		}
@@ -211,6 +222,53 @@ func main() {
 			return true, "missing required 'name' tag"
 		}
 		return false, ""
+	}
+
+	// Read access enforcement (NIP-42 auth required when read-restricted)
+	checkReadAccess := func(ctx context.Context, filter nostr.Filter) (reject bool, msg string) {
+		if !acl.IsReadRestricted() {
+			return false, ""
+		}
+		if khatru.IsInternalCall(ctx) {
+			return false, ""
+		}
+		authed, ok := khatru.GetAuthed(ctx)
+		if !ok {
+			return true, "auth-required: authentication required to read"
+		}
+		if admins[authed] {
+			return false, ""
+		}
+		if !acl.IsReadAllowed(authed.Hex()) {
+			return true, "restricted: pubkey not on read allowlist"
+		}
+		return false, ""
+	}
+	relay.OnRequest = checkReadAccess
+	relay.OnCount = checkReadAccess
+
+	// Prevent broadcasting to non-allowed connections when read-restricted
+	relay.PreventBroadcast = func(ws *khatru.WebSocket, filter nostr.Filter, event nostr.Event) bool {
+		if !acl.IsReadRestricted() {
+			return false
+		}
+		for _, pk := range ws.AuthedPublicKeys {
+			if admins[pk] || acl.IsReadAllowed(pk.Hex()) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Dynamic NIP-11 — set auth_required when read-restricted
+	relay.OverwriteRelayInformation = func(ctx context.Context, r *http.Request, info nip11.RelayInformationDocument) nip11.RelayInformationDocument {
+		if acl.IsReadRestricted() {
+			if info.Limitation == nil {
+				info.Limitation = &nip11.RelayLimitationDocument{}
+			}
+			info.Limitation.AuthRequired = true
+		}
+		return info
 	}
 
 	// NIP-86 Management API
@@ -370,6 +428,149 @@ func main() {
 			tsDB.Embedder = nil
 			tsDB.EmbedFields = nil
 			return nip86.Response{Result: true}, nil
+
+		case "getaccesscontrol":
+			writeList, _ := acl.ListWriteAllowPubkeys()
+			readList, _ := acl.ListReadAllowPubkeys()
+			refs := acl.LoadListReferences()
+			refSlice := make([]ListReference, 0, len(refs))
+			for _, ref := range refs {
+				refSlice = append(refSlice, ref)
+			}
+			return nip86.Response{Result: map[string]any{
+				"write_restricted": acl.IsWriteRestricted(),
+				"read_restricted":  acl.IsReadRestricted(),
+				"write_allowlist":  writeList,
+				"read_allowlist":   readList,
+				"list_references":  refSlice,
+			}}, nil
+
+		case "setaccesscontrol":
+			if len(request.Params) == 0 {
+				return nip86.Response{Error: "missing config parameter"}, nil
+			}
+			cfgJSON, err := json.Marshal(request.Params[0])
+			if err != nil {
+				return nip86.Response{Error: fmt.Sprintf("invalid config: %v", err)}, nil
+			}
+			var cfg AccessControlConfig
+			if err := json.Unmarshal(cfgJSON, &cfg); err != nil {
+				return nip86.Response{Error: fmt.Sprintf("invalid config JSON: %v", err)}, nil
+			}
+			if err := acl.SetAccessControl(cfg); err != nil {
+				return nip86.Response{}, err
+			}
+			return nip86.Response{Result: true}, nil
+
+		case "addtowriteallowlist":
+			if len(request.Params) == 0 {
+				return nip86.Response{Error: "missing pubkey parameter"}, nil
+			}
+			pubkey, _ := request.Params[0].(string)
+			if pubkey == "" {
+				return nip86.Response{Error: "invalid pubkey"}, nil
+			}
+			var reason string
+			if len(request.Params) > 1 {
+				reason, _ = request.Params[1].(string)
+			}
+			if err := acl.AddWriteAllowPubkey(pubkey, reason); err != nil {
+				return nip86.Response{}, err
+			}
+			return nip86.Response{Result: true}, nil
+
+		case "removefromwriteallowlist":
+			if len(request.Params) == 0 {
+				return nip86.Response{Error: "missing pubkey parameter"}, nil
+			}
+			pubkey, _ := request.Params[0].(string)
+			if pubkey == "" {
+				return nip86.Response{Error: "invalid pubkey"}, nil
+			}
+			if err := acl.RemoveWriteAllowPubkey(pubkey); err != nil {
+				return nip86.Response{}, err
+			}
+			return nip86.Response{Result: true}, nil
+
+		case "addtoreadallowlist":
+			if len(request.Params) == 0 {
+				return nip86.Response{Error: "missing pubkey parameter"}, nil
+			}
+			pubkey, _ := request.Params[0].(string)
+			if pubkey == "" {
+				return nip86.Response{Error: "invalid pubkey"}, nil
+			}
+			var reason string
+			if len(request.Params) > 1 {
+				reason, _ = request.Params[1].(string)
+			}
+			if err := acl.AddReadAllowPubkey(pubkey, reason); err != nil {
+				return nip86.Response{}, err
+			}
+			return nip86.Response{Result: true}, nil
+
+		case "removefromreadallowlist":
+			if len(request.Params) == 0 {
+				return nip86.Response{Error: "missing pubkey parameter"}, nil
+			}
+			pubkey, _ := request.Params[0].(string)
+			if pubkey == "" {
+				return nip86.Response{Error: "invalid pubkey"}, nil
+			}
+			if err := acl.RemoveReadAllowPubkey(pubkey); err != nil {
+				return nip86.Response{}, err
+			}
+			return nip86.Response{Result: true}, nil
+
+		case "addlistreference":
+			if len(request.Params) == 0 {
+				return nip86.Response{Error: "missing list reference parameter"}, nil
+			}
+			refJSON, err := json.Marshal(request.Params[0])
+			if err != nil {
+				return nip86.Response{Error: fmt.Sprintf("invalid list reference: %v", err)}, nil
+			}
+			var ref ListReference
+			if err := json.Unmarshal(refJSON, &ref); err != nil {
+				return nip86.Response{Error: fmt.Sprintf("invalid list reference JSON: %v", err)}, nil
+			}
+			if ref.Pubkey == "" || len(ref.Relays) == 0 || (ref.Kind != 3 && ref.Kind != 30000) {
+				return nip86.Response{Error: "list reference requires pubkey, relays, and kind (3 or 30000)"}, nil
+			}
+			if ref.Direction == "" {
+				ref.Direction = "both"
+			}
+			if err := acl.AddListReference(ref); err != nil {
+				return nip86.Response{}, err
+			}
+			return nip86.Response{Result: true}, nil
+
+		case "removelistreference":
+			if len(request.Params) == 0 {
+				return nip86.Response{Error: "missing pubkey parameter"}, nil
+			}
+			pubkey, _ := request.Params[0].(string)
+			if pubkey == "" {
+				return nip86.Response{Error: "invalid pubkey"}, nil
+			}
+			kind := 3
+			if len(request.Params) > 1 {
+				if k, ok := request.Params[1].(float64); ok {
+					kind = int(k)
+				}
+			}
+			var dtag string
+			if len(request.Params) > 2 {
+				dtag, _ = request.Params[2].(string)
+			}
+			if err := acl.RemoveListReference(pubkey, kind, dtag); err != nil {
+				return nip86.Response{}, err
+			}
+			return nip86.Response{Result: true}, nil
+
+		case "refreshlistreferences":
+			n := acl.RefreshAllLists()
+			return nip86.Response{Result: map[string]any{"refreshed": n}}, nil
 
 		default:
 			return nip86.Response{Error: fmt.Sprintf("unknown method '%s'", request.Method)}, nil
