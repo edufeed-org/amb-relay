@@ -19,7 +19,13 @@ var (
 	bucketWriteAllowlist  = []byte("write_allowlist")
 	bucketReadAllowlist   = []byte("read_allowlist")
 	bucketListReferences  = []byte("list_references")
+	bucketAdmins          = []byte("admins")
 )
+
+type adminEntry struct {
+	FullAccess bool     `json:"full_access"`
+	Methods    []string `json:"methods,omitempty"`
+}
 
 const schemaKey = "current"
 const semanticConfigKey = "config"
@@ -46,7 +52,7 @@ type ManagementStore struct {
 func (m *ManagementStore) Init(db *bbolt.DB) error {
 	m.DB = db
 	return db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range [][]byte{bucketBannedPubKeys, bucketBannedEvents, bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences} {
+		for _, bucket := range [][]byte{bucketBannedPubKeys, bucketBannedEvents, bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketAdmins} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
@@ -334,6 +340,86 @@ func (m *ManagementStore) LoadListReferences() (map[string]ListReference, error)
 				return nil
 			}
 			result[string(k)] = ref
+			return nil
+		})
+	})
+	return result, err
+}
+
+// AddAdmin grants admin access to a pubkey. If methods is empty, full access is granted.
+// If methods is non-empty, they are merged with any existing methods.
+func (m *ManagementStore) AddAdmin(pubkey string, methods []string) error {
+	return m.DB.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketAdmins)
+		var entry adminEntry
+		if existing := b.Get([]byte(pubkey)); existing != nil {
+			json.Unmarshal(existing, &entry)
+		}
+		if len(methods) == 0 {
+			entry.FullAccess = true
+			entry.Methods = nil
+		} else if !entry.FullAccess {
+			seen := make(map[string]bool)
+			for _, m := range entry.Methods {
+				seen[m] = true
+			}
+			for _, m := range methods {
+				if !seen[m] {
+					entry.Methods = append(entry.Methods, m)
+				}
+			}
+		}
+		val, _ := json.Marshal(entry)
+		return b.Put([]byte(pubkey), val)
+	})
+}
+
+// RemoveAdmin revokes admin access. If methods is empty, the admin is removed entirely.
+// If methods is non-empty, only those methods are removed; if none remain, the admin is deleted.
+func (m *ManagementStore) RemoveAdmin(pubkey string, methods []string) error {
+	return m.DB.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketAdmins)
+		if len(methods) == 0 {
+			return b.Delete([]byte(pubkey))
+		}
+		existing := b.Get([]byte(pubkey))
+		if existing == nil {
+			return nil
+		}
+		var entry adminEntry
+		json.Unmarshal(existing, &entry)
+		if entry.FullAccess {
+			return nil // cannot partially revoke a full-access admin via methods
+		}
+		remove := make(map[string]bool)
+		for _, m := range methods {
+			remove[m] = true
+		}
+		var remaining []string
+		for _, m := range entry.Methods {
+			if !remove[m] {
+				remaining = append(remaining, m)
+			}
+		}
+		if len(remaining) == 0 {
+			return b.Delete([]byte(pubkey))
+		}
+		entry.Methods = remaining
+		val, _ := json.Marshal(entry)
+		return b.Put([]byte(pubkey), val)
+	})
+}
+
+// ListAdmins returns all persisted admin entries.
+func (m *ManagementStore) ListAdmins() (map[string]adminEntry, error) {
+	result := make(map[string]adminEntry)
+	err := m.DB.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketAdmins).ForEach(func(k, v []byte) error {
+			var entry adminEntry
+			if err := json.Unmarshal(v, &entry); err != nil {
+				return nil
+			}
+			result[string(k)] = entry
 			return nil
 		})
 	})

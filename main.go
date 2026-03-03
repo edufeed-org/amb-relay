@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"fiatjaf.com/nostr"
@@ -70,15 +71,18 @@ func main() {
 	}
 
 	// Build admin pubkey set
-	admins := map[nostr.PubKey]bool{}
+	admins := &adminSet{
+		static:  make(map[nostr.PubKey]bool),
+		dynamic: make(map[nostr.PubKey]*adminEntry),
+	}
 	if operatorPK != (nostr.PubKey{}) {
-		admins[operatorPK] = true
+		admins.static[operatorPK] = true
 	}
 	if adminList := os.Getenv("ADMIN_PUBKEYS"); adminList != "" {
 		for _, hex := range strings.Split(adminList, ",") {
 			hex = strings.TrimSpace(hex)
 			if pk, err := nostr.PubKeyFromHex(hex); err == nil {
-				admins[pk] = true
+				admins.static[pk] = true
 			} else {
 				fmt.Printf("Error parsing admin pubkey %q: %v\n", hex, err)
 			}
@@ -105,6 +109,21 @@ func main() {
 	mgmt := ManagementStore{}
 	if err := mgmt.Init(boltDB.DB); err != nil {
 		panic(err)
+	}
+
+	// Load persisted dynamic admins from BoltDB
+	if persistedAdmins, err := mgmt.ListAdmins(); err != nil {
+		fmt.Printf("Warning: failed to load persisted admins: %v\n", err)
+	} else {
+		for hex, entry := range persistedAdmins {
+			if pk, err := nostr.PubKeyFromHex(hex); err == nil {
+				e := entry
+				admins.dynamic[pk] = &e
+			}
+		}
+		if len(persistedAdmins) > 0 {
+			fmt.Printf("Loaded %d dynamic admin(s) from BoltDB\n", len(persistedAdmins))
+		}
 	}
 
 	// Allowlist-based access control
@@ -206,7 +225,7 @@ func main() {
 		if mgmt.IsPubKeyBanned(event.PubKey) {
 			return true, "pubkey is banned"
 		}
-		if acl.IsWriteRestricted() && !admins[event.PubKey] && !acl.IsWriteAllowed(event.PubKey.Hex()) {
+		if acl.IsWriteRestricted() && !admins.isAdmin(event.PubKey) && !acl.IsWriteAllowed(event.PubKey.Hex()) {
 			return true, "restricted: pubkey not on write allowlist"
 		}
 		if event.Kind == nostr.KindDeletion {
@@ -236,7 +255,7 @@ func main() {
 		if !ok {
 			return true, "auth-required: authentication required to read"
 		}
-		if admins[authed] {
+		if admins.isAdmin(authed) {
 			return false, ""
 		}
 		if !acl.IsReadAllowed(authed.Hex()) {
@@ -253,7 +272,7 @@ func main() {
 			return false
 		}
 		for _, pk := range ws.AuthedPublicKeys {
-			if admins[pk] || acl.IsReadAllowed(pk.Hex()) {
+			if admins.isAdmin(pk) || acl.IsReadAllowed(pk.Hex()) {
 				return false
 			}
 		}
@@ -277,7 +296,7 @@ func main() {
 		if !ok {
 			return true, "not authenticated"
 		}
-		if !admins[authed] {
+		if !admins.isAllowed(authed, mp.MethodName()) {
 			return true, "not authorized"
 		}
 		return false, ""
@@ -300,6 +319,24 @@ func main() {
 	}
 	relay.ManagementAPI.AllowEvent = func(ctx context.Context, id nostr.ID, reason string) error {
 		return mgmt.AllowEvent(id)
+	}
+
+	relay.ManagementAPI.GrantAdmin = func(ctx context.Context, pubkey nostr.PubKey, methods []string) error {
+		if err := mgmt.AddAdmin(pubkey.Hex(), methods); err != nil {
+			return err
+		}
+		admins.grant(pubkey, methods)
+		return nil
+	}
+	relay.ManagementAPI.RevokeAdmin = func(ctx context.Context, pubkey nostr.PubKey, methods []string) error {
+		if admins.isStatic(pubkey) {
+			return fmt.Errorf("cannot revoke env-configured admin")
+		}
+		if err := mgmt.RemoveAdmin(pubkey.Hex(), methods); err != nil {
+			return err
+		}
+		admins.revoke(pubkey, methods)
+		return nil
 	}
 
 	relay.ManagementAPI.ChangeRelayName = func(ctx context.Context, name string) error {
@@ -588,6 +625,104 @@ func main() {
 }
 
 var startTime = time.Now()
+
+type adminSet struct {
+	mu      sync.RWMutex
+	static  map[nostr.PubKey]bool       // env-var admins (always full access, unrevokable)
+	dynamic map[nostr.PubKey]*adminEntry // NIP-86 managed admins (persisted in BoltDB)
+}
+
+func (a *adminSet) isAdmin(pk nostr.PubKey) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.static[pk] {
+		return true
+	}
+	_, ok := a.dynamic[pk]
+	return ok
+}
+
+func (a *adminSet) isAllowed(pk nostr.PubKey, method string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.static[pk] {
+		return true
+	}
+	entry, ok := a.dynamic[pk]
+	if !ok {
+		return false
+	}
+	if entry.FullAccess {
+		return true
+	}
+	for _, m := range entry.Methods {
+		if m == method {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *adminSet) isStatic(pk nostr.PubKey) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.static[pk]
+}
+
+func (a *adminSet) grant(pk nostr.PubKey, methods []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	entry, ok := a.dynamic[pk]
+	if !ok {
+		entry = &adminEntry{}
+		a.dynamic[pk] = entry
+	}
+	if len(methods) == 0 {
+		entry.FullAccess = true
+		entry.Methods = nil
+		return
+	}
+	if entry.FullAccess {
+		return
+	}
+	seen := make(map[string]bool)
+	for _, m := range entry.Methods {
+		seen[m] = true
+	}
+	for _, m := range methods {
+		if !seen[m] {
+			entry.Methods = append(entry.Methods, m)
+		}
+	}
+}
+
+func (a *adminSet) revoke(pk nostr.PubKey, methods []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(methods) == 0 {
+		delete(a.dynamic, pk)
+		return
+	}
+	entry, ok := a.dynamic[pk]
+	if !ok || entry.FullAccess {
+		return
+	}
+	remove := make(map[string]bool)
+	for _, m := range methods {
+		remove[m] = true
+	}
+	var remaining []string
+	for _, m := range entry.Methods {
+		if !remove[m] {
+			remaining = append(remaining, m)
+		}
+	}
+	if len(remaining) == 0 {
+		delete(a.dynamic, pk)
+	} else {
+		entry.Methods = remaining
+	}
+}
 
 // getVersion returns the git commit hash from build info, or "dev" if unavailable.
 func getVersion() string {
