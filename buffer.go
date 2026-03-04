@@ -41,6 +41,8 @@ func (b *TSWriteBuffer) Queue(event nostr.Event) {
 	b.ch <- event
 }
 
+const maxRetries = 5
+
 func (b *TSWriteBuffer) run() {
 	defer b.wg.Done()
 
@@ -48,11 +50,20 @@ func (b *TSWriteBuffer) run() {
 	ticker := time.NewTicker(b.flushInterval)
 	defer ticker.Stop()
 
+	retries := 0
+
 	for {
+		if retries > 0 {
+			backoff := time.Duration(1<<(retries-1)) * time.Second
+			if backoff > 16*time.Second {
+				backoff = 16 * time.Second
+			}
+			time.Sleep(backoff)
+		}
+
 		select {
 		case event, ok := <-b.ch:
 			if !ok {
-				// Channel closed — flush remaining and exit
 				if len(batch) > 0 {
 					b.flush(batch)
 				}
@@ -60,14 +71,32 @@ func (b *TSWriteBuffer) run() {
 			}
 			batch = append(batch, event)
 			if len(batch) >= b.batchSize {
-				b.flush(batch)
-				batch = batch[:0]
+				if b.flush(batch) {
+					retries++
+					if retries > maxRetries {
+						log.Printf("ts-buffer: dropping %d events after %d retries (data safe in BoltDB, reindex to recover)", len(batch), maxRetries)
+						batch = batch[:0]
+						retries = 0
+					}
+				} else {
+					batch = batch[:0]
+					retries = 0
+				}
 			}
 
 		case <-ticker.C:
 			if len(batch) > 0 {
-				b.flush(batch)
-				batch = batch[:0]
+				if b.flush(batch) {
+					retries++
+					if retries > maxRetries {
+						log.Printf("ts-buffer: dropping %d events after %d retries (data safe in BoltDB, reindex to recover)", len(batch), maxRetries)
+						batch = batch[:0]
+						retries = 0
+					}
+				} else {
+					batch = batch[:0]
+					retries = 0
+				}
 			}
 
 		case <-b.done:
@@ -76,26 +105,39 @@ func (b *TSWriteBuffer) run() {
 			for event := range b.ch {
 				batch = append(batch, event)
 				if len(batch) >= b.batchSize {
-					b.flush(batch)
+					if b.flush(batch) {
+						log.Printf("ts-buffer: shutdown flush failed for %d events (data safe in BoltDB, reindex to recover)", len(batch))
+					}
 					batch = batch[:0]
 				}
 			}
 			if len(batch) > 0 {
-				b.flush(batch)
+				if b.flush(batch) {
+					log.Printf("ts-buffer: shutdown flush failed for %d events (data safe in BoltDB, reindex to recover)", len(batch))
+				}
 			}
 			return
 		}
 	}
 }
 
-func (b *TSWriteBuffer) flush(batch []nostr.Event) {
+// flush sends the batch to Typesense. Returns true if the entire batch failed
+// (connection/HTTP error, indexed==0) — these are retryable. Partial failures
+// (some docs indexed, some with conversion errors) return false since retrying
+// won't help the failed docs.
+func (b *TSWriteBuffer) flush(batch []nostr.Event) (failed bool) {
 	indexed, errs := b.tsDB.BatchUpsertEvents(batch)
 	if len(errs) > 0 {
 		for _, err := range errs {
 			log.Printf("ts-buffer: batch error: %v", err)
 		}
 	}
+	if indexed == 0 && len(errs) > 0 {
+		log.Printf("ts-buffer: flush failed for %d events, will retry", len(batch))
+		return true
+	}
 	log.Printf("ts-buffer: flushed %d/%d events", indexed, len(batch))
+	return false
 }
 
 // Close signals the buffer to drain and waits for the background goroutine to finish.
