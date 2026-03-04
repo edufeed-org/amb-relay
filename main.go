@@ -156,6 +156,10 @@ func main() {
 		panic(err)
 	}
 
+	// Write buffer: queues events for async batch-flush to Typesense
+	tsBuf := NewTSWriteBuffer(&tsDB, 100, 500*time.Millisecond)
+	defer tsBuf.Close()
+
 	// Initialize embedding client if configured
 	var embedder *EmbeddingClient
 	if endpoint := os.Getenv("EMBED_ENDPOINT"); endpoint != "" {
@@ -208,13 +212,14 @@ func main() {
 	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error {
 		boltDB.SaveEvent(event)
 		if event.Kind == 30142 {
-			return tsDB.SaveEvent(event)
+			tsBuf.Queue(event)
 		}
 		return nil
 	}
 	relay.ReplaceEvent = func(ctx context.Context, event nostr.Event) error {
 		boltDB.ReplaceEvent(event)
-		return tsDB.ReplaceEvent(event)
+		tsBuf.Queue(event)
+		return nil
 	}
 	relay.DeleteEvent = func(ctx context.Context, id nostr.ID) error {
 		boltDB.DeleteEvent(id)
