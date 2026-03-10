@@ -2,7 +2,7 @@ module github.com/edufeed-org/amb-relay
 
 go 1.25
 
-replace fiatjaf.com/nostr => git.edufeed.org/edufeed/nostrlib v0.0.0-20260305125817-54635f23af4b
+replace fiatjaf.com/nostr => git.edufeed.org/edufeed/nostrlib v0.0.0-20260310074100-ef00ae55c7b5
 
 require (
 	fiatjaf.com/nostr v0.0.0
@@ -11,7 +11,6 @@ require (
 )
 
 require (
-	fiatjaf.com/lib v0.3.6 // indirect
 	github.com/FastFilter/xorfilter v0.2.1 // indirect
 	github.com/ImVexed/fasturl v0.0.0-20230304231329-4e41488060f3 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
