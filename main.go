@@ -144,13 +144,22 @@ func main() {
 		CollectionName: os.Getenv("TS_COLLECTION"),
 	}
 
-	// Load custom schema from BoltDB if one was stored
-	if customSchema, err := mgmt.LoadSchema(); err != nil {
+	// Load custom schema from BoltDB if one was stored; otherwise start from
+	// the default. Either way, ensure the content fields are present — they
+	// are required by the fulltext plumbing.
+	customSchema, err := mgmt.LoadSchema()
+	if err != nil {
 		fmt.Printf("Warning: failed to load custom schema: %v\n", err)
-	} else if customSchema != nil {
-		tsDB.Schema = customSchema
-		fmt.Println("Using custom Typesense schema from BoltDB")
 	}
+	var effectiveSchema typesense30142.CollectionSchema
+	if customSchema != nil {
+		effectiveSchema = *customSchema
+		fmt.Println("Using custom Typesense schema from BoltDB")
+	} else {
+		effectiveSchema = typesense30142.DefaultSchema()
+	}
+	ensureContentFields(&effectiveSchema)
+	tsDB.Schema = &effectiveSchema
 
 	if err := tsDB.Init(); err != nil {
 		panic(err)
@@ -732,6 +741,30 @@ func (a *adminSet) revoke(pk nostr.PubKey, methods []string) {
 		delete(a.dynamic, pk)
 	} else {
 		entry.Methods = remaining
+	}
+}
+
+// ensureContentFields appends the three content fields to the schema if they
+// are not already present. Idempotent: safe to call on default or custom schemas.
+func ensureContentFields(schema *typesense30142.CollectionSchema) {
+	have := make(map[string]bool, len(schema.Fields))
+	for _, f := range schema.Fields {
+		have[f.Name] = true
+	}
+	if !have["content"] {
+		schema.Fields = append(schema.Fields, typesense30142.Field{
+			Name: "content", Type: "string", Optional: true,
+		})
+	}
+	if !have["content_fetched_at"] {
+		schema.Fields = append(schema.Fields, typesense30142.Field{
+			Name: "content_fetched_at", Type: "int64", Optional: true,
+		})
+	}
+	if !have["content_status"] {
+		schema.Fields = append(schema.Fields, typesense30142.Field{
+			Name: "content_status", Type: "string", Optional: true,
+		})
 	}
 }
 
