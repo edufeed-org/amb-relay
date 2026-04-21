@@ -20,6 +20,7 @@ var (
 	bucketReadAllowlist   = []byte("read_allowlist")
 	bucketListReferences  = []byte("list_references")
 	bucketAdmins          = []byte("admins")
+	bucketFetchedContent  = []byte("fetched_content") // resource fulltext keyed by event_id
 )
 
 type adminEntry struct {
@@ -52,7 +53,7 @@ type ManagementStore struct {
 func (m *ManagementStore) Init(db *bbolt.DB) error {
 	m.DB = db
 	return db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range [][]byte{bucketBannedPubKeys, bucketBannedEvents, bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketAdmins} {
+		for _, bucket := range [][]byte{bucketBannedPubKeys, bucketBannedEvents, bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketAdmins, bucketFetchedContent} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
