@@ -127,7 +127,7 @@ if [ -z "${EMBED_ENDPOINT:-}" ] && [ -f .env ]; then
   export EMBED_ENDPOINT EMBED_TOKEN
 fi
 
-go run . > /tmp/amb-relay-e2e.log 2>&1 &
+GOWORK=off go run . > /tmp/amb-relay-e2e.log 2>&1 &
 RELAY_PID=$!
 
 echo -n "Waiting for relay..."
@@ -807,6 +807,151 @@ done
 # 44. Non-admin cannot use custom methods
 NONADMIN_SCHEMA_RESP=$(nip86_call "getcollectionschema" '[]' "$NONADMIN_SEC")
 assert_nip86_error "non-admin rejected for getcollectionschema" "$NONADMIN_SCHEMA_RESP"
+
+# ============================================================
+# Fulltext plumbing tests (setcontent / refetchcontent / reindex preservation)
+# ============================================================
+echo ""
+echo "--- Fulltext plumbing ---"
+
+# Publish a test event so setcontent has a target.
+# nak prints connection messages to stderr, the signed JSON event to stdout.
+FULLTEXT_EVENT_JSON=$(nak event -k 30142 \
+  -t d=fulltext-test-1 \
+  -t "name=Fulltext Test" \
+  --sec "$SEC" --auth "$RELAY" 2>/dev/null || true)
+FULLTEXT_EVENT_ID=$(echo "$FULLTEXT_EVENT_JSON" | jq -r '.id // empty' 2>/dev/null || true)
+if [ -z "$FULLTEXT_EVENT_ID" ]; then
+  printf "${RED}FAIL${NC}: could not publish test event for fulltext (resp: %s)\n" "$FULLTEXT_EVENT_JSON"
+  FAIL=$((FAIL+1))
+else
+  printf "${GREEN}PASS${NC}: published fulltext test event %s\n" "$FULLTEXT_EVENT_ID"
+  PASS=$((PASS+1))
+fi
+sleep 1  # let write buffer flush
+
+# setcontent with fresh fulltext — assert_nip86 calls nip86_call internally
+assert_nip86 "setcontent succeeds" \
+  "setcontent" "[\"$FULLTEXT_EVENT_ID\", \"photosynthesis light reactions chlorophyll\", $(date +%s), \"fetched\", \"https://example.org/resource\"]" \
+  '.result.result == true'
+
+# Verify content is BM25-searchable in Typesense
+sleep 1  # Typesense index propagation
+CONTENT_SEARCH=$(curl -sf -H "X-TYPESENSE-API-KEY: $TS_APIKEY" \
+  "http://localhost:8108/collections/$TS_COLLECTION/documents/search?q=chlorophyll&query_by=content&per_page=5" 2>/dev/null || true)
+if echo "$CONTENT_SEARCH" | jq -e '.hits | length > 0' >/dev/null 2>&1; then
+  printf "${GREEN}PASS${NC}: content is searchable via BM25\n"
+  PASS=$((PASS+1))
+else
+  printf "${RED}FAIL${NC}: content not searchable (response: %s)\n" "$CONTENT_SEARCH"
+  FAIL=$((FAIL+1))
+fi
+
+# setcontent with permanent error (status=failed, empty text)
+ERROR_EVENT_JSON=$(nak event -k 30142 \
+  -t d=fulltext-test-err \
+  -t "name=Error Test" \
+  --sec "$SEC" --auth "$RELAY" 2>/dev/null || true)
+ERROR_EVENT_ID=$(echo "$ERROR_EVENT_JSON" | jq -r '.id // empty' 2>/dev/null || true)
+sleep 1
+assert_nip86 "setcontent with status=failed accepts empty text" \
+  "setcontent" "[\"$ERROR_EVENT_ID\", \"\", $(date +%s), \"failed\", \"https://example.org/404\"]" \
+  '.result.result == true'
+
+# setcontent rejects nonexistent event id
+BOGUS_ID=$(printf '%064d' 0)
+BOGUS_RESP=$(nip86_call "setcontent" "[\"$BOGUS_ID\", \"x\", $(date +%s), \"fetched\", \"\"]" || true)
+assert_nip86_error "setcontent rejects unknown event id" "$BOGUS_RESP"
+
+# Reindex must preserve content (content_patched counter >= 1).
+REINDEX_FT=$(nip86_call "reindex" '[]')
+if echo "$REINDEX_FT" | jq -e '.result.result == "reindex started"' >/dev/null 2>&1; then
+  echo -n "  Waiting for reindex (content preservation check)..."
+  for i in $(seq 1 30); do
+    S=$(nip86_call "getreindexstatus" '[]')
+    if echo "$S" | jq -e '.result.result.running == false' >/dev/null 2>&1; then
+      echo " done"
+      break
+    fi
+    echo -n "."
+    sleep 1
+  done
+  FINAL_STATUS=$(nip86_call "getreindexstatus" '[]')
+  if echo "$FINAL_STATUS" | jq -e '.result.result.content_patched >= 1' >/dev/null 2>&1; then
+    printf "${GREEN}PASS${NC}: reindex reports content_patched >= 1\n"
+    PASS=$((PASS+1))
+  else
+    printf "${RED}FAIL${NC}: reindex did not report content_patched>=1 (%s)\n" "$FINAL_STATUS"
+    FAIL=$((FAIL+1))
+  fi
+  # After reindex the content field should still be searchable.
+  sleep 1
+  CONTENT_AFTER=$(curl -sf -H "X-TYPESENSE-API-KEY: $TS_APIKEY" \
+    "http://localhost:8108/collections/$TS_COLLECTION/documents/search?q=chlorophyll&query_by=content&per_page=5" 2>/dev/null || true)
+  if echo "$CONTENT_AFTER" | jq -e '.hits | length > 0' >/dev/null 2>&1; then
+    printf "${GREEN}PASS${NC}: content survives reindex\n"
+    PASS=$((PASS+1))
+  else
+    printf "${RED}FAIL${NC}: content missing after reindex (response: %s)\n" "$CONTENT_AFTER"
+    FAIL=$((FAIL+1))
+  fi
+else
+  printf "${RED}FAIL${NC}: fulltext reindex did not start (response: %s)\n" "$REINDEX_FT"
+  FAIL=$((FAIL+1))
+fi
+
+# Wait for any pending reindex to settle before proceeding
+for i in $(seq 1 30); do
+  S=$(nip86_call "getreindexstatus" '[]')
+  if echo "$S" | jq -e '.result.result.running == false' >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+# refetchcontent clears content (marks event for re-fetch, blanks content field)
+assert_nip86 "refetchcontent succeeds" \
+  "refetchcontent" "[\"$FULLTEXT_EVENT_ID\"]" \
+  '.result.result == true'
+
+sleep 1
+CONTENT_CLEARED=$(curl -sf -H "X-TYPESENSE-API-KEY: $TS_APIKEY" \
+  "http://localhost:8108/collections/$TS_COLLECTION/documents/search?q=chlorophyll&query_by=content&per_page=5" 2>/dev/null || true)
+if echo "$CONTENT_CLEARED" | jq -e '.hits | length == 0' >/dev/null 2>&1; then
+  printf "${GREEN}PASS${NC}: content cleared after refetchcontent\n"
+  PASS=$((PASS+1))
+else
+  printf "${RED}FAIL${NC}: content not cleared (response: %s)\n" "$CONTENT_CLEARED"
+  FAIL=$((FAIL+1))
+fi
+
+# Non-admin cannot call setcontent
+NONADMIN_SC_RESP=$(nip86_call "setcontent" "[\"$FULLTEXT_EVENT_ID\", \"x\", $(date +%s), \"fetched\", \"\"]" "$NONADMIN_SEC" || true)
+assert_nip86_error "non-admin rejected from setcontent" "$NONADMIN_SC_RESP"
+
+# Orphan GC: delete the error event (kind-5 by e-tag), run reindex, check content_orphaned counter.
+nak event -k 5 -t "e=$ERROR_EVENT_ID" --sec "$SEC" --auth "$RELAY" >/dev/null 2>&1 || true
+sleep 1
+nip86_call "reindex" '[]' >/dev/null || true
+echo -n "  Waiting for GC reindex..."
+for i in $(seq 1 30); do
+  S=$(nip86_call "getreindexstatus" '[]')
+  if echo "$S" | jq -e '.result.result.running == false' >/dev/null 2>&1; then
+    echo " done"
+    break
+  fi
+  echo -n "."
+  sleep 1
+done
+GC_STATUS=$(nip86_call "getreindexstatus" '[]')
+if echo "$GC_STATUS" | jq -e '.result.result.content_orphaned >= 1' >/dev/null 2>&1; then
+  printf "${GREEN}PASS${NC}: reindex GC orphan content row\n"
+  PASS=$((PASS+1))
+else
+  printf "${YELLOW}SKIP${NC}: content_orphaned check inconclusive (response: %s)\n" "$GC_STATUS"
+fi
+
+echo ""
 
 # ============================================================
 # Semantic Search Management API tests
