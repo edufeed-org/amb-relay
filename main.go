@@ -207,7 +207,7 @@ func main() {
 	}
 
 	// Reindexer for rebuilding Typesense from BoltDB
-	reindexer := NewReindexer(&tsDB, &boltDB, &mgmt)
+	reindexer := NewReindexer(&tsDB, &boltDB, &mgmt, contentStore)
 
 	relay.OnConnect = func(ctx context.Context) {
 		khatru.RequestAuth(ctx)
