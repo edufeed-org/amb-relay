@@ -114,6 +114,9 @@ func main() {
 		panic(err)
 	}
 
+	// ContentStore for fetched resource fulltext (bucket registered by mgmt.Init)
+	contentStore := &ContentStore{DB: boltDB.DB}
+
 	// Load persisted dynamic admins from BoltDB
 	if persistedAdmins, err := mgmt.ListAdmins(); err != nil {
 		fmt.Printf("Warning: failed to load persisted admins: %v\n", err)
@@ -628,6 +631,62 @@ func main() {
 		case "refreshlistreferences":
 			n := acl.RefreshAllLists()
 			return nip86.Response{Result: map[string]any{"refreshed": n}}, nil
+
+		case "setcontent":
+			if len(request.Params) < 4 {
+				return nip86.Response{Error: "setcontent requires [event_id, text, fetched_at, status, (source_url)]"}, nil
+			}
+			eventIDHex, ok := request.Params[0].(string)
+			if !ok || eventIDHex == "" {
+				return nip86.Response{Error: "event_id must be a non-empty string"}, nil
+			}
+			text, ok := request.Params[1].(string)
+			if !ok {
+				return nip86.Response{Error: "text must be a string"}, nil
+			}
+			fetchedAtFloat, ok := request.Params[2].(float64)
+			if !ok {
+				return nip86.Response{Error: "fetched_at must be a number (unix seconds)"}, nil
+			}
+			status, ok := request.Params[3].(string)
+			if !ok || status == "" {
+				return nip86.Response{Error: "status must be a non-empty string"}, nil
+			}
+			var sourceURL string
+			if len(request.Params) > 4 {
+				sourceURL, _ = request.Params[4].(string)
+			}
+
+			// Verify the event exists in BoltDB — the indexer must only
+			// setcontent for events the relay actually holds.
+			id, err := nostr.IDFromHex(eventIDHex)
+			if err != nil {
+				return nip86.Response{Error: fmt.Sprintf("invalid event id: %v", err)}, nil
+			}
+			var found bool
+			for range boltDB.QueryEvents(nostr.Filter{IDs: []nostr.ID{id}, Limit: 1}, 1) {
+				found = true
+			}
+			if !found {
+				return nip86.Response{Error: "event not found"}, nil
+			}
+
+			entry := ContentEntry{
+				Text:      text,
+				FetchedAt: int64(fetchedAtFloat),
+				Status:    status,
+				SourceURL: sourceURL,
+			}
+			if err := contentStore.Put(eventIDHex, entry); err != nil {
+				return nip86.Response{Error: fmt.Sprintf("content store put: %v", err)}, nil
+			}
+			if err := PatchContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, eventIDHex, entry); err != nil {
+				// Typesense patch failure is recoverable: BoltDB is source of
+				// truth and a future reindex will re-project. Surface the
+				// error to the caller so it can log, but don't roll back.
+				return nip86.Response{Error: fmt.Sprintf("typesense patch: %v", err)}, nil
+			}
+			return nip86.Response{Result: true}, nil
 
 		default:
 			return nip86.Response{Error: fmt.Sprintf("unknown method '%s'", request.Method)}, nil
