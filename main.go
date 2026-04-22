@@ -238,6 +238,7 @@ func main() {
 	}
 	relay.DeleteEvent = func(ctx context.Context, id nostr.ID) error {
 		boltDB.DeleteEvent(id)
+		_ = contentStore.Delete(id.Hex()) // idempotent; safe when no content row existed
 		return tsDB.DeleteEvent(id)
 	}
 
