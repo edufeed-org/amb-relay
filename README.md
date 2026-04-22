@@ -219,10 +219,20 @@ Schema changes are deferred — `updatecollectionschema` only stores the schema,
 | `updatesemanticsearchconfig` | `[{enabled: bool, embed_fields: [...]}]` | Update config and toggle embedding |
 | `enablesemanticsearch` | none | Shortcut to enable with default fields |
 | `disablesemanticsearch` | none | Shortcut to disable |
+| `setcontent` | `[event_id, text, fetched_at, status, source_url]` | Persist fetched resource fulltext for an event. `status` values: `fetched` \| `truncated` \| `license_denied` \| `unsupported` \| `failed`. Admin only. |
+| `refetchcontent` | `[event_id]` | Clear fulltext for an event so the indexer reprocesses it. Admin only. |
 
 **Default embed fields:** `name`, `description`, `keywords`, `about`
 
 When enabled, new events are embedded on save and queries use hybrid search (30% vector, 70% keyword weight). Existing events need `reindex` to add embeddings.
+
+### Resource Fulltext
+
+The relay stores optional fulltext extracted from the resource referenced by each AMB event. Fulltext is provided by an external `amb-indexer` service (not part of this repository) via the `setcontent` NIP-86 method, persisted in the `fetched_content` BoltDB bucket, and projected onto the `content`, `content_fetched_at`, and `content_status` fields of the Typesense document.
+
+When present, the `content` field participates in BM25 search alongside metadata fields. Reindex preserves fulltext: after the collection is rebuilt from BoltDB events, a replay pass PATCHes each stored content row back onto its Typesense document. The same pass drops rows whose events have been deleted (orphan GC).
+
+The indexer service connects as a regular Nostr client + a NIP-86 admin. Add its pubkey to `ADMIN_PUBKEYS` to authorize `setcontent` and `refetchcontent`. See `docs/superpowers/specs/2026-04-21-amb-resource-fulltext-indexing-design.md` for the full design.
 
 ## Architecture
 
