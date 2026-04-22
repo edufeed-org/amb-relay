@@ -125,25 +125,44 @@ func (r *Reindexer) run() {
 		}
 	}
 
-	// Content replay + orphan GC. Iterate fetched_content once.
+	// Content replay + orphan GC.
+	// Classify rows while holding only a read txn (ContentStore.ForEach uses DB.View).
+	// Then perform Delete/PatchContent OUTSIDE the ForEach callback to avoid
+	// nesting a write txn (Delete) or long HTTP calls inside the read txn.
+	type liveContent struct {
+		id    string
+		entry ContentEntry
+	}
+	var orphans []string
+	var liveRows []liveContent
+
 	_ = r.content.ForEach(func(eventID string, entry ContentEntry) error {
 		if _, alive := liveEventIDs[eventID]; !alive {
-			// Orphan: event no longer exists. Drop the row.
-			if err := r.content.Delete(eventID); err != nil {
-				log.Printf("reindex: orphan delete failed for %s: %v", eventID, err)
-			} else {
-				r.contentOrphaned.Add(1)
-			}
-			return nil
+			orphans = append(orphans, eventID)
+		} else {
+			liveRows = append(liveRows, liveContent{id: eventID, entry: entry})
 		}
-		if err := PatchContent(r.tsDB.Host, r.tsDB.ApiKey, r.tsDB.CollectionName, eventID, entry); err != nil {
-			log.Printf("reindex: content patch failed for %s: %v", eventID, err)
-			r.errors.Add(1)
-			return nil
-		}
-		r.contentPatched.Add(1)
 		return nil
 	})
+
+	// Orphan GC — outside the read txn.
+	for _, id := range orphans {
+		if err := r.content.Delete(id); err != nil {
+			log.Printf("reindex: orphan delete failed for %s: %v", id, err)
+		} else {
+			r.contentOrphaned.Add(1)
+		}
+	}
+
+	// Live content replay — outside the read txn.
+	for _, row := range liveRows {
+		if err := PatchContent(r.tsDB.Host, r.tsDB.ApiKey, r.tsDB.CollectionName, row.id, row.entry); err != nil {
+			log.Printf("reindex: content patch failed for %s: %v", row.id, err)
+			r.errors.Add(1)
+			continue
+		}
+		r.contentPatched.Add(1)
+	}
 
 	log.Printf("reindex: completed. total=%d indexed=%d errors=%d content_patched=%d content_orphaned=%d",
 		r.total.Load(), r.indexed.Load(), r.errors.Load(),
