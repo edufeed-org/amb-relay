@@ -692,6 +692,22 @@ func main() {
 			}
 			return nip86.Response{Result: true}, nil
 
+		case "refetchcontent":
+			if len(request.Params) == 0 {
+				return nip86.Response{Error: "refetchcontent requires [event_id]"}, nil
+			}
+			eventIDHex, ok := request.Params[0].(string)
+			if !ok || eventIDHex == "" {
+				return nip86.Response{Error: "event_id must be a non-empty string"}, nil
+			}
+			if err := contentStore.Delete(eventIDHex); err != nil {
+				return nip86.Response{Error: fmt.Sprintf("content store delete: %v", err)}, nil
+			}
+			if err := ClearContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, eventIDHex); err != nil {
+				return nip86.Response{Error: fmt.Sprintf("typesense clear: %v", err)}, nil
+			}
+			return nip86.Response{Result: true}, nil
+
 		default:
 			return nip86.Response{Error: fmt.Sprintf("unknown method '%s'", request.Method)}, nil
 		}
