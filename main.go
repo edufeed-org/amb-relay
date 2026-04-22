@@ -653,8 +653,12 @@ func main() {
 				return nip86.Response{Error: "status must be a non-empty string"}, nil
 			}
 			var sourceURL string
-			if len(request.Params) > 4 {
-				sourceURL, _ = request.Params[4].(string)
+			if len(request.Params) > 4 && request.Params[4] != nil {
+				s, ok := request.Params[4].(string)
+				if !ok {
+					return nip86.Response{Error: "source_url must be a string or null"}, nil
+				}
+				sourceURL = s
 			}
 
 			// Verify the event exists in BoltDB — the indexer must only
