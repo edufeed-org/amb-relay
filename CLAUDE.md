@@ -32,7 +32,16 @@ cd ../nostrlib/eventstore/typesense30142 && go test ./...
 ```
 Nostr Client → Khatru Relay (:3334) ─┬→ Typesense (:8108)  [search index]
               NIP-86 HTTP API ────────┘  BoltDB             [raw events + bans]
+                                  ▲
+                                  │  NIP-86 setcontent (NIP-98 signed)
+                                  │
+                              amb-indexer ──► Typesense (amb_chunks_30142)
+                                  │           [chunk embeddings]
+                                  ▼
+                                Tika (PDF extraction)
 ```
+
+The relay itself does not fetch or embed resources — that is `amb-indexer`'s job (see [`../amb-indexer`](../amb-indexer)). The indexer subscribes to kind-30142 events, extracts text, chunks and embeds it, and calls the relay's NIP-86 `setcontent` to populate the `content` field on each event. Chunks go to a separate Typesense collection.
 
 **Main Entry Point:** `main.go` - Sets up khatru relay with dual-write to Typesense (search) and BoltDB (raw persistence), NIP-42 auth, NIP-86 management API, and Negentropy protocol.
 
@@ -52,6 +61,15 @@ Nostr Client → Khatru Relay (:3334) ─┬→ Typesense (:8108)  [search index
 - Custom NIP-86 methods (`getcollectionschema`, `updatecollectionschema`, `resetcollectionschema`, `reindex`, `getreindexstatus`) via khatru's `Generic` handler
 - Schema config persisted in BoltDB; on startup, custom schema (if stored) overrides the hardcoded default
 - Reindex drops the Typesense collection and rebuilds from BoltDB events
+
+## Ingest pipeline (amb-indexer)
+
+`amb-indexer` runs as a separate service. It is wired into this repo's `docker-compose.yml` and shares the same Typesense instance. Its Typesense collection (`amb_chunks_30142` by default) is disjoint from the relay's event collection.
+
+- Source: [`../amb-indexer`](../amb-indexer) — see its `CLAUDE.md` and `README.md` for the pipeline detail.
+- Compose services added alongside the relay: `tika` (Apache Tika for PDF extraction) and `amb-indexer` itself (writes to a named volume `indexer_data`).
+- Auth: the indexer's pubkey (derived from `INDEXER_NSEC`) must be in the relay's `ADMIN_PUBKEYS` so its NIP-86 `setcontent` calls are accepted. Set `ADMIN_PUBKEYS` in this repo's `.env`.
+- Configuration for the indexer lives in `../amb-indexer/.env.indexer` (template: `.env.indexer.example`).
 
 ## Key Dependencies
 
