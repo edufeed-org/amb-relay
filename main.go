@@ -114,6 +114,9 @@ func main() {
 		panic(err)
 	}
 
+	// ContentStore for fetched resource fulltext (bucket registered by mgmt.Init)
+	contentStore := &ContentStore{DB: boltDB.DB}
+
 	// Load persisted dynamic admins from BoltDB
 	if persistedAdmins, err := mgmt.ListAdmins(); err != nil {
 		fmt.Printf("Warning: failed to load persisted admins: %v\n", err)
@@ -144,13 +147,22 @@ func main() {
 		CollectionName: os.Getenv("TS_COLLECTION"),
 	}
 
-	// Load custom schema from BoltDB if one was stored
-	if customSchema, err := mgmt.LoadSchema(); err != nil {
+	// Load custom schema from BoltDB if one was stored; otherwise start from
+	// the default. Either way, ensure the content fields are present — they
+	// are required by the fulltext plumbing.
+	customSchema, err := mgmt.LoadSchema()
+	if err != nil {
 		fmt.Printf("Warning: failed to load custom schema: %v\n", err)
-	} else if customSchema != nil {
-		tsDB.Schema = customSchema
-		fmt.Println("Using custom Typesense schema from BoltDB")
 	}
+	var effectiveSchema typesense30142.CollectionSchema
+	if customSchema != nil {
+		effectiveSchema = *customSchema
+		fmt.Println("Using custom Typesense schema from BoltDB")
+	} else {
+		effectiveSchema = typesense30142.DefaultSchema()
+	}
+	ensureContentFields(&effectiveSchema)
+	tsDB.Schema = &effectiveSchema
 
 	if err := tsDB.Init(); err != nil {
 		panic(err)
@@ -195,7 +207,7 @@ func main() {
 	}
 
 	// Reindexer for rebuilding Typesense from BoltDB
-	reindexer := NewReindexer(&tsDB, &boltDB, &mgmt)
+	reindexer := NewReindexer(&tsDB, &boltDB, &mgmt, contentStore)
 
 	relay.OnConnect = func(ctx context.Context) {
 		khatru.RequestAuth(ctx)
@@ -226,6 +238,7 @@ func main() {
 	}
 	relay.DeleteEvent = func(ctx context.Context, id nostr.ID) error {
 		boltDB.DeleteEvent(id)
+		_ = contentStore.Delete(id.Hex()) // idempotent; safe when no content row existed
 		return tsDB.DeleteEvent(id)
 	}
 
@@ -620,6 +633,82 @@ func main() {
 			n := acl.RefreshAllLists()
 			return nip86.Response{Result: map[string]any{"refreshed": n}}, nil
 
+		case "setcontent":
+			if len(request.Params) < 4 {
+				return nip86.Response{Error: "setcontent requires [event_id, text, fetched_at, status, (source_url)]"}, nil
+			}
+			eventIDHex, ok := request.Params[0].(string)
+			if !ok || eventIDHex == "" {
+				return nip86.Response{Error: "event_id must be a non-empty string"}, nil
+			}
+			text, ok := request.Params[1].(string)
+			if !ok {
+				return nip86.Response{Error: "text must be a string"}, nil
+			}
+			fetchedAtFloat, ok := request.Params[2].(float64)
+			if !ok {
+				return nip86.Response{Error: "fetched_at must be a number (unix seconds)"}, nil
+			}
+			status, ok := request.Params[3].(string)
+			if !ok || status == "" {
+				return nip86.Response{Error: "status must be a non-empty string"}, nil
+			}
+			var sourceURL string
+			if len(request.Params) > 4 && request.Params[4] != nil {
+				s, ok := request.Params[4].(string)
+				if !ok {
+					return nip86.Response{Error: "source_url must be a string or null"}, nil
+				}
+				sourceURL = s
+			}
+
+			// Verify the event exists in BoltDB — the indexer must only
+			// setcontent for events the relay actually holds.
+			id, err := nostr.IDFromHex(eventIDHex)
+			if err != nil {
+				return nip86.Response{Error: fmt.Sprintf("invalid event id: %v", err)}, nil
+			}
+			var found bool
+			for range boltDB.QueryEvents(nostr.Filter{IDs: []nostr.ID{id}, Limit: 1}, 1) {
+				found = true
+			}
+			if !found {
+				return nip86.Response{Error: "event not found"}, nil
+			}
+
+			entry := ContentEntry{
+				Text:      text,
+				FetchedAt: int64(fetchedAtFloat),
+				Status:    status,
+				SourceURL: sourceURL,
+			}
+			if err := contentStore.Put(eventIDHex, entry); err != nil {
+				return nip86.Response{Error: fmt.Sprintf("content store put: %v", err)}, nil
+			}
+			if err := PatchContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, eventIDHex, entry); err != nil {
+				// Typesense patch failure is recoverable: BoltDB is source of
+				// truth and a future reindex will re-project. Surface the
+				// error to the caller so it can log, but don't roll back.
+				return nip86.Response{Error: fmt.Sprintf("typesense patch: %v", err)}, nil
+			}
+			return nip86.Response{Result: true}, nil
+
+		case "refetchcontent":
+			if len(request.Params) == 0 {
+				return nip86.Response{Error: "refetchcontent requires [event_id]"}, nil
+			}
+			eventIDHex, ok := request.Params[0].(string)
+			if !ok || eventIDHex == "" {
+				return nip86.Response{Error: "event_id must be a non-empty string"}, nil
+			}
+			if err := contentStore.Delete(eventIDHex); err != nil {
+				return nip86.Response{Error: fmt.Sprintf("content store delete: %v", err)}, nil
+			}
+			if err := ClearContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, eventIDHex); err != nil {
+				return nip86.Response{Error: fmt.Sprintf("typesense clear: %v", err)}, nil
+			}
+			return nip86.Response{Result: true}, nil
+
 		default:
 			return nip86.Response{Error: fmt.Sprintf("unknown method '%s'", request.Method)}, nil
 		}
@@ -732,6 +821,30 @@ func (a *adminSet) revoke(pk nostr.PubKey, methods []string) {
 		delete(a.dynamic, pk)
 	} else {
 		entry.Methods = remaining
+	}
+}
+
+// ensureContentFields appends the three content fields to the schema if they
+// are not already present. Idempotent: safe to call on default or custom schemas.
+func ensureContentFields(schema *typesense30142.CollectionSchema) {
+	have := make(map[string]bool, len(schema.Fields))
+	for _, f := range schema.Fields {
+		have[f.Name] = true
+	}
+	if !have["content"] {
+		schema.Fields = append(schema.Fields, typesense30142.Field{
+			Name: "content", Type: "string", Optional: true,
+		})
+	}
+	if !have["content_fetched_at"] {
+		schema.Fields = append(schema.Fields, typesense30142.Field{
+			Name: "content_fetched_at", Type: "int64", Optional: true,
+		})
+	}
+	if !have["content_status"] {
+		schema.Fields = append(schema.Fields, typesense30142.Field{
+			Name: "content_status", Type: "string", Optional: true,
+		})
 	}
 }
 
