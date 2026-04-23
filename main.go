@@ -715,6 +715,37 @@ func main() {
 			}
 			return nip86.Response{Result: true}, nil
 
+		case "listrefetch":
+			ids, err := mgmt.ListNeedsRefetch()
+			if err != nil {
+				return nip86.Response{Error: fmt.Sprintf("list needs_refetch: %v", err)}, nil
+			}
+			if ids == nil {
+				ids = []string{}
+			}
+			return nip86.Response{Result: map[string]any{"event_ids": ids}}, nil
+
+		case "acknowledgerefetch":
+			if len(request.Params) == 0 {
+				return nip86.Response{Error: "acknowledgerefetch requires [event_ids]"}, nil
+			}
+			rawIDs, ok := request.Params[0].([]any)
+			if !ok {
+				return nip86.Response{Error: "event_ids must be an array of strings"}, nil
+			}
+			acked := 0
+			for _, raw := range rawIDs {
+				id, ok := raw.(string)
+				if !ok || id == "" {
+					return nip86.Response{Error: "event_ids must contain non-empty strings"}, nil
+				}
+				if err := mgmt.RemoveNeedsRefetch(id); err != nil {
+					return nip86.Response{Error: fmt.Sprintf("remove needs_refetch %s: %v", id, err)}, nil
+				}
+				acked++
+			}
+			return nip86.Response{Result: map[string]any{"acknowledged": acked}}, nil
+
 		default:
 			return nip86.Response{Error: fmt.Sprintf("unknown method '%s'", request.Method)}, nil
 		}
