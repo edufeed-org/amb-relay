@@ -53,6 +53,14 @@ Nostr Client → Khatru Relay (:3334) ─┬→ Typesense (:8108)  [search index
 - Schema config persisted in BoltDB; on startup, custom schema (if stored) overrides the hardcoded default
 - Reindex drops the Typesense collection and rebuilds from BoltDB events
 
+**Fulltext content methods (admin-only, NIP-86):**
+- `setcontent [event_id, text, fetched_at, status, (source_url)]` — amb-indexer writes extracted fulltext back; updates ContentStore + Typesense `content`/`content_fetched_at`/`content_status` fields.
+- `refetchcontent [event_id]` — clears stored content and flags the event in the `needs_refetch` BoltDB bucket so the indexer will re-ingest it.
+- `listrefetch []` — returns `{event_ids: [...]}` of events currently flagged for re-ingestion. Survives indexer downtime.
+- `acknowledgerefetch [event_ids]` — indexer calls this after re-enqueueing, removing each id from the bucket. Returns `{acknowledged: N}`.
+
+The indexer polls `listrefetch` every `REFETCH_POLL_INTERVAL` seconds, re-fetches each event, and acks the ids it accepted.
+
 ## Key Dependencies
 
 - **nostrlib** (`fiatjaf.com/nostr`): Fork of nostr libraries including khatru relay framework and eventstore — hosted at [git.edufeed.org/edufeed/nostrlib](https://git.edufeed.org/edufeed/nostrlib)

@@ -925,6 +925,32 @@ else
   FAIL=$((FAIL+1))
 fi
 
+# listrefetch surfaces the event id that refetchcontent just flagged.
+LIST_RESP=$(nip86_call "listrefetch" '[]')
+if echo "$LIST_RESP" | jq -e --arg id "$FULLTEXT_EVENT_ID" \
+     '.result.result.event_ids | index($id) != null' >/dev/null 2>&1; then
+  printf "${GREEN}PASS${NC}: listrefetch includes refetched event\n"
+  PASS=$((PASS+1))
+else
+  printf "${RED}FAIL${NC}: listrefetch missing event (response: %s)\n" "$LIST_RESP"
+  FAIL=$((FAIL+1))
+fi
+
+# acknowledgerefetch removes the entry.
+assert_nip86 "acknowledgerefetch succeeds" \
+  "acknowledgerefetch" "[[\"$FULLTEXT_EVENT_ID\"]]" \
+  '.result.result.acknowledged == 1'
+
+LIST_AFTER=$(nip86_call "listrefetch" '[]')
+if echo "$LIST_AFTER" | jq -e --arg id "$FULLTEXT_EVENT_ID" \
+     '.result.result.event_ids | index($id) == null' >/dev/null 2>&1; then
+  printf "${GREEN}PASS${NC}: listrefetch clears event after ack\n"
+  PASS=$((PASS+1))
+else
+  printf "${RED}FAIL${NC}: listrefetch still has event (response: %s)\n" "$LIST_AFTER"
+  FAIL=$((FAIL+1))
+fi
+
 # Non-admin cannot call setcontent
 NONADMIN_SC_RESP=$(nip86_call "setcontent" "[\"$FULLTEXT_EVENT_ID\", \"x\", $(date +%s), \"fetched\", \"\"]" "$NONADMIN_SEC" || true)
 assert_nip86_error "non-admin rejected from setcontent" "$NONADMIN_SC_RESP"
