@@ -668,12 +668,18 @@ func main() {
 			if err != nil {
 				return nip86.Response{Error: fmt.Sprintf("invalid event id: %v", err)}, nil
 			}
+			var event nostr.Event
 			var found bool
-			for range boltDB.QueryEvents(nostr.Filter{IDs: []nostr.ID{id}, Limit: 1}, 1) {
+			for e := range boltDB.QueryEvents(nostr.Filter{IDs: []nostr.ID{id}, Limit: 1}, 1) {
+				event = e
 				found = true
 			}
 			if !found {
 				return nip86.Response{Error: "event not found"}, nil
+			}
+			docID, err := tsDocIDFromEvent(event)
+			if err != nil {
+				return nip86.Response{Error: fmt.Sprintf("resolve ts doc id: %v", err)}, nil
 			}
 
 			entry := ContentEntry{
@@ -685,7 +691,7 @@ func main() {
 			if err := contentStore.Put(eventIDHex, entry); err != nil {
 				return nip86.Response{Error: fmt.Sprintf("content store put: %v", err)}, nil
 			}
-			if err := PatchContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, eventIDHex, entry); err != nil {
+			if err := PatchContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, docID, entry); err != nil {
 				// Typesense patch failure is recoverable: BoltDB is source of
 				// truth and a future reindex will re-project. Surface the
 				// error to the caller so it can log, but don't roll back.
@@ -701,10 +707,27 @@ func main() {
 			if !ok || eventIDHex == "" {
 				return nip86.Response{Error: "event_id must be a non-empty string"}, nil
 			}
+			id, err := nostr.IDFromHex(eventIDHex)
+			if err != nil {
+				return nip86.Response{Error: fmt.Sprintf("invalid event id: %v", err)}, nil
+			}
+			var event nostr.Event
+			var found bool
+			for e := range boltDB.QueryEvents(nostr.Filter{IDs: []nostr.ID{id}, Limit: 1}, 1) {
+				event = e
+				found = true
+			}
+			if !found {
+				return nip86.Response{Error: "event not found"}, nil
+			}
+			docID, err := tsDocIDFromEvent(event)
+			if err != nil {
+				return nip86.Response{Error: fmt.Sprintf("resolve ts doc id: %v", err)}, nil
+			}
 			if err := contentStore.Delete(eventIDHex); err != nil {
 				return nip86.Response{Error: fmt.Sprintf("content store delete: %v", err)}, nil
 			}
-			if err := ClearContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, eventIDHex); err != nil {
+			if err := ClearContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, docID); err != nil {
 				return nip86.Response{Error: fmt.Sprintf("typesense clear: %v", err)}, nil
 			}
 			// Signal the indexer to re-ingest this event. Best-effort:

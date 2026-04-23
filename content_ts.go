@@ -7,6 +7,9 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/eventstore/typesense30142"
 )
 
 // tsPatchTimeout bounds each partial-update HTTP call.
@@ -15,10 +18,23 @@ const tsPatchTimeout = 10 * time.Second
 // tsHTTPClient is reused so HTTP connections to Typesense are pooled.
 var tsHTTPClient = &http.Client{Timeout: tsPatchTimeout}
 
+// tsDocIDFromEvent returns the Typesense document ID used by the
+// typesense30142 eventstore for this addressable event. The eventstore
+// keys documents by {pubkey}:{d-tag}, not by event hex id — so any
+// partial-update path (PatchContent, ClearContent) must resolve the
+// d-tag from the event before calling Typesense.
+func tsDocIDFromEvent(event nostr.Event) (string, error) {
+	dTag := event.Tags.Find("d")
+	if dTag == nil || len(dTag) < 2 || dTag[1] == "" {
+		return "", fmt.Errorf("event %s has no d-tag", event.ID.Hex())
+	}
+	return typesense30142.GenerateDocumentID(event.PubKey.Hex(), dTag[1]), nil
+}
+
 // PatchContent updates the content, content_fetched_at, and content_status
 // fields on an existing Typesense document. Returns an error on non-2xx.
-// Caller supplies the Typesense host, api key, collection name, and doc id
-// (which for amb-relay events is the event id hex).
+// docID must be the Typesense document id (see tsDocIDFromEvent) — the
+// typesense30142 eventstore keys by {pubkey}:{d-tag}, not event hex id.
 func PatchContent(host, apiKey, collection, docID string, entry ContentEntry) error {
 	body := map[string]any{
 		"content":            entry.Text,
