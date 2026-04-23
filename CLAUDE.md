@@ -71,6 +71,14 @@ The relay itself does not fetch or embed resources — that is `amb-indexer`'s j
 - Auth: the indexer's pubkey (derived from `INDEXER_NSEC`) must be in the relay's `ADMIN_PUBKEYS` so its NIP-86 `setcontent` calls are accepted. Set `ADMIN_PUBKEYS` in this repo's `.env`.
 - Configuration for the indexer lives in `../amb-indexer/.env.indexer` (template: `.env.indexer.example`).
 
+**Fulltext content methods (admin-only, NIP-86):**
+- `setcontent [event_id, text, fetched_at, status, (source_url)]` — amb-indexer writes extracted fulltext back; updates ContentStore + Typesense `content`/`content_fetched_at`/`content_status` fields.
+- `refetchcontent [event_id]` — clears stored content and flags the event in the `needs_refetch` BoltDB bucket so the indexer will re-ingest it.
+- `listrefetch []` — returns `{event_ids: [...]}` of events currently flagged for re-ingestion. Survives indexer downtime.
+- `acknowledgerefetch [event_ids]` — indexer calls this after re-enqueueing, removing each id from the bucket. Returns `{acknowledged: N}`.
+
+The indexer polls `listrefetch` every `REFETCH_POLL_INTERVAL` seconds, re-fetches each event, and acks the ids it accepted.
+
 ## Key Dependencies
 
 - **nostrlib** (`fiatjaf.com/nostr`): Fork of nostr libraries including khatru relay framework and eventstore — hosted at [git.edufeed.org/edufeed/nostrlib](https://git.edufeed.org/edufeed/nostrlib)

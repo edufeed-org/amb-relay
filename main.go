@@ -707,7 +707,44 @@ func main() {
 			if err := ClearContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, eventIDHex); err != nil {
 				return nip86.Response{Error: fmt.Sprintf("typesense clear: %v", err)}, nil
 			}
+			// Signal the indexer to re-ingest this event. Best-effort:
+			// the operator's intent (clear content) already succeeded,
+			// so a failure here is logged but does not fail the call.
+			if err := mgmt.MarkNeedsRefetch(eventIDHex); err != nil {
+				fmt.Printf("refetchcontent: mark needs_refetch %s: %v\n", eventIDHex, err)
+			}
 			return nip86.Response{Result: true}, nil
+
+		case "listrefetch":
+			ids, err := mgmt.ListNeedsRefetch()
+			if err != nil {
+				return nip86.Response{Error: fmt.Sprintf("list needs_refetch: %v", err)}, nil
+			}
+			if ids == nil {
+				ids = []string{}
+			}
+			return nip86.Response{Result: map[string]any{"event_ids": ids}}, nil
+
+		case "acknowledgerefetch":
+			if len(request.Params) == 0 {
+				return nip86.Response{Error: "acknowledgerefetch requires [event_ids]"}, nil
+			}
+			rawIDs, ok := request.Params[0].([]any)
+			if !ok {
+				return nip86.Response{Error: "event_ids must be an array of strings"}, nil
+			}
+			acked := 0
+			for _, raw := range rawIDs {
+				id, ok := raw.(string)
+				if !ok || id == "" {
+					return nip86.Response{Error: "event_ids must contain non-empty strings"}, nil
+				}
+				if err := mgmt.RemoveNeedsRefetch(id); err != nil {
+					return nip86.Response{Error: fmt.Sprintf("remove needs_refetch %s: %v", id, err)}, nil
+				}
+				acked++
+			}
+			return nip86.Response{Result: map[string]any{"acknowledged": acked}}, nil
 
 		default:
 			return nip86.Response{Error: fmt.Sprintf("unknown method '%s'", request.Method)}, nil
@@ -728,7 +765,7 @@ var startTime = time.Now()
 
 type adminSet struct {
 	mu      sync.RWMutex
-	static  map[nostr.PubKey]bool       // env-var admins (always full access, unrevokable)
+	static  map[nostr.PubKey]bool        // env-var admins (always full access, unrevokable)
 	dynamic map[nostr.PubKey]*adminEntry // NIP-86 managed admins (persisted in BoltDB)
 }
 

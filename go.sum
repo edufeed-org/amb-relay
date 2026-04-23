@@ -1,5 +1,5 @@
-git.edufeed.org/edufeed/nostrlib v0.0.0-20260310074100-ef00ae55c7b5 h1:K2pH0EBXTVSokXNY322oAAYNke/HZGacTZ5YCocBeb4=
-git.edufeed.org/edufeed/nostrlib v0.0.0-20260310074100-ef00ae55c7b5/go.mod h1:ue7yw0zHfZj23Ml2kVSdBx0ENEaZiuvGxs/8VEN93FU=
+git.edufeed.org/edufeed/nostrlib v0.0.0-20260423112949-dac20e87a12c h1:TC2YsdeAYq8bOSRyTbmNXnE8M8vD8k8ReyK76xTp5Ck=
+git.edufeed.org/edufeed/nostrlib v0.0.0-20260423112949-dac20e87a12c/go.mod h1:ue7yw0zHfZj23Ml2kVSdBx0ENEaZiuvGxs/8VEN93FU=
 github.com/FastFilter/xorfilter v0.2.1 h1:lbdeLG9BdpquK64ZsleBS8B4xO/QW1IM0gMzF7KaBKc=
 github.com/FastFilter/xorfilter v0.2.1/go.mod h1:aumvdkhscz6YBZF9ZA/6O4fIoNod4YR50kIVGGZ7l9I=
 github.com/ImVexed/fasturl v0.0.0-20230304231329-4e41488060f3 h1:ClzzXMDDuUbWfNNZqGeYq4PnYOlwlOVIvSyNaIy0ykg=
