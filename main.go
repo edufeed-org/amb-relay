@@ -707,6 +707,12 @@ func main() {
 			if err := ClearContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, eventIDHex); err != nil {
 				return nip86.Response{Error: fmt.Sprintf("typesense clear: %v", err)}, nil
 			}
+			// Signal the indexer to re-ingest this event. Best-effort:
+			// the operator's intent (clear content) already succeeded,
+			// so a failure here is logged but does not fail the call.
+			if err := mgmt.MarkNeedsRefetch(eventIDHex); err != nil {
+				fmt.Printf("refetchcontent: mark needs_refetch %s: %v\n", eventIDHex, err)
+			}
 			return nip86.Response{Result: true}, nil
 
 		default:
@@ -728,7 +734,7 @@ var startTime = time.Now()
 
 type adminSet struct {
 	mu      sync.RWMutex
-	static  map[nostr.PubKey]bool       // env-var admins (always full access, unrevokable)
+	static  map[nostr.PubKey]bool        // env-var admins (always full access, unrevokable)
 	dynamic map[nostr.PubKey]*adminEntry // NIP-86 managed admins (persisted in BoltDB)
 }
 
