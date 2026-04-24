@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"fiatjaf.com/nostr"
@@ -60,8 +61,10 @@ func patchDoc(host, apiKey, collection, docID string, body map[string]any) error
 	if err != nil {
 		return fmt.Errorf("marshal patch body: %w", err)
 	}
-	url := fmt.Sprintf("%s/collections/%s/documents/%s", host, collection, docID)
-	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(raw))
+	// docID contains ':' and for AMB events also '/' (d-tag is a URL).
+	// PathEscape keeps these from being parsed as extra path segments.
+	endpoint := fmt.Sprintf("%s/collections/%s/documents/%s", host, collection, url.PathEscape(docID))
+	req, err := http.NewRequest(http.MethodPatch, endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return fmt.Errorf("build patch request: %w", err)
 	}
