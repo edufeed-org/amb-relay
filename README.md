@@ -2,6 +2,12 @@
 
 A Nostr relay for AMB (Learning Resource Metadata) events (kind 30142). Built on the [khatru](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/khatru) relay framework with [Typesense](https://typesense.org/) as the full-text search backend.
 
+The relay is paired with [`amb-indexer`](../amb-indexer), which fetches
+the resources referenced by each 30142 event, chunks + embeds them,
+writes the fulltext back via NIP-86 `setcontent`, and exposes a
+`/search_chunks` HTTP surface. For the full system architecture and
+end-to-end testing guidance see **[`docs/architecture.md`](docs/architecture.md)**.
+
 ## Quick Start
 
 1. Copy `.env.example` to `.env` and fill in your values
