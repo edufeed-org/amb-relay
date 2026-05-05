@@ -678,11 +678,6 @@ func main() {
 			if !found {
 				return nip86.Response{Error: "event not found"}, nil
 			}
-			docID, err := tsDocIDFromEvent(event)
-			if err != nil {
-				return nip86.Response{Error: fmt.Sprintf("resolve ts doc id: %v", err)}, nil
-			}
-
 			entry := ContentEntry{
 				Text:      text,
 				FetchedAt: int64(fetchedAtFloat),
@@ -692,12 +687,11 @@ func main() {
 			if err := contentStore.Put(eventIDHex, entry); err != nil {
 				return nip86.Response{Error: fmt.Sprintf("content store put: %v", err)}, nil
 			}
-			if err := PatchContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, docID, entry); err != nil {
-				// Typesense patch failure is recoverable: BoltDB is source of
-				// truth and a future reindex will re-project. Surface the
-				// error to the caller so it can log, but don't roll back.
-				return nip86.Response{Error: fmt.Sprintf("typesense patch: %v", err)}, nil
-			}
+			// Queue projection. The buffer flushes the pending event
+			// batch (including this event) before issuing the patch, so
+			// the doc is guaranteed to exist in Typesense by patch time.
+			// Direct PATCH would race with tsBuf's batched flush.
+			tsBuf.QueueContent(event, entry)
 			return nip86.Response{Result: true}, nil
 
 		case "refetchcontent":
@@ -721,16 +715,13 @@ func main() {
 			if !found {
 				return nip86.Response{Error: "event not found"}, nil
 			}
-			docID, err := tsDocIDFromEvent(event)
-			if err != nil {
-				return nip86.Response{Error: fmt.Sprintf("resolve ts doc id: %v", err)}, nil
-			}
 			if err := contentStore.Delete(eventIDHex); err != nil {
 				return nip86.Response{Error: fmt.Sprintf("content store delete: %v", err)}, nil
 			}
-			if err := ClearContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, docID); err != nil {
-				return nip86.Response{Error: fmt.Sprintf("typesense clear: %v", err)}, nil
-			}
+			// Project an empty content entry through the buffer so
+			// Typesense reflects the clear. Direct PATCH would race
+			// with tsBuf's pending batches.
+			tsBuf.QueueContent(event, ContentEntry{})
 			// Signal the indexer to re-ingest this event. Best-effort:
 			// the operator's intent (clear content) already succeeded,
 			// so a failure here is logged but does not fail the call.
