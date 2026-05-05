@@ -240,6 +240,14 @@ When present, the `content` field participates in BM25 search alongside metadata
 
 The indexer service connects as a regular Nostr client + a NIP-86 admin. Add its pubkey to `ADMIN_PUBKEYS` to authorize `setcontent` and `refetchcontent`. See `docs/superpowers/specs/2026-04-21-amb-resource-fulltext-indexing-design.md` for the full design.
 
+## Mirroring events from another relay
+
+To stage events from a remote relay (e.g. prod) into this one, use the
+`mirror-prod` tool that ships with `amb-indexer`. It paginates REQs and
+republishes events verbatim. See
+**[`../amb-indexer/README.md#mirror-events-from-another-relay`](../amb-indexer/README.md#mirror-events-from-another-relay)**
+for recipes and caveats (no re-signing, no content/chunks, no kind-5).
+
 ## Architecture
 
 ```
