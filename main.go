@@ -145,6 +145,7 @@ func main() {
 		ApiKey:         os.Getenv("TS_APIKEY"),
 		Host:           os.Getenv("TS_HOST"),
 		CollectionName: os.Getenv("TS_COLLECTION"),
+		RawEventStore:  &boltDB,
 	}
 
 	// Load custom schema from BoltDB if one was stored; otherwise start from
