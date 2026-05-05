@@ -127,6 +127,20 @@ func (m *ManagementStore) AllowEvent(id nostr.ID) error {
 	})
 }
 
+// IsEventBanned checks if an event id is in the ban list. Used to reject
+// resubmission of events the operator has previously deleted via NIP-86
+// `banevent`.
+func (m *ManagementStore) IsEventBanned(id nostr.ID) bool {
+	var banned bool
+	m.DB.View(func(tx *bbolt.Tx) error {
+		if tx.Bucket(bucketBannedEvents).Get([]byte(id.Hex())) != nil {
+			banned = true
+		}
+		return nil
+	})
+	return banned
+}
+
 // ListBannedEvents returns all banned event IDs.
 func (m *ManagementStore) ListBannedEvents() ([]nip86.IDReason, error) {
 	var result []nip86.IDReason

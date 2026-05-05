@@ -250,6 +250,9 @@ func main() {
 		if mgmt.IsPubKeyBanned(event.PubKey) {
 			return true, "pubkey is banned"
 		}
+		if mgmt.IsEventBanned(event.ID) {
+			return true, "event is banned"
+		}
 		if acl.IsWriteRestricted() && !admins.isAdmin(event.PubKey) && !acl.IsWriteAllowed(event.PubKey.Hex()) {
 			return true, "restricted: pubkey not on write allowlist"
 		}
@@ -337,6 +340,14 @@ func main() {
 		return mgmt.AllowPubKey(pubkey)
 	}
 	relay.ManagementAPI.BanEvent = func(ctx context.Context, id nostr.ID, reason string) error {
+		// Delete from all three stores so the event is actually gone, then
+		// record the id on the ban list to block resubmission. Mirrors the
+		// kind-5 deletion path (see relay.DeleteEvent above).
+		boltDB.DeleteEvent(id)
+		_ = contentStore.Delete(id.Hex()) // idempotent
+		if err := tsDB.DeleteEvent(id); err != nil {
+			return err
+		}
 		return mgmt.BanEvent(id, reason)
 	}
 	relay.ManagementAPI.ListBannedEvents = func(ctx context.Context) ([]nip86.IDReason, error) {

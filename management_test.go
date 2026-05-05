@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"fiatjaf.com/nostr"
 	"go.etcd.io/bbolt"
 )
 
@@ -86,6 +87,33 @@ func TestNeedsRefetch_MarkListRemove(t *testing.T) {
 	ids, _ = mgmt.ListNeedsRefetch()
 	if len(ids) != 0 {
 		t.Fatalf("want empty after all removes, got %v", ids)
+	}
+}
+
+func TestBanEvent_IsEventBanned(t *testing.T) {
+	mgmt := openTestMgmt(t)
+
+	id, err := nostr.IDFromHex("0000000000000000000000000000000000000000000000000000000000000001")
+	if err != nil {
+		t.Fatalf("IDFromHex: %v", err)
+	}
+
+	if mgmt.IsEventBanned(id) {
+		t.Fatal("fresh store: id should not be banned")
+	}
+
+	if err := mgmt.BanEvent(id, "spam"); err != nil {
+		t.Fatalf("BanEvent: %v", err)
+	}
+	if !mgmt.IsEventBanned(id) {
+		t.Fatal("after BanEvent: id should be banned")
+	}
+
+	if err := mgmt.AllowEvent(id); err != nil {
+		t.Fatalf("AllowEvent: %v", err)
+	}
+	if mgmt.IsEventBanned(id) {
+		t.Fatal("after AllowEvent: id should not be banned")
 	}
 }
 

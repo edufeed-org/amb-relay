@@ -193,9 +193,9 @@ Only the relay operator (`PUBKEY`) and additional admins (`ADMIN_PUBKEYS`) are a
 | `banpubkey` | Ban a pubkey from publishing |
 | `listbannedpubkeys` | List all banned pubkeys |
 | `allowpubkey` | Remove a pubkey ban |
-| `banevent` | Ban an event by ID |
+| `banevent` | Delete an event by ID and block resubmission. Removes from BoltDB, ContentStore, and Typesense, then records the id on the ban list so the same event cannot be re-published. |
 | `listbannedevents` | List all banned event IDs |
-| `allowevent` | Remove an event ban |
+| `allowevent` | Remove an event ban (does **not** restore the event — the data is gone; only clears the resubmission block) |
 | `changerelayname` | Update relay name (in memory) |
 | `changerelaydescription` | Update relay description |
 | `changerelayicon` | Update relay icon URL |
