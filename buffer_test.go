@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -202,5 +203,36 @@ func TestTSWriteBuffer_DrainsOnClose(t *testing.T) {
 	}
 	if total != 5 {
 		t.Errorf("drained %d events on close, want 5", total)
+	}
+}
+
+// TestTSWriteBuffer_DrainDoesNotInheritRetries verifies that during Close()
+// drain, a failing upsert for one content task does not cause subsequent
+// content tasks in the drain queue to skip their patches. The bug we're
+// guarding against: a shared `retries` counter that the drain loop never
+// resets, causing later patches to be silently dropped.
+func TestTSWriteBuffer_DrainDoesNotInheritRetries(t *testing.T) {
+	w := &fakeWriter{}
+	// Make the very first Upsert fail; subsequent Upserts succeed.
+	w.upsertErr = []error{errors.New("simulated TS outage")}
+	buf := newProjectorBuffer(w, 100, 1*time.Hour)
+
+	sk := nostr.Generate()
+	e1 := mkEvent(t, sk, "drain-r1", 1_700_001_001)
+	e2 := mkEvent(t, sk, "drain-r2", 1_700_001_002)
+
+	// Both content tasks are queued before Close so they sit in the channel.
+	buf.QueueContent(e1, ContentEntry{Text: "c1", FetchedAt: 1, Status: "ok"})
+	buf.QueueContent(e2, ContentEntry{Text: "c2", FetchedAt: 2, Status: "ok"})
+
+	buf.Close()
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// Drain must not block on retry sleeps and must not silently drop e2's
+	// patch just because e1's upsert failed. Both patches should land,
+	// because Upsert retries are not the drain's job.
+	if len(w.patches) != 2 {
+		t.Fatalf("got %d patches after drain, want 2 (drain dropped patches due to retry-state bleed)", len(w.patches))
 	}
 }

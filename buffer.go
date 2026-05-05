@@ -99,7 +99,13 @@ func (b *TSWriteBuffer) run() {
 				retries = 0
 				return
 			}
-			// Backoff and retry. Caller will re-flush via the next select tick.
+			// Sleep before returning so the next flush attempt isn't
+			// immediate. For ticker-driven flushes, the caller's next
+			// select case picks up after this sleep. For inline flushes
+			// from the content-task path, this sleep stalls the
+			// goroutine — by design: we don't want to hammer Typesense
+			// while it's failing, and ContentStore is durable so the
+			// patch can wait.
 			backoff := time.Duration(1<<(retries-1)) * time.Second
 			if backoff > 16*time.Second {
 				backoff = 16 * time.Second
@@ -111,7 +117,51 @@ func (b *TSWriteBuffer) run() {
 		retries = 0
 	}
 
+	drainFlush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		if b.upsertOnce(batch) {
+			log.Printf("ts-buffer: shutdown flush failed for %d events (data safe in BoltDB, reindex to recover)", len(batch))
+		}
+		batch = batch[:0]
+	}
+
+	// drain is the shutdown path: best-effort, no retries, no sleeps.
+	// Closed b.ch must be passed to it; caller is responsible for that.
+	drain := func() {
+		// Drain remaining tasks. Best-effort: no retries, no sleeps —
+		// shutdown should be prompt. Failed flushes log; data is safe
+		// in BoltDB / ContentStore and reindex is the recovery path.
+		for task := range b.ch {
+			if task.Content == nil {
+				batch = append(batch, task.Event)
+				if len(batch) >= b.batchSize {
+					drainFlush()
+				}
+			} else {
+				batch = append(batch, task.Event)
+				drainFlush()
+				if err := b.writer.Patch(task.Event, *task.Content); err != nil {
+					log.Printf("ts-buffer: shutdown patch %s: %v", task.Event.ID.Hex(), err)
+				}
+			}
+		}
+		drainFlush()
+	}
+
 	for {
+		// Prioritise the shutdown signal so that tasks queued concurrently
+		// with Close() are drained by the best-effort drain path rather
+		// than being subject to the retry-aware normal path.
+		select {
+		case <-b.done:
+			close(b.ch)
+			drain()
+			return
+		default:
+		}
+
 		select {
 		case task, ok := <-b.ch:
 			if !ok {
@@ -128,10 +178,22 @@ func (b *TSWriteBuffer) run() {
 				batch = append(batch, task.Event)
 				flushBatch()
 				if retries > 0 {
-					// Upsert is still failing. Skip the patch; the event will
-					// re-flush via the next tick. The content stays in
-					// ContentStore; reindex recovers.
-					log.Printf("ts-buffer: skipping content patch for %s, upsert still failing", task.Event.ID.Hex())
+					// Upsert is still failing. If shutdown was signalled
+					// while we were sleeping in flushBatch, attempt the
+					// patch best-effort (same semantics as the drain path)
+					// so that tasks processed just before Close() are not
+					// silently dropped.
+					select {
+					case <-b.done:
+						if err := b.writer.Patch(task.Event, *task.Content); err != nil {
+							log.Printf("ts-buffer: shutdown patch %s: %v", task.Event.ID.Hex(), err)
+						}
+					default:
+						// Still running normally. Skip the patch; the event
+						// will re-flush via the next tick. The content stays
+						// in ContentStore; reindex recovers.
+						log.Printf("ts-buffer: skipping content patch for %s, upsert still failing — content is durable in ContentStore, reindex when Typesense recovers", task.Event.ID.Hex())
+					}
 					continue
 				}
 				if err := b.writer.Patch(task.Event, *task.Content); err != nil {
@@ -144,20 +206,7 @@ func (b *TSWriteBuffer) run() {
 
 		case <-b.done:
 			close(b.ch)
-			for task := range b.ch {
-				if task.Content == nil {
-					batch = append(batch, task.Event)
-				} else {
-					batch = append(batch, task.Event)
-					flushBatch()
-					if retries == 0 {
-						if err := b.writer.Patch(task.Event, *task.Content); err != nil {
-							log.Printf("ts-buffer: shutdown patch %s: %v", task.Event.ID.Hex(), err)
-						}
-					}
-				}
-			}
-			flushBatch()
+			drain()
 			return
 		}
 	}
