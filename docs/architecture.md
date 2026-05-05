@@ -539,6 +539,41 @@ GOWORK=off go build -o /tmp/mirror-prod ./amb-indexer/cmd/mirror-prod
 open http://localhost:18080/ui
 ```
 
+### Typesense as a projection of BoltDB+ContentStore
+
+The relay treats BoltDB (raw events) and ContentStore (indexer-supplied
+fulltext) as the source of truth. Typesense is a derived **projection**
+maintained by a single writer goroutine inside `TSWriteBuffer` — it
+batches incoming events and flushes them to the search index, and it
+also handles fulltext patches from `setcontent`. Nothing else writes to
+Typesense at runtime.
+
+This pattern is borrowed from the `bleve` eventstore in nostrlib (see
+`RawEventStore` on the `TSBackend`): queries that can be answered by the
+raw store (e.g. address-replaceable lookups by `kind+author+#d`) bypass
+Typesense entirely and read from BoltDB. Typesense only owns the
+full-text/search-relevant projection; replaceability and dedupe live in
+BoltDB.
+
+**Why this matters during bulk replay:** before the projection refactor
+the relay had two writers — the live event-storage path *and* the
+indexer's NIP-86 `setcontent` PATCH — racing to upsert the same
+Typesense doc. During a `mirror-prod` run that race manifested as
+widespread `setcontent` 404s (the doc didn't exist yet when the indexer
+patched it), and `content_status=fetched` stayed at 0 across the entire
+8554-event corpus. With the projector serializing all writes,
+`setcontent` is applied atop a doc that is guaranteed to already exist,
+and `content_status` rolls forward as the indexer drains.
+
+**Recovery still goes through reindex.** If Typesense is wiped or its
+schema is reset, the NIP-86 `reindex` method drops the collection and
+rebuilds it from BoltDB events plus the ContentStore — same projection,
+applied in bulk. There is no "rebuild from Typesense" path because
+Typesense is never the authority.
+
+See `docs/superpowers/plans/2026-05-05-typesense-projection-pattern.md`
+for the full plan and the verification run that proved out the pattern.
+
 ## See also
 
 - `amb-indexer/README.md` — service-level quick reference.
