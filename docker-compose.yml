@@ -24,6 +24,12 @@ services:
         condition: service_healthy
       embed:
         condition: service_healthy
+    # BoltDB lives at /root/data/relay.db (DB_PATH default). Without this
+    # named volume, the database is in the container layer and gets wiped
+    # on every rebuild, leaving Typesense docs orphaned with no raw store
+    # entry — which silently breaks REQ for those events.
+    volumes:
+      - relay_data:/root/data
     environment:
       - NAME=${NAME}
       - PUBKEY=${PUBKEY}
@@ -81,3 +87,4 @@ services:
 volumes:
   indexer_data:
   embed_model_cache:
+  relay_data:

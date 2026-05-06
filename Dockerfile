@@ -18,16 +18,21 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -o /app/amb-relay .
+# Build the relay and the hydrate-bolt one-shot.
+# hydrate-bolt is shipped in the image so operators can run it via
+# `docker compose run --rm --entrypoint /root/hydrate-bolt amb-relay`
+# to reconcile a Typesense-vs-BoltDB skew without rebuilding.
+RUN CGO_ENABLED=0 GOOS=linux go build -o /app/amb-relay . && \
+    CGO_ENABLED=0 GOOS=linux go build -o /app/hydrate-bolt ./cmd/hydrate-bolt
 
 # Start a new stage from scratch
 FROM alpine:latest
 
 WORKDIR /root/
 
-# Copy the binary from the builder stage
+# Copy the binaries from the builder stage
 COPY --from=builder /app/amb-relay .
+COPY --from=builder /app/hydrate-bolt .
 
 # Expose port 3334
 EXPOSE 3334
