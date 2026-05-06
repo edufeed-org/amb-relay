@@ -217,6 +217,26 @@ These custom methods control the Typesense search index schema, reindexing, and 
 
 Schema changes are deferred — `updatecollectionschema` only stores the schema, and `reindex` applies it. During reindex the relay cannot serve search results (drop + rebuild approach).
 
+#### Schema migrations after a release
+
+When a new relay release changes the hardcoded default schema (e.g. adding a new indexed field), running operators need to roll the live Typesense collection forward. BoltDB is the source of truth, so the recipe is "drop and rebuild from BoltDB":
+
+```bash
+# 1. Pull the new code and restart the relay container
+docker compose pull && docker compose up -d --build amb-relay
+
+# 2. Apply the new default schema (clears any stored custom schema)
+nak event -k 24242 --tag method=resetcollectionschema --sec $ADMIN_NSEC --auth wss://<relay-host>
+
+# 3. Drop and rebuild the Typesense collection from BoltDB
+nak event -k 24242 --tag method=reindex --sec $ADMIN_NSEC --auth wss://<relay-host>
+
+# 4. Poll until done
+nak event -k 24242 --tag method=getreindexstatus --sec $ADMIN_NSEC --auth wss://<relay-host>
+```
+
+Skip step 2 if the running relay was previously configured with `updatecollectionschema` and you want to keep that custom schema. Step 3 also re-runs the fulltext replay pass, so `content` rows are preserved across the rebuild. Search is unavailable for the duration of step 3.
+
 ### Semantic search methods
 
 | Method | Params | Description |
