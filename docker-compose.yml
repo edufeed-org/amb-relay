@@ -22,6 +22,8 @@ services:
     depends_on:
       typesense:
         condition: service_healthy
+      embed:
+        condition: service_healthy
     environment:
       - NAME=${NAME}
       - PUBKEY=${PUBKEY}
@@ -40,6 +42,26 @@ services:
     restart: unless-stopped
     # No port exposure to host; reachable only on the internal network.
 
+  embed:
+    build: ./embed
+    restart: unless-stopped
+    environment:
+      - EMBED_TOKEN=${EMBED_TOKEN}
+    volumes:
+      - embed_model_cache:/cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8100/health\").read()'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      # Model load on first boot pulls ~120 MB and takes time. Generous start_period
+      # avoids tripping unhealthy during cold start.
+      start_period: 120s
+    # No port exposure to host by default; reachable only on the internal network.
+    # Uncomment for host-side debugging:
+    # ports:
+    #   - "8100:8100"
+
   amb-indexer:
     build: ../amb-indexer
     restart: unless-stopped
@@ -50,9 +72,12 @@ services:
         condition: service_healthy
       tika:
         condition: service_started
+      embed:
+        condition: service_healthy
     env_file: ../amb-indexer/.env.indexer
     volumes:
       - indexer_data:/data
 
 volumes:
   indexer_data:
+  embed_model_cache:
