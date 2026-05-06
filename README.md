@@ -156,9 +156,12 @@ nak count -k 30142 --search "physics" ws://localhost:3334
 # Semantic search (if enabled)
 # Finds "quantum mechanics" even when searching for related terms
 nak req --search "Heisenberg uncertainty principle" -k 30142 ws://localhost:3334
+
+# Extension namespace (NIP-AMB ext:) — search by label or filter by URI
+nak req --search "ext.ekw.bistum.prefLabel.de:Hannover" -k 30142 ws://localhost:3334
 ```
 
-**Note:** `nak` does not support colon-delimited tag names (`#about:id`, `#learningResourceType:id`). For these filters, use a Go client with `nostr.TagMap`. See the [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md) for full query documentation.
+**Note:** `nak` does not support colon-delimited tag names (`#about:id`, `#learningResourceType:id`, `#ext:<ns>:<facet>:id`). For these filters, use a Go client with `nostr.TagMap`. See the [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md) for full query documentation, including the [`ext:` extension namespace](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md#extension-namespace-ext) for non-AMB-core metadata fields.
 
 ### Direct Typesense debugging
 
