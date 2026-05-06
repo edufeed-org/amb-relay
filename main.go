@@ -145,6 +145,7 @@ func main() {
 		ApiKey:         os.Getenv("TS_APIKEY"),
 		Host:           os.Getenv("TS_HOST"),
 		CollectionName: os.Getenv("TS_COLLECTION"),
+		RawEventStore:  &boltDB,
 	}
 
 	// Load custom schema from BoltDB if one was stored; otherwise start from
@@ -249,6 +250,9 @@ func main() {
 		if mgmt.IsPubKeyBanned(event.PubKey) {
 			return true, "pubkey is banned"
 		}
+		if mgmt.IsEventBanned(event.ID) {
+			return true, "event is banned"
+		}
 		if acl.IsWriteRestricted() && !admins.isAdmin(event.PubKey) && !acl.IsWriteAllowed(event.PubKey.Hex()) {
 			return true, "restricted: pubkey not on write allowlist"
 		}
@@ -336,6 +340,14 @@ func main() {
 		return mgmt.AllowPubKey(pubkey)
 	}
 	relay.ManagementAPI.BanEvent = func(ctx context.Context, id nostr.ID, reason string) error {
+		// Delete from all three stores so the event is actually gone, then
+		// record the id on the ban list to block resubmission. Mirrors the
+		// kind-5 deletion path (see relay.DeleteEvent above).
+		boltDB.DeleteEvent(id)
+		_ = contentStore.Delete(id.Hex()) // idempotent
+		if err := tsDB.DeleteEvent(id); err != nil {
+			return err
+		}
 		return mgmt.BanEvent(id, reason)
 	}
 	relay.ManagementAPI.ListBannedEvents = func(ctx context.Context) ([]nip86.IDReason, error) {
@@ -668,14 +680,15 @@ func main() {
 			if err != nil {
 				return nip86.Response{Error: fmt.Sprintf("invalid event id: %v", err)}, nil
 			}
+			var event nostr.Event
 			var found bool
-			for range boltDB.QueryEvents(nostr.Filter{IDs: []nostr.ID{id}, Limit: 1}, 1) {
+			for e := range boltDB.QueryEvents(nostr.Filter{IDs: []nostr.ID{id}, Limit: 1}, 1) {
+				event = e
 				found = true
 			}
 			if !found {
 				return nip86.Response{Error: "event not found"}, nil
 			}
-
 			entry := ContentEntry{
 				Text:      text,
 				FetchedAt: int64(fetchedAtFloat),
@@ -685,12 +698,11 @@ func main() {
 			if err := contentStore.Put(eventIDHex, entry); err != nil {
 				return nip86.Response{Error: fmt.Sprintf("content store put: %v", err)}, nil
 			}
-			if err := PatchContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, eventIDHex, entry); err != nil {
-				// Typesense patch failure is recoverable: BoltDB is source of
-				// truth and a future reindex will re-project. Surface the
-				// error to the caller so it can log, but don't roll back.
-				return nip86.Response{Error: fmt.Sprintf("typesense patch: %v", err)}, nil
-			}
+			// Queue projection. The buffer flushes the pending event
+			// batch (including this event) before issuing the patch, so
+			// the doc is guaranteed to exist in Typesense by patch time.
+			// Direct PATCH would race with tsBuf's batched flush.
+			tsBuf.QueueContent(event, entry)
 			return nip86.Response{Result: true}, nil
 
 		case "refetchcontent":
@@ -701,13 +713,64 @@ func main() {
 			if !ok || eventIDHex == "" {
 				return nip86.Response{Error: "event_id must be a non-empty string"}, nil
 			}
+			id, err := nostr.IDFromHex(eventIDHex)
+			if err != nil {
+				return nip86.Response{Error: fmt.Sprintf("invalid event id: %v", err)}, nil
+			}
+			var event nostr.Event
+			var found bool
+			for e := range boltDB.QueryEvents(nostr.Filter{IDs: []nostr.ID{id}, Limit: 1}, 1) {
+				event = e
+				found = true
+			}
+			if !found {
+				return nip86.Response{Error: "event not found"}, nil
+			}
 			if err := contentStore.Delete(eventIDHex); err != nil {
 				return nip86.Response{Error: fmt.Sprintf("content store delete: %v", err)}, nil
 			}
-			if err := ClearContent(tsDB.Host, tsDB.ApiKey, tsDB.CollectionName, eventIDHex); err != nil {
-				return nip86.Response{Error: fmt.Sprintf("typesense clear: %v", err)}, nil
+			// Project an empty content entry through the buffer so
+			// Typesense reflects the clear. Direct PATCH would race
+			// with tsBuf's pending batches.
+			tsBuf.QueueContent(event, ContentEntry{})
+			// Signal the indexer to re-ingest this event. Best-effort:
+			// the operator's intent (clear content) already succeeded,
+			// so a failure here is logged but does not fail the call.
+			if err := mgmt.MarkNeedsRefetch(eventIDHex); err != nil {
+				fmt.Printf("refetchcontent: mark needs_refetch %s: %v\n", eventIDHex, err)
 			}
 			return nip86.Response{Result: true}, nil
+
+		case "listrefetch":
+			ids, err := mgmt.ListNeedsRefetch()
+			if err != nil {
+				return nip86.Response{Error: fmt.Sprintf("list needs_refetch: %v", err)}, nil
+			}
+			if ids == nil {
+				ids = []string{}
+			}
+			return nip86.Response{Result: map[string]any{"event_ids": ids}}, nil
+
+		case "acknowledgerefetch":
+			if len(request.Params) == 0 {
+				return nip86.Response{Error: "acknowledgerefetch requires [event_ids]"}, nil
+			}
+			rawIDs, ok := request.Params[0].([]any)
+			if !ok {
+				return nip86.Response{Error: "event_ids must be an array of strings"}, nil
+			}
+			acked := 0
+			for _, raw := range rawIDs {
+				id, ok := raw.(string)
+				if !ok || id == "" {
+					return nip86.Response{Error: "event_ids must contain non-empty strings"}, nil
+				}
+				if err := mgmt.RemoveNeedsRefetch(id); err != nil {
+					return nip86.Response{Error: fmt.Sprintf("remove needs_refetch %s: %v", id, err)}, nil
+				}
+				acked++
+			}
+			return nip86.Response{Result: map[string]any{"acknowledged": acked}}, nil
 
 		default:
 			return nip86.Response{Error: fmt.Sprintf("unknown method '%s'", request.Method)}, nil
@@ -728,7 +791,7 @@ var startTime = time.Now()
 
 type adminSet struct {
 	mu      sync.RWMutex
-	static  map[nostr.PubKey]bool       // env-var admins (always full access, unrevokable)
+	static  map[nostr.PubKey]bool        // env-var admins (always full access, unrevokable)
 	dynamic map[nostr.PubKey]*adminEntry // NIP-86 managed admins (persisted in BoltDB)
 }
 

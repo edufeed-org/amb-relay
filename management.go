@@ -21,6 +21,7 @@ var (
 	bucketListReferences  = []byte("list_references")
 	bucketAdmins          = []byte("admins")
 	bucketFetchedContent  = []byte("fetched_content") // resource fulltext keyed by event_id
+	bucketNeedsRefetch    = []byte("needs_refetch")   // event_ids flagged for re-ingestion
 )
 
 type adminEntry struct {
@@ -53,7 +54,7 @@ type ManagementStore struct {
 func (m *ManagementStore) Init(db *bbolt.DB) error {
 	m.DB = db
 	return db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range [][]byte{bucketBannedPubKeys, bucketBannedEvents, bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketAdmins, bucketFetchedContent} {
+		for _, bucket := range [][]byte{bucketBannedPubKeys, bucketBannedEvents, bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketAdmins, bucketFetchedContent, bucketNeedsRefetch} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
@@ -124,6 +125,20 @@ func (m *ManagementStore) AllowEvent(id nostr.ID) error {
 	return m.DB.Update(func(tx *bbolt.Tx) error {
 		return tx.Bucket(bucketBannedEvents).Delete([]byte(id.Hex()))
 	})
+}
+
+// IsEventBanned checks if an event id is in the ban list. Used to reject
+// resubmission of events the operator has previously deleted via NIP-86
+// `banevent`.
+func (m *ManagementStore) IsEventBanned(id nostr.ID) bool {
+	var banned bool
+	m.DB.View(func(tx *bbolt.Tx) error {
+		if tx.Bucket(bucketBannedEvents).Get([]byte(id.Hex())) != nil {
+			banned = true
+		}
+		return nil
+	})
+	return banned
 }
 
 // ListBannedEvents returns all banned event IDs.
@@ -409,6 +424,34 @@ func (m *ManagementStore) RemoveAdmin(pubkey string, methods []string) error {
 		val, _ := json.Marshal(entry)
 		return b.Put([]byte(pubkey), val)
 	})
+}
+
+// MarkNeedsRefetch flags an event id for re-ingestion by the indexer.
+// Idempotent: marking the same id twice is a no-op.
+func (m *ManagementStore) MarkNeedsRefetch(eventID string) error {
+	return m.DB.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketNeedsRefetch).Put([]byte(eventID), []byte{})
+	})
+}
+
+// RemoveNeedsRefetch clears the refetch flag for an event id.
+// Idempotent: removing a non-existent flag is a no-op.
+func (m *ManagementStore) RemoveNeedsRefetch(eventID string) error {
+	return m.DB.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketNeedsRefetch).Delete([]byte(eventID))
+	})
+}
+
+// ListNeedsRefetch returns all event ids currently flagged for refetch.
+func (m *ManagementStore) ListNeedsRefetch() ([]string, error) {
+	var result []string
+	err := m.DB.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketNeedsRefetch).ForEach(func(k, _ []byte) error {
+			result = append(result, string(k))
+			return nil
+		})
+	})
+	return result, err
 }
 
 // ListAdmins returns all persisted admin entries.

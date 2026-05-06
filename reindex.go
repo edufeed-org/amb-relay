@@ -97,10 +97,20 @@ func (r *Reindexer) run() {
 	var batch []nostr.Event
 	liveEventIDs := make(map[string]struct{}, 1024)
 
+	// Track the Typesense document id for each live event so we can
+	// reproject content rows keyed by event hex id back to {pubkey}:{d-tag}.
+	liveDocIDs := make(map[string]string)
+
 	// Iterate all events from BoltDB
 	for event := range r.boltDB.QueryEvents(nostr.Filter{Kinds: []nostr.Kind{30142}}, reindexMaxEvents) {
 		r.total.Add(1)
-		liveEventIDs[event.ID.Hex()] = struct{}{}
+		eventIDHex := event.ID.Hex()
+		liveEventIDs[eventIDHex] = struct{}{}
+		if docID, err := tsDocIDFromEvent(event); err == nil {
+			liveDocIDs[eventIDHex] = docID
+		} else {
+			log.Printf("reindex: skipping content projection for %s: %v", eventIDHex, err)
+		}
 		batch = append(batch, event)
 
 		// Process batch when full
@@ -156,7 +166,16 @@ func (r *Reindexer) run() {
 
 	// Live content replay — outside the read txn.
 	for _, row := range liveRows {
-		if err := PatchContent(r.tsDB.Host, r.tsDB.ApiKey, r.tsDB.CollectionName, row.id, row.entry); err != nil {
+		docID, ok := liveDocIDs[row.id]
+		if !ok {
+			// Event has no d-tag (or iteration failed to record it). The
+			// content row stays in BoltDB; a future reindex once the event
+			// is re-projected can retry.
+			log.Printf("reindex: content patch skipped for %s: no typesense doc id", row.id)
+			r.errors.Add(1)
+			continue
+		}
+		if err := PatchContent(r.tsDB.Host, r.tsDB.ApiKey, r.tsDB.CollectionName, docID, row.entry); err != nil {
 			log.Printf("reindex: content patch failed for %s: %v", row.id, err)
 			r.errors.Add(1)
 			continue

@@ -2,6 +2,12 @@
 
 A Nostr relay for AMB (Learning Resource Metadata) events (kind 30142). Built on the [khatru](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/khatru) relay framework with [Typesense](https://typesense.org/) as the full-text search backend.
 
+The relay is paired with [`amb-indexer`](../amb-indexer), which fetches
+the resources referenced by each 30142 event, chunks + embeds them,
+writes the fulltext back via NIP-86 `setcontent`, and exposes a
+`/search_chunks` HTTP surface. For the full system architecture and
+end-to-end testing guidance see **[`docs/architecture.md`](docs/architecture.md)**.
+
 ## Quick Start
 
 1. Copy `.env.example` to `.env` and fill in your values
@@ -187,9 +193,9 @@ Only the relay operator (`PUBKEY`) and additional admins (`ADMIN_PUBKEYS`) are a
 | `banpubkey` | Ban a pubkey from publishing |
 | `listbannedpubkeys` | List all banned pubkeys |
 | `allowpubkey` | Remove a pubkey ban |
-| `banevent` | Ban an event by ID |
+| `banevent` | Delete an event by ID and block resubmission. Removes from BoltDB, ContentStore, and Typesense, then records the id on the ban list so the same event cannot be re-published. |
 | `listbannedevents` | List all banned event IDs |
-| `allowevent` | Remove an event ban |
+| `allowevent` | Remove an event ban (does **not** restore the event — the data is gone; only clears the resubmission block) |
 | `changerelayname` | Update relay name (in memory) |
 | `changerelaydescription` | Update relay description |
 | `changerelayicon` | Update relay icon URL |
@@ -233,6 +239,14 @@ The relay stores optional fulltext extracted from the resource referenced by eac
 When present, the `content` field participates in BM25 search alongside metadata fields. Reindex preserves fulltext: after the collection is rebuilt from BoltDB events, a replay pass PATCHes each stored content row back onto its Typesense document. The same pass drops rows whose events have been deleted (orphan GC).
 
 The indexer service connects as a regular Nostr client + a NIP-86 admin. Add its pubkey to `ADMIN_PUBKEYS` to authorize `setcontent` and `refetchcontent`. See `docs/superpowers/specs/2026-04-21-amb-resource-fulltext-indexing-design.md` for the full design.
+
+## Mirroring events from another relay
+
+To stage events from a remote relay (e.g. prod) into this one, use the
+`mirror-prod` tool that ships with `amb-indexer`. It paginates REQs and
+republishes events verbatim. See
+**[`../amb-indexer/README.md#mirror-events-from-another-relay`](../amb-indexer/README.md#mirror-events-from-another-relay)**
+for recipes and caveats (no re-signing, no content/chunks, no kind-5).
 
 ## Architecture
 

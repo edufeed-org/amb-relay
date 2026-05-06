@@ -2,8 +2,15 @@ FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
+# git is needed for direct VCS fetches when GOPRIVATE bypasses the module proxy.
+RUN apk add --no-cache git
+
 # Copy go mod and sum files
 COPY go.mod go.sum ./
+
+# nostrlib is hosted on a private host; proxy.golang.org indexes it
+# slowly (hours), so bypass the proxy for that module path.
+ENV GOPRIVATE=git.edufeed.org
 
 # Download dependencies (nostrlib resolved from git.edufeed.org)
 RUN go mod download

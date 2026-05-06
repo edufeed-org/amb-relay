@@ -33,3 +33,26 @@ services:
       - EMBED_ENDPOINT=${EMBED_ENDPOINT}
       - EMBED_TOKEN=${EMBED_TOKEN}
       - SEMANTIC_SEARCH_ENABLED=${SEMANTIC_SEARCH_ENABLED:-false}
+      - ADMIN_PUBKEYS=${ADMIN_PUBKEYS}
+
+  tika:
+    image: apache/tika:latest-full
+    restart: unless-stopped
+    # No port exposure to host; reachable only on the internal network.
+
+  amb-indexer:
+    build: ../amb-indexer
+    restart: unless-stopped
+    depends_on:
+      amb-relay:
+        condition: service_started
+      typesense:
+        condition: service_healthy
+      tika:
+        condition: service_started
+    env_file: ../amb-indexer/.env.indexer
+    volumes:
+      - indexer_data:/data
+
+volumes:
+  indexer_data:
