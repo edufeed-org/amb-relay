@@ -702,25 +702,28 @@ assert_nip86_error "invalid auth rejected" "$INVALID_RESP"
 echo ""
 echo "--- Typesense Management API tests ---"
 
-# Note: Generic handler returns nip86.Response which gets wrapped in another
-# nip86.Response by khatru, so results are at .result.result
+# Note: Custom (Generic-handler) NIP-86 methods are wrapped a single layer
+# deep on the wire — { "result": <data> } — because khatru's HandleNIP86
+# assigns the handler's return into resp directly for unknown-method
+# dispatch (vs. the late default branch which double-wraps). Built-in
+# methods like `stats` go through that late branch and stay double-wrapped.
 
 # 33. Get default collection schema
 assert_nip86 "getcollectionschema returns default schema" \
   "getcollectionschema" '[]' \
-  '.result.result.fields | length > 0'
+  '.result.fields | length > 0'
 
 # 34. Get schema contains expected fields
 assert_nip86 "getcollectionschema has 'name' field" \
   "getcollectionschema" '[]' \
-  '.result.result.fields | map(select(.name == "name")) | length > 0'
+  '.result.fields | map(select(.name == "name")) | length > 0'
 
 # 35. Update collection schema (add a custom field)
 CUSTOM_SCHEMA=$(nip86_call "getcollectionschema" '[]')
-# Extract the current schema (double-nested), add a test field, and send it back
-UPDATED_SCHEMA=$(echo "$CUSTOM_SCHEMA" | jq '.result.result | .fields += [{"name": "customTestField", "type": "string", "optional": true}]')
+# Extract the current schema, add a test field, and send it back
+UPDATED_SCHEMA=$(echo "$CUSTOM_SCHEMA" | jq '.result | .fields += [{"name": "customTestField", "type": "string", "optional": true}]')
 SCHEMA_RESP=$(nip86_call "updatecollectionschema" "[$UPDATED_SCHEMA]")
-if echo "$SCHEMA_RESP" | jq -e '.result.result == true' >/dev/null 2>&1; then
+if echo "$SCHEMA_RESP" | jq -e '.result == true' >/dev/null 2>&1; then
   printf "${GREEN}PASS${NC}: updatecollectionschema succeeds\n"
   PASS=$((PASS + 1))
 else
@@ -731,21 +734,21 @@ fi
 # 36. Verify updated schema is persisted
 assert_nip86 "getcollectionschema reflects update" \
   "getcollectionschema" '[]' \
-  '.result.result.fields | map(select(.name == "customTestField")) | length > 0'
+  '.result.fields | map(select(.name == "customTestField")) | length > 0'
 
 # 37. Reset collection schema
 assert_nip86 "resetcollectionschema succeeds" \
   "resetcollectionschema" '[]' \
-  '.result.result == true'
+  '.result == true'
 
 # 38. Verify schema reverted to default (no customTestField)
 assert_nip86 "getcollectionschema reverted to default" \
   "getcollectionschema" '[]' \
-  '.result.result.fields | map(select(.name == "customTestField")) | length == 0'
+  '.result.fields | map(select(.name == "customTestField")) | length == 0'
 
 # 39. Reindex
 REINDEX_RESP=$(nip86_call "reindex" '[]')
-if echo "$REINDEX_RESP" | jq -e '.result.result == "reindex started"' >/dev/null 2>&1; then
+if echo "$REINDEX_RESP" | jq -e '.result == "reindex started"' >/dev/null 2>&1; then
   printf "${GREEN}PASS${NC}: reindex started\n"
   PASS=$((PASS + 1))
 else
@@ -757,7 +760,7 @@ fi
 echo -n "  Waiting for reindex to complete..."
 for i in $(seq 1 30); do
   STATUS_RESP=$(nip86_call "getreindexstatus" '[]')
-  RUNNING=$(echo "$STATUS_RESP" | jq -r '.result.result.running')
+  RUNNING=$(echo "$STATUS_RESP" | jq -r '.result.running')
   if [ "$RUNNING" = "false" ]; then
     echo " done"
     break
@@ -772,7 +775,7 @@ done
 # 41. Check reindex status shows completion
 assert_nip86 "getreindexstatus shows completed" \
   "getreindexstatus" '[]' \
-  '.result.result.running == false and .result.result.indexed > 0'
+  '.result.running == false and .result.indexed > 0'
 
 # 42. Events still queryable after reindex
 sleep 1
@@ -781,12 +784,12 @@ assert_count "events queryable after reindex" 4 \
 
 # 43. Double reindex not allowed while running - start a reindex and immediately try another
 # First, update schema so reindex takes a moment (needs to recreate collection)
-SCHEMA_FOR_REINDEX=$(nip86_call "getcollectionschema" '[]' | jq '.result.result')
+SCHEMA_FOR_REINDEX=$(nip86_call "getcollectionschema" '[]' | jq '.result')
 nip86_call "updatecollectionschema" "[$SCHEMA_FOR_REINDEX]" >/dev/null
 REINDEX_RESP2=$(nip86_call "reindex" '[]')
 # Immediately try another
 DOUBLE_RESP=$(nip86_call "reindex" '[]')
-if echo "$DOUBLE_RESP" | jq -e '.result.error != null and .result.error != ""' >/dev/null 2>&1; then
+if echo "$DOUBLE_RESP" | jq -e '.error != null and .error != ""' >/dev/null 2>&1; then
   printf "${GREEN}PASS${NC}: double reindex rejected\n"
   PASS=$((PASS + 1))
 else
@@ -797,7 +800,7 @@ fi
 # Wait for any pending reindex to finish
 for i in $(seq 1 30); do
   STATUS_RESP=$(nip86_call "getreindexstatus" '[]')
-  RUNNING=$(echo "$STATUS_RESP" | jq -r '.result.result.running')
+  RUNNING=$(echo "$STATUS_RESP" | jq -r '.result.running')
   if [ "$RUNNING" = "false" ]; then
     break
   fi
@@ -817,37 +820,37 @@ echo "--- Semantic Search Management API tests ---"
 # 45. Get default semantic search config (disabled by default)
 assert_nip86 "getsemanticsearchconfig returns default config" \
   "getsemanticsearchconfig" '[]' \
-  '.result.result.enabled == false'
+  '.result.enabled == false'
 
 # 46. Enable semantic search (will work without embedding service for config)
 assert_nip86 "enablesemanticsearch succeeds" \
   "enablesemanticsearch" '[]' \
-  '.result.result == true'
+  '.result == true'
 
 # 47. Verify config changed
 assert_nip86 "getsemanticsearchconfig shows enabled" \
   "getsemanticsearchconfig" '[]' \
-  '.result.result.enabled == true'
+  '.result.enabled == true'
 
 # 48. Update semantic search config with custom fields
 assert_nip86 "updatesemanticsearchconfig with custom fields" \
   "updatesemanticsearchconfig" '[{"enabled": true, "embed_fields": ["name", "description"]}]' \
-  '.result.result == true'
+  '.result == true'
 
 # 49. Verify custom fields persisted
 assert_nip86 "getsemanticsearchconfig shows custom fields" \
   "getsemanticsearchconfig" '[]' \
-  '.result.result.embed_fields | contains(["name", "description"])'
+  '.result.embed_fields | contains(["name", "description"])'
 
 # 50. Disable semantic search
 assert_nip86 "disablesemanticsearch succeeds" \
   "disablesemanticsearch" '[]' \
-  '.result.result == true'
+  '.result == true'
 
 # 51. Verify disabled
 assert_nip86 "getsemanticsearchconfig shows disabled" \
   "getsemanticsearchconfig" '[]' \
-  '.result.result.enabled == false'
+  '.result.enabled == false'
 
 # 52. Non-admin cannot access semantic search config
 NONADMIN_SEMANTIC_RESP=$(nip86_call "getsemanticsearchconfig" '[]' "$NONADMIN_SEC")
