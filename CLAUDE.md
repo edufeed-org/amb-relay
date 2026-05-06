@@ -9,6 +9,7 @@ AMB Relay is a Nostr relay specializing in AMB (Learning Resource Metadata) even
 ## Specifications
 
 * nostr naddr of specification: `naddr1qvzqqqrcvypzp0wzr7fmrcktw4sgemxh5zsq5auh08vnvlwf0x9anusn7pkft0zgqy28wumn8ghj7un9d3shjtnyv9kh2uewd9hsqzm9v36kvet9vskkzmtzvjvrtf`
+* The relay implements the `ext:` namespace defined in NIP-AMB for non-core metadata fields. See the [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md#extension-namespace-ext) for query examples.
 
 ## Build & Run Commands
 
@@ -59,6 +60,7 @@ Embedding runs in-stack as the `embed` service (`./embed`) — a small FastAPI c
 - Deletion events remove the referenced event from both BoltDB and Typesense (author must match)
 - Queries go through Typesense for full-text search capability
 - Queries support NIP-01 filter fields, tag filters, and NIP-50 search — see [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md) for full query documentation
+- Tags using the `ext:<ns>:<facet>:<sub>` shape (NIP-AMB extension namespace) are folded into a separate `ext` object in Typesense and queryable via NIP-50 (`ext.<ns>.<facet>.id:val`) and tag filter (`#ext:<ns>:<facet>:id`).
 
 **Typesense Schema Management:**
 - Custom NIP-86 methods (`getcollectionschema`, `updatecollectionschema`, `resetcollectionschema`, `reindex`, `getreindexstatus`) via khatru's `Generic` handler
