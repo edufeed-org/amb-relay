@@ -58,13 +58,18 @@ When configured with `SEMANTIC_SEARCH_ENABLED=true`, the relay performs hybrid s
 
 ## Deployment
 
-Docker Compose runs both Typesense and the relay:
+Docker Compose runs the full stack — relay, Typesense, embed, Tika, and amb-indexer:
 
 ```bash
 docker compose up -d --build
 ```
 
-The Docker build downloads all dependencies from git.edufeed.org — no additional repos or local files needed.
+Two deployment modes are supported:
+
+- **Source-tree (default)**: `docker-compose.yml` builds `amb-indexer` from `../amb-indexer`. Clone both repos as siblings under one directory.
+- **Published image**: replace `build: ../amb-indexer` with `image: git.edufeed.org/edufeed/amb-indexer:main` (or a pinned `vX.Y.Z` / short-sha tag) and you only need amb-relay cloned. The relay itself also publishes to `git.edufeed.org/edufeed/amb-relay`.
+
+Both repos publish images on push to `main` and on `v*` tags via Forgejo Actions.
 
 ## Development
 
@@ -250,6 +255,8 @@ Skip step 2 if the running relay was previously configured with `updatecollectio
 | `disablesemanticsearch` | none | Shortcut to disable |
 | `setcontent` | `[event_id, text, fetched_at, status, source_url]` | Persist fetched resource fulltext for an event. `status` values: `fetched` \| `truncated` \| `license_denied` \| `unsupported` \| `failed`. Admin only. |
 | `refetchcontent` | `[event_id]` | Clear fulltext for an event so the indexer reprocesses it. Admin only. |
+| `listrefetch` | none | List event IDs currently flagged for re-ingestion (set by `refetchcontent`). The indexer polls this. Admin only. |
+| `acknowledgerefetch` | `[event_ids]` | Indexer calls this to remove ids from the refetch queue after re-enqueueing. Returns `{acknowledged: N}`. Admin only. |
 
 **Default embed fields:** `name`, `description`, `keywords`, `about`
 
@@ -273,12 +280,11 @@ for recipes and caveats (no re-signing, no content/chunks, no kind-5).
 
 ## Architecture
 
-```
-Nostr Client → Khatru Relay (:3334) ─┬→ Typesense (:8108)  [search index]
-                                      └→ BoltDB             [raw event storage]
-```
+The relay is one service in a five-service stack (relay, Typesense, embed, Tika, amb-indexer). For the full system diagram, the data flows, the refetch loop, and end-to-end verification, see **[`docs/architecture.md`](docs/architecture.md)**.
 
-- **Khatru**: Nostr relay framework (part of nostrlib fork)
-- **Typesense**: Full-text search engine — queries go here
-- **BoltDB**: Embedded key-value store — raw event persistence for backup/reindexing
-- **NIP-86**: HTTP management API for banning, relay metadata, and stats
+At a glance the relay itself does:
+
+- **Khatru**: Nostr relay framework (part of the [nostrlib](https://git.edufeed.org/edufeed/nostrlib) fork)
+- **Typesense**: Full-text search backend — queries go here; the relay projects events into the `amb_events` collection
+- **BoltDB**: Embedded key-value store — raw event persistence + ban lists + refetch queue
+- **NIP-86**: HTTP management API for ban lists, schema, semantic search, and the indexer-feedback methods (`setcontent` / `refetchcontent` / `listrefetch` / `acknowledgerefetch`)

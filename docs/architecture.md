@@ -40,15 +40,16 @@ to understand a specific subsystem, jump to the section.
                     │ (HTML, PDF)  │  └──────────────┘
                     └──────────────┘
 
-                             (external)
-                    ┌─────────────────────────┐
-                    │ embedder HTTP service   │
-                    │ (e.g. embed.edufeed.org)│
-                    └─────────────────────────┘
+                  (in-stack, compose service `embed`)
+                    ┌─────────────────────────────┐
+                    │ embed (FastAPI, MiniLM-L12) │
+                    │  :8100                      │
+                    └─────────────────────────────┘
                               ▲
                               │ POST {"texts":[...]}
                               │
-                        amb-indexer (during ingest AND during /search_chunks)
+                  amb-relay (semantic write-path) AND
+                  amb-indexer (during ingest AND during /search_chunks)
 ```
 
 ### Who does what
@@ -59,7 +60,7 @@ to understand a specific subsystem, jump to the section.
 | **Typesense** | Two collections: `amb_events` (from relay, for nostr filter + search) and `amb_chunks_30142` (from indexer, for RAG-style chunk search with hybrid BM25+vector). | `typesense-data/` |
 | **amb-indexer** | For each 30142 event: fetches the referenced URL, extracts text, chunks it, embeds each chunk, upserts chunks to Typesense, writes the fulltext back to the relay's `content` field via NIP-86 `setcontent`. Also serves `/search_chunks` + `/admin/*`. | `indexer_data` volume (BoltDB: cursor, event-hash, dead-letter) |
 | **Tika** | Converts PDFs → XHTML so the chunker can see structural metadata (headings, pages). Used by indexer only for `application/pdf` fetches. | stateless |
-| **Embedder** | External HTTP service that turns text into 384-dim vectors. Called by indexer during ingest (for chunks) and during `/search_chunks` (for the query). | external |
+| **embed** | In-stack FastAPI service (compose service `embed`, built from `./embed`) that turns text into 384-dim vectors with `paraphrase-multilingual-MiniLM-L12-v2`. Called by the relay (semantic write-path) and the indexer (chunk ingest + `/search_chunks` queries). Override with `EMBED_ENDPOINT` if you want to point at an external embedder instead. | model cache in `embed_model_cache` named volume |
 
 Both `amb-relay` and `amb-indexer` live on the same docker network (in the
 relay repo's `docker-compose.yml`). Only the relay's ws port is published
