@@ -993,15 +993,22 @@ assert_nip86 "getsemanticsearchconfig returns default config" \
   "getsemanticsearchconfig" '[]' \
   '.result.enabled == false'
 
-# 46. Enable semantic search (will work without embedding service for config)
-assert_nip86 "enablesemanticsearch succeeds" \
-  "enablesemanticsearch" '[]' \
-  '.result == true'
+# 46–47. enablesemanticsearch requires EMBED_ENDPOINT to be set
+# (the relay rejects the shortcut when no endpoint is configured).
+# updatesemanticsearchconfig (#48 below) is permissive and stays in
+# the suite regardless.
+if [ -n "${EMBED_ENDPOINT:-}" ]; then
+  assert_nip86 "enablesemanticsearch succeeds" \
+    "enablesemanticsearch" '[]' \
+    '.result == true'
 
-# 47. Verify config changed
-assert_nip86 "getsemanticsearchconfig shows enabled" \
-  "getsemanticsearchconfig" '[]' \
-  '.result.enabled == true'
+  assert_nip86 "getsemanticsearchconfig shows enabled" \
+    "getsemanticsearchconfig" '[]' \
+    '.result.enabled == true'
+else
+  printf "${YELLOW}SKIP${NC}: enablesemanticsearch (EMBED_ENDPOINT not set)\n"
+  printf "${YELLOW}SKIP${NC}: getsemanticsearchconfig shows enabled (EMBED_ENDPOINT not set)\n"
+fi
 
 # 48. Update semantic search config with custom fields
 assert_nip86 "updatesemanticsearchconfig with custom fields" \
