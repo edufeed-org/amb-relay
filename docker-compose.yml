@@ -68,10 +68,22 @@ services:
     # ports:
     #   - "8100:8100"
 
+  # One-shot init: chown the indexer's BoltDB volume to nonroot uid 65532
+  # (the amb-indexer image runs as distroless nonroot). Without this the
+  # indexer can't write /data/indexer.db on a fresh deployment.
+  amb-indexer-initdata:
+    image: busybox:1.36
+    command: chown -R 65532:65532 /data
+    volumes:
+      - indexer_data:/data
+    restart: "no"
+
   amb-indexer:
     build: ../amb-indexer
     restart: unless-stopped
     depends_on:
+      amb-indexer-initdata:
+        condition: service_completed_successfully
       amb-relay:
         condition: service_started
       typesense:

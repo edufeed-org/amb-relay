@@ -10,10 +10,23 @@ end-to-end testing guidance see **[`docs/architecture.md`](docs/architecture.md)
 
 ## Quick Start
 
-1. Copy `.env.example` to `.env` and fill in your values
-2. Run `docker compose up`
+```bash
+# 1. Clone amb-indexer as a sibling (or skip — see Deployment for image mode)
+git clone https://git.edufeed.org/edufeed/amb-indexer.git ../amb-indexer
 
-The relay listens on `:3334`, Typesense on `:8108`.
+# 2. Configure the relay
+cp .env.example .env
+$EDITOR .env                                          # set PUBKEY, ADMIN_PUBKEYS
+
+# 3. Configure the indexer (the relay's compose stack pulls this in)
+cp ../amb-indexer/.env.indexer.example ../amb-indexer/.env.indexer
+$EDITOR ../amb-indexer/.env.indexer                   # set INDEXER_NSEC
+
+# 4. Bring up the full stack
+docker compose up -d --build
+```
+
+The relay listens on `:3334`, Typesense on `:8108`. See **[Deployment](#deployment)** for production guidance (TLS, persistent data, updates).
 
 ## Environment Variables
 
@@ -48,7 +61,7 @@ The relay listens on `:3334`, Typesense on `:8108`.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `EMBED_ENDPOINT` | URL of embedding service (e.g., `https://embed.edufeed.org/embed`) | empty (disabled) |
+| `EMBED_ENDPOINT` | URL of embedding service. Defaults to in-stack `http://embed:8100/embed` (see `.env.example`); override to point at an external embedder if you don't run the bundled `embed` service | empty (disabled) |
 | `EMBED_TOKEN` | Bearer token for embedding service | empty |
 | `SEMANTIC_SEARCH_ENABLED` | Auto-enable semantic search on startup | `false` |
 
@@ -58,18 +71,83 @@ When configured with `SEMANTIC_SEARCH_ENABLED=true`, the relay performs hybrid s
 
 ## Deployment
 
-Docker Compose runs the full stack — relay, Typesense, embed, Tika, and amb-indexer:
+The full stack is **five services**: amb-relay, Typesense, embed (in-stack sentence-transformers), Tika (PDF extraction), and amb-indexer. Compose orchestrates all of them from this repo.
 
-```bash
-docker compose up -d --build
-```
+### Prerequisites
 
-Two deployment modes are supported:
+- Docker Engine 20+ with Compose v2
+- A Nostr keypair for the relay operator (`PUBKEY` in `.env`)
+- A Nostr keypair for the indexer (`INDEXER_NSEC` in `.env.indexer`) — its pubkey must be added to `ADMIN_PUBKEYS` so the relay accepts the indexer's `setcontent` calls
 
-- **Source-tree (default)**: `docker-compose.yml` builds `amb-indexer` from `../amb-indexer`. Clone both repos as siblings under one directory.
+### Configuration
+
+Two env files. Both are loaded by `docker-compose.yml`:
+
+| File | Purpose | Template |
+|------|---------|----------|
+| `./.env` | Relay metadata, Typesense API key, `ADMIN_PUBKEYS`, semantic search toggles | `.env.example` |
+| `../amb-indexer/.env.indexer` | Indexer keypair, embed endpoint, fetch limits, license allowlist | `../amb-indexer/.env.indexer.example` |
+
+If you don't create `../amb-indexer/.env.indexer`, the `amb-indexer` service fails to start.
+
+### Two compose modes
+
+- **Source-tree (default)**: `docker-compose.yml` builds amb-indexer from `../amb-indexer`. Clone both repos as siblings under one directory.
 - **Published image**: replace `build: ../amb-indexer` with `image: git.edufeed.org/edufeed/amb-indexer:main` (or a pinned `vX.Y.Z` / short-sha tag) and you only need amb-relay cloned. The relay itself also publishes to `git.edufeed.org/edufeed/amb-relay`.
 
 Both repos publish images on push to `main` and on `v*` tags via Forgejo Actions.
+
+### Persistent data
+
+Data lives in **four** locations — back up all of them:
+
+| Location | Service | What |
+|----------|---------|------|
+| `relay_data` (named volume) | amb-relay | BoltDB at `/root/data/relay.db` — raw events, ban lists, refetch queue. **Source of truth.** Typesense can be rebuilt from it. |
+| `./typesense-data/` (bind mount) | Typesense | Search index. Rebuildable from BoltDB via NIP-86 `reindex`. |
+| `indexer_data` (named volume) | amb-indexer | `/data/indexer.db` (cursor, event-hash, dead-letter). Loseable — indexer will replay from the relay on next start. |
+| `embed_model_cache` (named volume) | embed | HuggingFace model cache (~120 MB). Loseable — re-downloads on first boot. |
+
+The compose file ships a one-shot `amb-indexer-initdata` service that chowns `indexer_data` to nonroot uid 65532 (the indexer's distroless user). It runs once before `amb-indexer` starts.
+
+### Reverse proxy & TLS
+
+Containers talk over the internal docker network without TLS — you only need a reverse proxy to expose the relay's WebSocket to the public internet (and to fix NIP-98 auth, which validates the request URL against `SERVICE_URL`).
+
+The recommended fronting setup is **Traefik** with docker labels. Add these to the `amb-relay` service in `docker-compose.yml` (or in a `docker-compose.override.yml` you keep alongside):
+
+```yaml
+amb-relay:
+  labels:
+    - "traefik.enable=true"
+    - "traefik.http.routers.amb-relay.rule=Host(`relay.example.org`)"
+    - "traefik.http.routers.amb-relay.entrypoints=websecure"
+    - "traefik.http.routers.amb-relay.tls.certresolver=letsencrypt"
+    - "traefik.http.services.amb-relay.loadbalancer.server.port=3334"
+  networks: [default, traefik_proxy]   # whatever network Traefik watches
+```
+
+And set `SERVICE_URL=wss://relay.example.org` in `.env` so NIP-98's `u`-tag validation accepts requests at the public URL.
+
+If you want to expose the indexer's `/search_chunks` HTTP API too, add the same label set on the `amb-indexer` service pointing at port `8080` (and a different `Host()`).
+
+Any TLS-terminating reverse proxy works — Caddy, nginx, Cloudflare Tunnel — Traefik is just the path of least resistance with this compose file.
+
+### Updating
+
+```bash
+# 1. Pull new images / rebuild
+docker compose pull
+docker compose up -d --build
+
+# 2. If a relay release changed the Typesense schema, run the
+#    NIP-86 schema migration recipe (see "Schema migrations after a
+#    release" further down in this README).
+```
+
+### Verifying
+
+For end-to-end smoke tests of the full stack (publish a 30142 event, watch the indexer pick it up, confirm fulltext lands and chunks are searchable), see **[`docs/architecture.md`](docs/architecture.md)**.
 
 ## Development
 
