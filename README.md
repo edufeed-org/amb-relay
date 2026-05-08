@@ -2,7 +2,7 @@
 
 A Nostr relay for AMB (Learning Resource Metadata) events (kind 30142). Built on the [khatru](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/khatru) relay framework with [Typesense](https://typesense.org/) as the full-text search backend.
 
-The relay is paired with [`amb-indexer`](../amb-indexer), which fetches
+The relay is paired with [`amb-indexer`](https://git.edufeed.org/edufeed/amb-indexer), which fetches
 the resources referenced by each 30142 event, chunks + embeds them,
 writes the fulltext back via NIP-86 `setcontent`, and exposes a
 `/search_chunks` HTTP surface. For the full system architecture and
@@ -352,9 +352,10 @@ The indexer service connects as a regular Nostr client + a NIP-86 admin. Add its
 
 To stage events from a remote relay (e.g. prod) into this one, use the
 `mirror-prod` tool that ships with `amb-indexer`. It paginates REQs and
-republishes events verbatim. See
-**[`../amb-indexer/README.md#mirror-events-from-another-relay`](../amb-indexer/README.md#mirror-events-from-another-relay)**
-for recipes and caveats (no re-signing, no content/chunks, no kind-5).
+republishes events verbatim. The source lives at
+**[`amb-indexer/cmd/mirror-prod`](https://git.edufeed.org/edufeed/amb-indexer/src/branch/main/cmd/mirror-prod)**
+— it ports across signatures, so the destination relay accepts the
+prod events as-is. Caveats: no re-signing, no content/chunks, no kind-5.
 
 ## Architecture
 
