@@ -352,10 +352,11 @@ The indexer service connects as a regular Nostr client + a NIP-86 admin. Add its
 
 To stage events from a remote relay (e.g. prod) into this one, use the
 `mirror-prod` tool that ships with `amb-indexer`. It paginates REQs and
-republishes events verbatim. The source lives at
-**[`amb-indexer/cmd/mirror-prod`](https://git.edufeed.org/edufeed/amb-indexer/src/branch/main/cmd/mirror-prod)**
-— it ports across signatures, so the destination relay accepts the
-prod events as-is. Caveats: no re-signing, no content/chunks, no kind-5.
+republishes events verbatim — signatures carry over, so the destination
+relay accepts the source events as-is. See
+**[amb-indexer's *Mirror events from another relay* section](https://git.edufeed.org/edufeed/amb-indexer#user-content-mirror-events-from-another-relay)**
+for flag reference, recipes, caveats (no re-signing, no content/chunks,
+no kind-5), and alternatives (NIP-77 Negentropy, NIP-86 `reindex`).
 
 ## Architecture
 
