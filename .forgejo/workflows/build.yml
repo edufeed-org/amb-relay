@@ -47,5 +47,7 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
+          # Buildcache push to the Forgejo registry returns 400 Bad Request on
+          # this repo — image push succeeds, but the buildcache layer upload
+          # fails and trips the whole run as "failure". Dropped until the
+          # registry-side issue is understood (same note as amb-indexer).
