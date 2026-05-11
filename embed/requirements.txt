@@ -3,5 +3,11 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pydantic==2.9.2
+# Pin NumPy to the 1.x line. NumPy 2.x wheels are built with the
+# X86_V2 baseline (SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT) and refuse to load
+# on KVM VMs running the default `kvm64`/`qemu64` CPU profiles, which
+# only expose sse/sse2/cx16. sentence-transformers 3.1.1 and torch
+# 2.4.1 both work on NumPy 1.x. Revisit when bumping either.
+numpy>=1.26,<2
 sentence-transformers==3.1.1
 torch==2.4.1

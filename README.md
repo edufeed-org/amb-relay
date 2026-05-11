@@ -76,6 +76,13 @@ The full stack is **five services**: amb-relay, Typesense, embed (in-stack sente
 ### Prerequisites
 
 - Docker Engine 20+ with Compose v2
+- On KVM VMs (Proxmox, libvirt, etc.) the `embed` service requires a CPU
+  profile that exposes the **x86-64-v2** baseline (SSE3/SSSE3/SSE4.1/
+  SSE4.2/POPCNT). Default profiles like `kvm64` and `qemu64` only expose
+  `sse/sse2/cx16` and break NumPy's import. Use `cpu: host` or
+  `cpu: x86-64-v2` (or newer) for the VM running the stack. LXC
+  containers and bare-metal hosts are unaffected — they see the host's
+  real CPU flags.
 - A Nostr keypair for the relay operator (`PUBKEY` in `.env`)
 - A Nostr keypair for the indexer (`INDEXER_NSEC` in `.env.indexer`) — its pubkey must be added to `ADMIN_PUBKEYS` so the relay accepts the indexer's `setcontent` calls
 
