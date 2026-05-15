@@ -365,6 +365,69 @@ relay accepts the source events as-is. See
 for flag reference, recipes, caveats (no re-signing, no content/chunks,
 no kind-5), and alternatives (NIP-77 Negentropy, NIP-86 `reindex`).
 
+### Recovering from BoltDB ↔ Typesense skew
+
+The relay's REQ path treats Typesense as a search index and reads each
+hit's raw payload from BoltDB by event ID. If a document is present in
+Typesense but the corresponding event is missing from BoltDB, the relay
+logs `Search succeeded, found N events` but silently delivers nothing
+over the websocket. This skew can happen when an operator restores or
+seeds the Typesense collection through a path that bypasses the relay's
+dual-write (e.g. a raw Typesense snapshot copy, or a one-time bulk
+import script).
+
+`mirror-prod` and NIP-86 `reindex` both go through the relay's normal
+accept/save path, so they do **not** create skew. The fix only applies
+to operators who seeded Typesense out of band.
+
+To reconcile, run the `hydrate-bolt` tool that ships in the relay image.
+It scans Typesense for every document, decodes the stored `eventRaw`
+JSON, and writes any missing events into BoltDB. It is idempotent —
+already-present events are counted and skipped.
+
+After the canonical save pass, `hydrate-bolt` runs a second verify pass
+that cross-checks every Typesense doc's `eventID` field against BoltDB
+and re-saves under the TS-side id on miss. This surfaces the rare case
+where a TS doc's `eventID` has drifted from the hash of its own
+`eventRaw` payload — a single such doc per page is enough to silently
+truncate downstream REQ pagination, so the verify pass is worth running
+even when the canonical save reports no missing events.
+
+BoltDB requires an exclusive lock, so the relay container must be
+stopped first:
+
+```bash
+docker compose stop amb-relay
+
+docker run --rm \
+  --network <your-stack>_default \
+  -v <your-stack>_relay_data:/data \
+  -e TS_HOST=http://typesense:8108 \
+  -e TS_APIKEY=$TS_APIKEY \
+  -e TS_COLLECTION=$TS_COLLECTION \
+  -e DB_PATH=/data/relay.db \
+  --entrypoint /root/hydrate-bolt \
+  git.edufeed.org/edufeed/amb-relay:<tag>
+
+docker compose start amb-relay
+```
+
+Use `--dry-run` first to see what the scan finds without writing.
+Expected output on success:
+
+```
+DONE scanned=<N> saved=<missing> already=<already-present> parseErr=0 saveErr=0 mismatches=<M> resaved=<M>
+```
+
+If `saved` or `mismatches` is non-zero, REQ throughput for the affected
+kinds will jump on next start.
+
+**Future work:** an optional `HYDRATE_ON_START=true` env that runs
+`hydrate-bolt` as the first step of the relay entrypoint would surface
+this skew automatically on bulk-seeded deploys. Trade-off: longer
+startup proportional to corpus size; idempotent so safe to leave on.
+Not implemented yet — file an issue if you want it.
+
 ## Architecture
 
 The relay is one service in a five-service stack (relay, Typesense, embed, Tika, amb-indexer). For the full system diagram, the data flows, the refetch loop, and end-to-end verification, see **[`docs/architecture.md`](docs/architecture.md)**.
