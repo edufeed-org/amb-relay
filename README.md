@@ -56,6 +56,7 @@ The relay listens on `:3334`, Typesense on `:8108`. See **[Deployment](#deployme
 |----------|-------------|---------|
 | `DB_PATH` | Path to BoltDB file for raw event persistence | `./data/relay.db` |
 | `ADMIN_PUBKEYS` | Comma-separated hex pubkeys for NIP-86 management API access (in addition to `PUBKEY`) | empty |
+| `HYDRATE_ON_START` | When `true`, runs an in-process BoltDB ↔ Typesense reconciliation pass before the listener opens. See [Recovering from BoltDB ↔ Typesense skew](#recovering-from-boltdb--typesense-skew). Fail-open on TS errors; bounded by a 30-min context. Adds startup time proportional to corpus size (≈3 min per 100k events). | `false` |
 
 ### Semantic Search (Optional)
 
@@ -422,11 +423,16 @@ DONE scanned=<N> saved=<missing> already=<already-present> parseErr=0 saveErr=0 
 If `saved` or `mismatches` is non-zero, REQ throughput for the affected
 kinds will jump on next start.
 
-**Future work:** an optional `HYDRATE_ON_START=true` env that runs
-`hydrate-bolt` as the first step of the relay entrypoint would surface
-this skew automatically on bulk-seeded deploys. Trade-off: longer
-startup proportional to corpus size; idempotent so safe to leave on.
-Not implemented yet — file an issue if you want it.
+**In-process variant:** set `HYDRATE_ON_START=true` in the relay's env
+to run the same scan-and-verify pass as the first step of the relay
+process — no stop/start dance needed, since the in-process variant
+already holds the BoltDB lock. Logs the same `DONE …` summary before
+opening the listener, then continues to normal startup. Fail-open on
+Typesense errors (a boot blip won't loop-restart the relay) and bounded
+by a 30-min context. Trade-off: adds startup time proportional to
+corpus size (≈3 min per 100k events for the two passes). Idempotent
+and off by default; turn it on per-instance for deployments that have
+ever exhibited the silent-drop pagination skew.
 
 ## Architecture
 
