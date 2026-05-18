@@ -20,6 +20,7 @@ import (
 	"fiatjaf.com/nostr/khatru/landing"
 	"fiatjaf.com/nostr/nip11"
 	"fiatjaf.com/nostr/nip86"
+	"github.com/edufeed-org/amb-relay/internal/hydrate"
 	"github.com/joho/godotenv"
 )
 
@@ -167,6 +168,30 @@ func main() {
 
 	if err := tsDB.Init(); err != nil {
 		panic(err)
+	}
+
+	// Optional: reconcile BoltDB ↔ Typesense at startup. Both stores are
+	// open and the listener hasn't started yet, so this runs single-threaded
+	// against the relay's own opened BoltDB — no lock juggling, unlike the
+	// standalone cmd/hydrate-bolt which requires the container stopped.
+	// Fail-open: a TS network blip at boot shouldn't keep the relay down.
+	if os.Getenv("HYDRATE_ON_START") == "true" {
+		hydrateCfg := hydrate.Config{
+			TSHost:       os.Getenv("TS_HOST"),
+			TSAPIKey:     os.Getenv("TS_APIKEY"),
+			TSCollection: os.Getenv("TS_COLLECTION"),
+			PageSize:     250,
+		}
+		hctx, hcancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		stats, verify, err := hydrate.Run(hctx, hydrateCfg, &boltDB, &boltDB, nil)
+		hcancel()
+		if err != nil {
+			fmt.Printf("Warning: HYDRATE_ON_START failed: %v (continuing startup)\n", err)
+		} else {
+			fmt.Printf("HYDRATE_ON_START done: scanned=%d saved=%d already=%d parseErr=%d saveErr=%d mismatches=%d resaved=%d\n",
+				stats.Scanned, stats.Saved, stats.AlreadyPresent, stats.ParseErrors, stats.SaveErrors,
+				verify.Mismatches, verify.Resaved)
+		}
 	}
 
 	// Write buffers: queue events for async persistence

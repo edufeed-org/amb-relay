@@ -1,4 +1,20 @@
-package main
+// Package hydrate reconciles the relay's BoltDB raw event store against its
+// Typesense search index. It exists because the relay treats Typesense as the
+// authoritative search-and-pagination layer and the BoltDB as the raw payload
+// store keyed by event ID — so any TS doc whose stored eventID doesn't match
+// a row in BoltDB silently drops out of REQ pagination.
+//
+// The package is consumed in two places:
+//
+//   - cmd/hydrate-bolt: standalone CLI for one-off corpus-wide reconciliation
+//     (requires the relay to be stopped — BoltDB exclusive lock).
+//   - The relay's main() when HYDRATE_ON_START=true: in-process startup pass
+//     that runs before the listener opens, reusing the relay's own opened
+//     BoltDB so no lock juggling is needed.
+//
+// The functions here are pure logic against EventSink / EventStore interfaces;
+// the Typesense-walking orchestrator lives in run.go.
+package hydrate
 
 import (
 	"encoding/json"
@@ -20,7 +36,7 @@ type EventSink interface {
 // by the Typesense-side eventID (which can differ from the hash of the
 // stored eventRaw payload when a TS doc's eventID field drifted from its
 // eventRaw — the underlying cause of the silent-drop pagination bug this
-// tool reconciles).
+// package reconciles).
 type EventStore interface {
 	EventSink
 	QueryEvents(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event]
