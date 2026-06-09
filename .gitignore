@@ -7,3 +7,6 @@ go.work.sum
 
 amb-relay.code-workspace
 amb-relay
+hydrate-bolt
+
+.claude/
