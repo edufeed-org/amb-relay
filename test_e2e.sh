@@ -30,6 +30,7 @@ done
 # Cleanup
 # ============================================================
 RELAY_PID=""
+E2E_DB_DIR=""
 cleanup() {
   echo ""
   echo "--- Cleaning up ---"
@@ -40,7 +41,10 @@ cleanup() {
   docker compose down -v 2>/dev/null || true
   # typesense-data is owned by root (created by Docker), use docker to clean it
   docker run --rm -v "$(pwd)/typesense-data:/data" alpine rm -rf /data/* 2>/dev/null || true
+  # Old layout (kept for one-time cleanup of pre-mktemp DB locations) +
+  # the current run's tmpdir.
   rm -rf ./data/e2e_test* 2>/dev/null || true
+  [ -n "$E2E_DB_DIR" ] && rm -rf "$E2E_DB_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -63,7 +67,21 @@ fi
 echo "--- Starting Typesense (clean state) ---"
 export TS_APIKEY=xyz
 docker compose down -v 2>/dev/null || true
-docker run --rm -v "$(pwd)/typesense-data:/data" alpine rm -rf /data/* 2>/dev/null || true
+# Aggressive wipe of the Typesense bind mount. Plain `rm -rf /data/*`
+# misses dotfiles, and the original `2>/dev/null || true` silently
+# swallowed failures, letting the `amb_e2e_test` collection survive
+# across runs ("Collection ... already exists" in the relay log,
+# followed by "expected 3, got 9" in query asserts). Use sh -c to
+# expand both globs, then verify the dir is empty.
+docker run --rm -v "$(pwd)/typesense-data:/data" alpine \
+  sh -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; ls -A /data'
+leftover=$(docker run --rm -v "$(pwd)/typesense-data:/data" alpine ls -A /data | tr -d '[:space:]')
+if [ -n "$leftover" ]; then
+  echo "ERROR: typesense-data wipe failed; leftover: $leftover"
+  exit 1
+fi
+# Same idea for BoltDB.
+rm -rf ./data/e2e_test* 2>/dev/null || true
 docker compose up -d typesense
 
 echo -n "Waiting for Typesense..."
@@ -114,7 +132,11 @@ export ICON=""
 export TS_HOST=http://localhost:8108
 export TS_COLLECTION=amb_e2e_test
 export PORT=$TEST_PORT
-export DB_PATH="./data/e2e_test/relay.db"
+# DB lives in $TMPDIR so it can never be reused across runs even if a
+# prior cleanup was missed. The EXIT trap still removes the dir, but
+# the OS will clean $TMPDIR on reboot regardless.
+E2E_DB_DIR=$(mktemp -d -t amb-relay-e2e.XXXXXX)
+export DB_PATH="${E2E_DB_DIR}/relay.db"
 
 # Disable semantic search for deterministic test results
 # (semantic search finds related content, making exact-match assertions unreliable)
@@ -145,6 +167,22 @@ for i in $(seq 1 30); do
     exit 1
   fi
 done
+
+# Defensive: the relay's view of kind-30142 events must be empty
+# before we publish any. If it isn't, something leaked state across
+# runs and downstream count assertions will give confusing failures
+# (the "expected 3, got 9" pattern). Fail loudly here instead.
+# Temporarily disable pipefail so `head -1` closing the pipe early
+# doesn't trip set -e.
+set +o pipefail
+initial_count=$(nak count -k 30142 "$RELAY" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+set -o pipefail
+if [ "${initial_count:-0}" -ne 0 ]; then
+  echo "ERROR: relay has ${initial_count} pre-existing kind-30142 events."
+  echo "       Test isolation failed. Likely a missed cleanup or a"
+  echo "       stale BoltDB at DB_PATH=$DB_PATH."
+  exit 1
+fi
 
 # ============================================================
 # Helper functions
