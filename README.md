@@ -70,6 +70,18 @@ When configured with `SEMANTIC_SEARCH_ENABLED=true`, the relay performs hybrid s
 
 **Model:** Uses MiniLM-L12-v2 (384 dimensions) for embeddings. See the [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md#semantic-search-hybrid-search) for technical details.
 
+### Chunk Re-Ranking (Optional)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CHUNK_RERANK_ENABLED` | Re-rank NIP-50 search results by the best matching fulltext passage from amb-indexer's chunk index | `false` |
+| `INDEXER_BASE_URL` | Base URL of the amb-indexer HTTP API | `http://amb-indexer:8080` |
+| `INDEXER_API_TOKEN` | Bearer token for `POST /search_chunks` — must match `INDEXER_API_TOKEN` in `../amb-indexer/.env.indexer` | empty (disables the feature) |
+
+When enabled, every search query (`nak req --search ...`) is answered by first asking amb-indexer's chunk index for the best matching *passages* inside the indexed documents (PDFs, web pages), then returning the parent kind-30142 events ordered by best passage score. Results reflect document content, not just metadata relevance.
+
+Protocol-transparent: clients use the exact same NIP-50 REQ syntax and receive the exact same event shapes — only the ordering changes. All other filter fields (kinds, authors, tags, since/until, limit) still apply. On any indexer error or empty chunk result the relay falls back to plain Typesense search, so recall never degrades. Negentropy syncs carry no search field and bypass re-ranking entirely.
+
 ## Deployment
 
 The full stack is **five services**: amb-relay, Typesense, embed (in-stack sentence-transformers), Tika (PDF extraction), and amb-indexer. Compose orchestrates all of them from this repo.
@@ -93,7 +105,7 @@ Two env files. Both are loaded by `docker-compose.yml`:
 
 | File | Purpose | Template |
 |------|---------|----------|
-| `./.env` | Relay metadata, Typesense API key, `ADMIN_PUBKEYS`, semantic search toggles | `.env.example` |
+| `./.env` | Relay metadata, Typesense API key, `ADMIN_PUBKEYS`, semantic search + chunk re-ranking toggles | `.env.example` |
 | `../amb-indexer/.env.indexer` | Indexer keypair, embed endpoint, fetch limits, license allowlist | `../amb-indexer/.env.indexer.example` |
 
 If you don't create `../amb-indexer/.env.indexer`, the `amb-indexer` service fails to start.
