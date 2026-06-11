@@ -239,10 +239,6 @@ func main() {
 		khatru.RequestAuth(ctx)
 	}
 
-	// Optional chunk-level re-ranking of NIP-50 searches via amb-indexer.
-	// Off by default; when enabled, searches are ranked by best matching
-	// passage in the chunk index and fall back to plain Typesense search on
-	// any indexer error (see chunk_rerank.go).
 	// Signing identity for relay-originated kind-21142 snippet events.
 	// RELAY_SECKEY must be a dedicated key — never the operator's. Without
 	// it, a fresh key is generated per boot: snippets stay validly signed,
@@ -259,6 +255,11 @@ func main() {
 		fmt.Println("RELAY_SECKEY not set — generated ephemeral snippet-signing key for this boot")
 	}
 	fmt.Printf("Snippet signer pubkey: %s\n", nostr.GetPublicKey(relaySK).Hex())
+
+	// Optional chunk-level re-ranking of NIP-50 searches via amb-indexer.
+	// Off by default; when enabled, searches are ranked by best matching
+	// passage in the chunk index and fall back to plain Typesense search on
+	// any indexer error (see chunk_rerank.go).
 	var chunkSearcher ChunkSearcher
 	if os.Getenv("CHUNK_RERANK_ENABLED") == "true" {
 		indexerURL := os.Getenv("INDEXER_BASE_URL")
