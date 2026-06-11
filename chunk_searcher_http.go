@@ -54,8 +54,13 @@ func (s *httpChunkSearcher) SearchChunks(ctx context.Context, q string, k int) (
 
 	var parsed struct {
 		Hits []struct {
-			EventID string  `json:"event_id"`
-			Score   float64 `json:"score"`
+			EventID    string  `json:"event_id"`
+			EventCoord string  `json:"event_coord"`
+			Score      float64 `json:"score"`
+			Snippet    string  `json:"snippet"`
+			Page       int     `json:"page"`
+			Heading    string  `json:"heading"`
+			SourceURL  string  `json:"source_url"`
 		} `json:"hits"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
@@ -64,7 +69,15 @@ func (s *httpChunkSearcher) SearchChunks(ctx context.Context, q string, k int) (
 
 	hits := make([]ChunkHit, 0, len(parsed.Hits))
 	for _, h := range parsed.Hits {
-		hits = append(hits, ChunkHit{EventID: h.EventID, Score: h.Score})
+		hits = append(hits, ChunkHit{
+			EventID:    h.EventID,
+			EventCoord: h.EventCoord,
+			Score:      h.Score,
+			Snippet:    h.Snippet,
+			Page:       h.Page,
+			Heading:    h.Heading,
+			SourceURL:  h.SourceURL,
+		})
 	}
 	return hits, nil
 }

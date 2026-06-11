@@ -19,7 +19,15 @@ func TestHTTPChunkSearcher_HappyPath(t *testing.T) {
 		json.NewDecoder(r.Body).Decode(&gotBody)
 		json.NewEncoder(w).Encode(map[string]any{
 			"hits": []map[string]any{
-				{"event_id": "aa11", "score": 0.9, "snippet": "ignored"},
+				{
+					"event_id":    "aa11",
+					"event_coord": "30142:pk1:doc-1",
+					"score":       0.9,
+					"snippet":     "…Photosyntheserate…",
+					"page":        12,
+					"heading":     "Lichtabhängigkeit",
+					"source_url":  "https://example.org/skript.pdf",
+				},
 				{"event_id": "bb22", "score": 0.5},
 			},
 			"total": 2,
@@ -44,6 +52,21 @@ func TestHTTPChunkSearcher_HappyPath(t *testing.T) {
 	}
 	if len(hits) != 2 || hits[0].EventID != "aa11" || hits[0].Score != 0.9 || hits[1].EventID != "bb22" {
 		t.Errorf("hits = %+v", hits)
+	}
+	want := ChunkHit{
+		EventID:    "aa11",
+		EventCoord: "30142:pk1:doc-1",
+		Score:      0.9,
+		Snippet:    "…Photosyntheserate…",
+		Page:       12,
+		Heading:    "Lichtabhängigkeit",
+		SourceURL:  "https://example.org/skript.pdf",
+	}
+	if hits[0] != want {
+		t.Errorf("hits[0] = %+v, want %+v", hits[0], want)
+	}
+	if hits[1].Snippet != "" || hits[1].Page != 0 || hits[1].Heading != "" || hits[1].SourceURL != "" {
+		t.Errorf("hits[1] locators should be zero-valued: %+v", hits[1])
 	}
 }
 
