@@ -82,6 +82,51 @@ When enabled, every search query (`nak req --search ...`) is answered by first a
 
 Protocol-transparent: clients use the exact same NIP-50 REQ syntax and receive the exact same event shapes — only the ordering changes. All other filter fields (kinds, authors, tags, since/until, limit) still apply. On any indexer error or empty chunk result the relay falls back to plain Typesense search, so recall never degrades. Negentropy syncs carry no search field and bypass re-ranking entirely.
 
+### Search snippets (kind 21142)
+
+With chunk re-ranking active, clients can opt in to ephemeral snippet
+events by adding kind `21142` to their search REQ:
+
+```json
+{"kinds": [30142, 21142], "search": "photosynthese", "limit": 5}
+```
+
+Each result is then followed by a relay-signed kind-21142 event (ephemeral
+range — never stored) carrying the best matching passage:
+
+```json
+{
+  "kind": 21142,
+  "content": "…bei stärkerem Licht verdoppelt sich die Photosyntheserate…",
+  "tags": [
+    ["e", "<parent event id>"],
+    ["a", "30142:<author pubkey>:<d-tag>"],
+    ["k", "30142"],
+    ["score", "0.9312"],
+    ["page", "12"],
+    ["heading", "Lichtabhängigkeit"],
+    ["source_url", "https://…/skript.pdf"]
+  ]
+}
+```
+
+`page`, `heading` and `source_url` appear only when the indexer extracted
+them. `limit` counts parent events, so an opted-in client receives at most
+`2×limit` events before EOSE. Snippets are best-effort decoration: on any
+re-rank fallback (indexer down, no chunk hits, feature disabled) clients
+get plain results without snippets, and clients that only request kind
+30142 are completely unaffected.
+
+Snippet events are signed with `RELAY_SECKEY` (a dedicated relay key — set
+it in `.env` for a stable signer identity; when unset a fresh key is
+generated per boot and its pubkey printed in the startup log).
+
+Test with nak:
+
+```bash
+nak req --search "photosynthese" -k 30142 -k 21142 --limit 5 ws://localhost:3334
+```
+
 ## Deployment
 
 The full stack is **five services**: amb-relay, Typesense, embed (in-stack sentence-transformers), Tika (PDF extraction), and amb-indexer. Compose orchestrates all of them from this repo.

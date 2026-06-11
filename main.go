@@ -243,7 +243,22 @@ func main() {
 	// Off by default; when enabled, searches are ranked by best matching
 	// passage in the chunk index and fall back to plain Typesense search on
 	// any indexer error (see chunk_rerank.go).
-	relaySK := nostr.Generate() // replaced with RELAY_SECKEY wiring in the next commit
+	// Signing identity for relay-originated kind-21142 snippet events.
+	// RELAY_SECKEY must be a dedicated key — never the operator's. Without
+	// it, a fresh key is generated per boot: snippets stay validly signed,
+	// the identity just isn't stable across restarts.
+	var relaySK nostr.SecretKey
+	if hexKey := os.Getenv("RELAY_SECKEY"); hexKey != "" {
+		var err error
+		relaySK, err = nostr.SecretKeyFromHex(hexKey)
+		if err != nil {
+			panic(fmt.Sprintf("invalid RELAY_SECKEY: %v", err))
+		}
+	} else {
+		relaySK = nostr.Generate()
+		fmt.Println("RELAY_SECKEY not set — generated ephemeral snippet-signing key for this boot")
+	}
+	fmt.Printf("Snippet signer pubkey: %s\n", nostr.GetPublicKey(relaySK).Hex())
 	var chunkSearcher ChunkSearcher
 	if os.Getenv("CHUNK_RERANK_ENABLED") == "true" {
 		indexerURL := os.Getenv("INDEXER_BASE_URL")

@@ -54,6 +54,9 @@ services:
       - CHUNK_RERANK_ENABLED=${CHUNK_RERANK_ENABLED:-false}
       - INDEXER_BASE_URL=${INDEXER_BASE_URL:-http://amb-indexer:8080}
       - INDEXER_API_TOKEN=${INDEXER_API_TOKEN}
+      # Dedicated key signing ephemeral kind-21142 search snippets. Optional;
+      # unset means a per-boot generated key (see .env.example).
+      - RELAY_SECKEY=${RELAY_SECKEY:-}
     mem_limit: 1g
     mem_reservation: 256m
 
