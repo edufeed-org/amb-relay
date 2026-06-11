@@ -243,6 +243,7 @@ func main() {
 	// Off by default; when enabled, searches are ranked by best matching
 	// passage in the chunk index and fall back to plain Typesense search on
 	// any indexer error (see chunk_rerank.go).
+	relaySK := nostr.Generate() // replaced with RELAY_SECKEY wiring in the next commit
 	var chunkSearcher ChunkSearcher
 	if os.Getenv("CHUNK_RERANK_ENABLED") == "true" {
 		indexerURL := os.Getenv("INDEXER_BASE_URL")
@@ -264,7 +265,7 @@ func main() {
 		if khatru.IsNegentropySession(ctx) {
 			maxLimit = 250 * 20
 		}
-		return chunkRerankQuery(ctx, filter, chunkSearcher, tsDB.QueryEvents, maxLimit)
+		return chunkRerankQuery(ctx, filter, chunkSearcher, tsDB.QueryEvents, maxLimit, relaySK)
 	}
 	relay.Count = func(ctx context.Context, filter nostr.Filter) (uint32, error) {
 		return tsDB.CountEvents(filter)

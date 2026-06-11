@@ -75,7 +75,7 @@ func TestChunkRerank_NoSearchField_BypassesChunks(t *testing.T) {
 	searcher := &fakeChunkSearcher{err: errors.New("must not be called")}
 
 	filter := nostr.Filter{Kinds: []nostr.Kind{30142}, Limit: 10}
-	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250))
+	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250, nostr.Generate()))
 
 	if searcher.called {
 		t.Error("chunk searcher was called for a filter without a search field")
@@ -94,7 +94,7 @@ func TestChunkRerank_NilSearcher_BypassesChunks(t *testing.T) {
 	store := &fakeStore{events: []nostr.Event{e1}}
 
 	filter := nostr.Filter{Search: "mathematik", Limit: 10}
-	got := collectEvents(chunkRerankQuery(context.Background(), filter, nil, store.fetch, 250))
+	got := collectEvents(chunkRerankQuery(context.Background(), filter, nil, store.fetch, 250, nostr.Generate()))
 
 	if len(got) != 1 || got[0].ID != e1.ID {
 		t.Errorf("got %v, want [%s]", idsOf(got), e1.ID.Hex())
@@ -111,7 +111,7 @@ func TestChunkRerank_SearcherError_FallsBack(t *testing.T) {
 	searcher := &fakeChunkSearcher{err: errors.New("indexer down")}
 
 	filter := nostr.Filter{Search: "mathematik", Limit: 10}
-	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250))
+	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250, nostr.Generate()))
 
 	if !searcher.called {
 		t.Fatal("searcher was not called")
@@ -131,7 +131,7 @@ func TestChunkRerank_EmptyChunkResult_FallsBack(t *testing.T) {
 	searcher := &fakeChunkSearcher{hits: nil}
 
 	filter := nostr.Filter{Search: "mathematik", Limit: 10}
-	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250))
+	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250, nostr.Generate()))
 
 	if len(got) != 1 || got[0].ID != e1.ID {
 		t.Errorf("empty chunk result must fall back to plain search, got %v", idsOf(got))
@@ -152,7 +152,7 @@ func TestChunkRerank_OrdersByChunkScore(t *testing.T) {
 	}}
 
 	filter := nostr.Filter{Search: "mathematik", Limit: 10}
-	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250))
+	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250, nostr.Generate()))
 
 	want := []string{e2.ID.Hex(), e3.ID.Hex(), e1.ID.Hex()}
 	if len(got) != 3 {
@@ -179,7 +179,7 @@ func TestChunkRerank_DedupesParents(t *testing.T) {
 	}}
 
 	filter := nostr.Filter{Search: "mathematik", Limit: 10}
-	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250))
+	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250, nostr.Generate()))
 
 	if len(got) != 2 {
 		t.Fatalf("got %d events, want 2 (deduped): %v", len(got), idsOf(got))
@@ -202,7 +202,7 @@ func TestChunkRerank_RespectsLimit(t *testing.T) {
 	}}
 
 	filter := nostr.Filter{Search: "mathematik", Limit: 2}
-	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250))
+	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250, nostr.Generate()))
 
 	if len(got) != 2 {
 		t.Fatalf("got %d events, want 2 (filter.Limit)", len(got))
@@ -225,7 +225,7 @@ func TestChunkRerank_AppliesRemainingFilters(t *testing.T) {
 
 	// Author filter excludes e2 even though its chunk score is higher.
 	filter := nostr.Filter{Search: "mathematik", Authors: []nostr.PubKey{e1.PubKey}, Limit: 10}
-	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250))
+	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250, nostr.Generate()))
 
 	if len(got) != 1 || got[0].ID != e1.ID {
 		t.Errorf("got %v, want only [%s] (author filter must apply)", idsOf(got), e1.ID.Hex())
@@ -244,9 +244,127 @@ func TestChunkRerank_SkipsMissingParents(t *testing.T) {
 	}}
 
 	filter := nostr.Filter{Search: "mathematik", Limit: 10}
-	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250))
+	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250, nostr.Generate()))
 
 	if len(got) != 1 || got[0].ID != e1.ID {
 		t.Errorf("got %v, want only [%s] (missing/invalid parents skipped)", idsOf(got), e1.ID.Hex())
+	}
+}
+
+// optInFilter asks for parents and snippets, the kind-21142 opt-in shape.
+func optInFilter(limit int) nostr.Filter {
+	return nostr.Filter{
+		Search: "mathematik",
+		Kinds:  []nostr.Kind{30142, kindSearchSnippet},
+		Limit:  limit,
+	}
+}
+
+func hitFor(e nostr.Event, score float64, snippet string) ChunkHit {
+	return ChunkHit{
+		EventID:    e.ID.Hex(),
+		EventCoord: "30142:" + e.PubKey.Hex() + ":" + e.Tags.GetD(),
+		Score:      score,
+		Snippet:    snippet,
+	}
+}
+
+func TestRerank_InterleavesSnippetsWhenOptedIn(t *testing.T) {
+	sk := nostr.Generate()
+	relaySK := nostr.Generate()
+	e1 := mkEvent(t, sk, "sn-a", 1_700_000_001)
+	e2 := mkEvent(t, sk, "sn-b", 1_700_000_002)
+	store := &fakeStore{events: []nostr.Event{e1, e2}}
+	searcher := &fakeChunkSearcher{hits: []ChunkHit{
+		hitFor(e2, 0.9, "passage about b"),
+		hitFor(e1, 0.5, "passage about a"),
+	}}
+
+	got := collectEvents(chunkRerankQuery(context.Background(), optInFilter(10), searcher, store.fetch, 250, relaySK))
+
+	if len(got) != 4 {
+		t.Fatalf("got %d events, want 4 (parent, snippet, parent, snippet): %v", len(got), idsOf(got))
+	}
+	// Order: best parent, its snippet, next parent, its snippet.
+	if got[0].ID != e2.ID || got[2].ID != e1.ID {
+		t.Errorf("parent order wrong: %v", idsOf(got))
+	}
+	for i, parent := range []nostr.Event{e2, e1} {
+		snip := got[i*2+1]
+		if snip.Kind != kindSearchSnippet {
+			t.Fatalf("event %d kind = %d, want 21142", i*2+1, snip.Kind)
+		}
+		if snip.PubKey != nostr.GetPublicKey(relaySK) {
+			t.Errorf("snippet %d signed by %s, want relay key", i, snip.PubKey.Hex())
+		}
+		if got := tagValue(t, snip, "e"); got != parent.ID.Hex() {
+			t.Errorf("snippet %d e tag = %q, want parent %q", i, got, parent.ID.Hex())
+		}
+	}
+	if got[1].Content != "passage about b" || got[3].Content != "passage about a" {
+		t.Errorf("snippet contents wrong: %q / %q", got[1].Content, got[3].Content)
+	}
+}
+
+func TestRerank_NoSnippetsWithoutKindOptIn(t *testing.T) {
+	sk := nostr.Generate()
+	relaySK := nostr.Generate()
+	e1 := mkEvent(t, sk, "sn-no", 1_700_000_001)
+	store := &fakeStore{events: []nostr.Event{e1}}
+	searcher := &fakeChunkSearcher{hits: []ChunkHit{hitFor(e1, 0.9, "a passage")}}
+
+	filter := nostr.Filter{Search: "mathematik", Kinds: []nostr.Kind{30142}, Limit: 10}
+	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, store.fetch, 250, relaySK))
+
+	if len(got) != 1 || got[0].ID != e1.ID {
+		t.Fatalf("got %v, want only the parent", idsOf(got))
+	}
+	for _, e := range got {
+		if e.Kind == kindSearchSnippet {
+			t.Error("snippet emitted without kind opt-in")
+		}
+	}
+}
+
+func TestRerank_NoSnippetsOnFallback(t *testing.T) {
+	sk := nostr.Generate()
+	relaySK := nostr.Generate()
+	e1 := mkEvent(t, sk, "sn-fb", 1_700_000_001)
+	store := &fakeStore{events: []nostr.Event{e1}}
+	searcher := &fakeChunkSearcher{err: errors.New("indexer down")}
+
+	got := collectEvents(chunkRerankQuery(context.Background(), optInFilter(10), searcher, store.fetch, 250, relaySK))
+
+	if len(got) != 1 || got[0].ID != e1.ID {
+		t.Fatalf("fallback must deliver plain results, got %v", idsOf(got))
+	}
+	if got[0].Kind == kindSearchSnippet {
+		t.Error("snippet emitted on fallback path")
+	}
+}
+
+func TestRerank_LimitCountsParents(t *testing.T) {
+	sk := nostr.Generate()
+	relaySK := nostr.Generate()
+	e1 := mkEvent(t, sk, "sn-l1", 1_700_000_001)
+	e2 := mkEvent(t, sk, "sn-l2", 1_700_000_002)
+	e3 := mkEvent(t, sk, "sn-l3", 1_700_000_003)
+	store := &fakeStore{events: []nostr.Event{e1, e2, e3}}
+	searcher := &fakeChunkSearcher{hits: []ChunkHit{
+		hitFor(e1, 0.9, "p1"),
+		hitFor(e2, 0.8, "p2"),
+		hitFor(e3, 0.7, "p3"),
+	}}
+
+	got := collectEvents(chunkRerankQuery(context.Background(), optInFilter(2), searcher, store.fetch, 250, relaySK))
+
+	if len(got) != 4 {
+		t.Fatalf("got %d events, want 4 (limit=2 parents + 2 snippets)", len(got))
+	}
+	if got[0].ID != e1.ID || got[2].ID != e2.ID {
+		t.Errorf("wrong parents under limit: %v", idsOf(got))
+	}
+	if got[1].Kind != kindSearchSnippet || got[3].Kind != kindSearchSnippet {
+		t.Error("expected snippet after each parent")
 	}
 }
