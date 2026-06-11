@@ -76,45 +76,27 @@ func (b *TSWriteBuffer) Close() {
 	b.wg.Wait()
 }
 
-const maxRetries = 5
-
 func (b *TSWriteBuffer) run() {
 	defer b.wg.Done()
 
 	batch := make([]nostr.Event, 0, b.batchSize)
 	ticker := time.NewTicker(b.flushInterval)
 	defer ticker.Stop()
-	retries := 0
 
+	// flushBatch upserts the in-memory batch. The retry budget lives inside
+	// writer.Upsert (productionWriter computes embeddings once and retries
+	// only the HTTP call). flushBatch therefore treats one Upsert call as
+	// one terminal attempt: on failure it logs and clears the batch — the
+	// events are durable in BoltDB and recoverable via reindex. This avoids
+	// the embed-amplification cascade that took down the host on 2026-06-11.
 	flushBatch := func() {
 		if len(batch) == 0 {
 			return
 		}
-		failed := b.upsertOnce(batch)
-		if failed {
-			retries++
-			if retries > maxRetries {
-				log.Printf("ts-buffer: dropping %d events after %d retries (data safe in BoltDB, reindex to recover)", len(batch), maxRetries)
-				batch = batch[:0]
-				retries = 0
-				return
-			}
-			// Sleep before returning so the next flush attempt isn't
-			// immediate. For ticker-driven flushes, the caller's next
-			// select case picks up after this sleep. For inline flushes
-			// from the content-task path, this sleep stalls the
-			// goroutine — by design: we don't want to hammer Typesense
-			// while it's failing, and ContentStore is durable so the
-			// patch can wait.
-			backoff := time.Duration(1<<(retries-1)) * time.Second
-			if backoff > 16*time.Second {
-				backoff = 16 * time.Second
-			}
-			time.Sleep(backoff)
-			return
+		if b.upsertOnce(batch) {
+			log.Printf("ts-buffer: dropping %d events after Upsert exhausted retries (data safe in BoltDB, reindex to recover)", len(batch))
 		}
 		batch = batch[:0]
-		retries = 0
 	}
 
 	drainFlush := func() {
@@ -130,9 +112,6 @@ func (b *TSWriteBuffer) run() {
 	// drain is the shutdown path: best-effort, no retries, no sleeps.
 	// Closed b.ch must be passed to it; caller is responsible for that.
 	drain := func() {
-		// Drain remaining tasks. Best-effort: no retries, no sleeps —
-		// shutdown should be prompt. Failed flushes log; data is safe
-		// in BoltDB / ContentStore and reindex is the recovery path.
 		for task := range b.ch {
 			if task.Content == nil {
 				batch = append(batch, task.Event)
@@ -152,8 +131,7 @@ func (b *TSWriteBuffer) run() {
 
 	for {
 		// Prioritise the shutdown signal so that tasks queued concurrently
-		// with Close() are drained by the best-effort drain path rather
-		// than being subject to the retry-aware normal path.
+		// with Close() are drained by the best-effort drain path.
 		select {
 		case <-b.done:
 			close(b.ch)
@@ -177,25 +155,6 @@ func (b *TSWriteBuffer) run() {
 				// Content task: ensure event is upserted before patching.
 				batch = append(batch, task.Event)
 				flushBatch()
-				if retries > 0 {
-					// Upsert is still failing. If shutdown was signalled
-					// while we were sleeping in flushBatch, attempt the
-					// patch best-effort (same semantics as the drain path)
-					// so that tasks processed just before Close() are not
-					// silently dropped.
-					select {
-					case <-b.done:
-						if err := b.writer.Patch(task.Event, *task.Content); err != nil {
-							log.Printf("ts-buffer: shutdown patch %s: %v", task.Event.ID.Hex(), err)
-						}
-					default:
-						// Still running normally. Skip the patch; the event
-						// will re-flush via the next tick. The content stays
-						// in ContentStore; reindex recovers.
-						log.Printf("ts-buffer: skipping content patch for %s, upsert still failing — content is durable in ContentStore, reindex when Typesense recovers", task.Event.ID.Hex())
-					}
-					continue
-				}
 				if err := b.writer.Patch(task.Event, *task.Content); err != nil {
 					log.Printf("ts-buffer: patch %s: %v", task.Event.ID.Hex(), err)
 				}
@@ -230,13 +189,50 @@ func (b *TSWriteBuffer) upsertOnce(batch []nostr.Event) (failed bool) {
 }
 
 // productionWriter wires the buffer to the real Typesense backend.
+//
+// Upsert prepares the batch (NostrToAMB + embed) ONCE, then retries only the
+// HTTP upsert against transient TS errors. This is the critical property the
+// 2026-06-11 incident postmortem demanded: under TS WAL replay 503s, retries
+// must not re-fire the embed service. The retry budget is generous (5 attempts,
+// 1s→16s backoff ≈ 31s) so the buffer itself doesn't need a second retry
+// layer — see flushBatch.
 type productionWriter struct {
 	tsDB                  *typesense30142.TSBackend
 	host, apiKey, colName string
 }
 
+const (
+	upsertHTTPMaxRetries = 5
+	upsertHTTPMaxBackoff = 16 * time.Second
+)
+
 func (p *productionWriter) Upsert(events []nostr.Event) (int, []error) {
-	return p.tsDB.BatchUpsertEvents(events)
+	docs, prepErrs := p.tsDB.PrepareBatch(events)
+	if len(docs) == 0 {
+		return 0, prepErrs
+	}
+
+	var indexed int
+	var lastErrs []error
+	for attempt := 0; attempt <= upsertHTTPMaxRetries; attempt++ {
+		indexed, lastErrs = p.tsDB.BatchUpsertDocs(docs)
+		if indexed > 0 || len(lastErrs) == 0 {
+			break
+		}
+		if attempt == upsertHTTPMaxRetries {
+			break
+		}
+		backoff := time.Duration(1<<attempt) * time.Second
+		if backoff > upsertHTTPMaxBackoff {
+			backoff = upsertHTTPMaxBackoff
+		}
+		time.Sleep(backoff)
+	}
+
+	if len(prepErrs) > 0 {
+		lastErrs = append(prepErrs, lastErrs...)
+	}
+	return indexed, lastErrs
 }
 
 func (p *productionWriter) Patch(event nostr.Event, content ContentEntry) error {

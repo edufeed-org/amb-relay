@@ -12,6 +12,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    # 95k events + chunk embeddings can push TS RSS past 3 GiB during WAL replay.
+    # Cap so an OOM kills the container instead of swap-thrashing the host (see
+    # 2026-06-11 oersi-dev runaway). Bump if WAL replay logs OOMs.
+    mem_limit: 4g
+    mem_reservation: 1g
 
   amb-relay:
     build:
@@ -42,11 +47,15 @@ services:
       - EMBED_TOKEN=${EMBED_TOKEN}
       - SEMANTIC_SEARCH_ENABLED=${SEMANTIC_SEARCH_ENABLED:-false}
       - ADMIN_PUBKEYS=${ADMIN_PUBKEYS}
+    mem_limit: 1g
+    mem_reservation: 256m
 
   tika:
     image: apache/tika:latest-full
     restart: unless-stopped
     # No port exposure to host; reachable only on the internal network.
+    mem_limit: 1g
+    mem_reservation: 256m
 
   embed:
     build: ./embed
@@ -63,6 +72,12 @@ services:
       # Model load on first boot pulls ~120 MB and takes time. Generous start_period
       # avoids tripping unhealthy during cold start.
       start_period: 120s
+    # Model + activations fit comfortably under 2 GiB; the 2026-06-11 runaway
+    # climbed to ~2.0 GB RSS before the host died, so this is a hard ceiling
+    # for a single uvicorn worker. Don't raise without also revisiting the
+    # retry-amplification fix in nostrlib (replace.go).
+    mem_limit: 2g
+    mem_reservation: 512m
     # No port exposure to host by default; reachable only on the internal network.
     # Uncomment for host-side debugging:
     # ports:
@@ -95,6 +110,8 @@ services:
     env_file: ../amb-indexer/.env.indexer
     volumes:
       - indexer_data:/data
+    mem_limit: 1g
+    mem_reservation: 256m
 
 volumes:
   indexer_data:
