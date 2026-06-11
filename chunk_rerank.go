@@ -9,12 +9,17 @@ import (
 	"fiatjaf.com/nostr"
 )
 
-// ChunkHit is one passage-level match from the indexer's chunk collection,
-// reduced to what re-ranking needs: which event it belongs to and how well
-// it matched.
+// ChunkHit is one passage-level match from the indexer's chunk collection:
+// which event it belongs to, how well it matched, and the passage itself
+// with its source locators (used for kind-21142 snippet events).
 type ChunkHit struct {
-	EventID string
-	Score   float64
+	EventID    string
+	EventCoord string // "30142:<pubkey>:<d-tag>", verbatim from the indexer
+	Score      float64
+	Snippet    string
+	Page       int // 0 = unknown
+	Heading    string
+	SourceURL  string
 }
 
 // ChunkSearcher queries the amb-indexer chunk index. Production wires this
