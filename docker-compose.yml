@@ -47,6 +47,13 @@ services:
       - EMBED_TOKEN=${EMBED_TOKEN}
       - SEMANTIC_SEARCH_ENABLED=${SEMANTIC_SEARCH_ENABLED:-false}
       - ADMIN_PUBKEYS=${ADMIN_PUBKEYS}
+      # Chunk-level re-ranking of NIP-50 searches via amb-indexer's
+      # /search_chunks. Token must match INDEXER_API_TOKEN in
+      # ../amb-indexer/.env.indexer. Falls back to plain search when the
+      # indexer is unreachable.
+      - CHUNK_RERANK_ENABLED=${CHUNK_RERANK_ENABLED:-false}
+      - INDEXER_BASE_URL=${INDEXER_BASE_URL:-http://amb-indexer:8080}
+      - INDEXER_API_TOKEN=${INDEXER_API_TOKEN}
     mem_limit: 1g
     mem_reservation: 256m
 

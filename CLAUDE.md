@@ -139,6 +139,8 @@ Required in `.env` (copy from `.env.example`):
 - `DB_PATH`: BoltDB file path (default: `./data/relay.db`)
 - `ADMIN_PUBKEYS`: Comma-separated hex pubkeys for NIP-86 management API access (in addition to `PUBKEY`)
 
+Optional chunk re-ranking (`chunk_rerank.go`): when `CHUNK_RERANK_ENABLED=true` and `INDEXER_API_TOKEN` is set, NIP-50 searches are re-ranked by the best matching fulltext passage from amb-indexer's `POST /search_chunks` (`INDEXER_BASE_URL`, default `http://amb-indexer:8080`). Falls back to plain Typesense search on any indexer error or empty chunk result, so recall never degrades. Negentropy syncs carry no search field and bypass it naturally.
+
 ## Testing
 
 ### nak CLI

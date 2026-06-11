@@ -239,13 +239,32 @@ func main() {
 		khatru.RequestAuth(ctx)
 	}
 
+	// Optional chunk-level re-ranking of NIP-50 searches via amb-indexer.
+	// Off by default; when enabled, searches are ranked by best matching
+	// passage in the chunk index and fall back to plain Typesense search on
+	// any indexer error (see chunk_rerank.go).
+	var chunkSearcher ChunkSearcher
+	if os.Getenv("CHUNK_RERANK_ENABLED") == "true" {
+		indexerURL := os.Getenv("INDEXER_BASE_URL")
+		if indexerURL == "" {
+			indexerURL = "http://amb-indexer:8080"
+		}
+		token := os.Getenv("INDEXER_API_TOKEN")
+		if token == "" {
+			fmt.Println("Warning: CHUNK_RERANK_ENABLED but INDEXER_API_TOKEN unset — chunk re-ranking disabled")
+		} else {
+			chunkSearcher = newHTTPChunkSearcher(indexerURL, token)
+			fmt.Printf("Chunk re-ranking enabled via %s\n", indexerURL)
+		}
+	}
+
 	// Dual-write eventstore wiring (query from Typesense, persist to both)
 	relay.QueryStored = func(ctx context.Context, filter nostr.Filter) iter.Seq[nostr.Event] {
 		maxLimit := 250
 		if khatru.IsNegentropySession(ctx) {
 			maxLimit = 250 * 20
 		}
-		return tsDB.QueryEvents(filter, maxLimit)
+		return chunkRerankQuery(ctx, filter, chunkSearcher, tsDB.QueryEvents, maxLimit)
 	}
 	relay.Count = func(ctx context.Context, filter nostr.Filter) (uint32, error) {
 		return tsDB.CountEvents(filter)
