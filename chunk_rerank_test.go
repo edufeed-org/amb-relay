@@ -300,6 +300,9 @@ func TestRerank_InterleavesSnippetsWhenOptedIn(t *testing.T) {
 		if got := tagValue(t, snip, "e"); got != parent.ID.Hex() {
 			t.Errorf("snippet %d e tag = %q, want parent %q", i, got, parent.ID.Hex())
 		}
+		if got := tagValue(t, snip, "a"); got != "30142:"+parent.PubKey.Hex()+":"+parent.Tags.GetD() {
+			t.Errorf("snippet %d a tag = %q", i, got)
+		}
 	}
 	if got[1].Content != "passage about b" || got[3].Content != "passage about a" {
 		t.Errorf("snippet contents wrong: %q / %q", got[1].Content, got[3].Content)
@@ -340,6 +343,9 @@ func TestRerank_NoSnippetsOnFallback(t *testing.T) {
 	}
 	if got[0].Kind == kindSearchSnippet {
 		t.Error("snippet emitted on fallback path")
+	}
+	if len(store.calls) != 1 || store.calls[0].Search != "mathematik" {
+		t.Errorf("fallback must use the original filter, got %+v", store.calls)
 	}
 }
 
