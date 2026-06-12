@@ -110,6 +110,14 @@ range — never stored) carrying the best matching passage:
 }
 ```
 
+`score` is the indexer's normalized relevance for the best matching chunk,
+always in `[0,1]`. In the common hybrid-search case it derives from
+Typesense's rank fusion and is therefore **relative to the result set**:
+useful for ordering and rough confidence within one response, but not
+comparable across different queries or different relays. Clients merging
+results from multiple relays should merge by per-relay rank instead and
+deduplicate by the `a` tag.
+
 `page`, `heading` and `source_url` appear only when the indexer extracted
 them. `limit` counts parent events, so an opted-in client receives at most
 `2×limit` events before EOSE. Snippets are best-effort decoration: on any
