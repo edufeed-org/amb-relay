@@ -56,6 +56,8 @@ The relay listens on `:3334`, Typesense on `:8108`. See **[Deployment](#deployme
 |----------|-------------|---------|
 | `DB_PATH` | Path to BoltDB file for raw event persistence | `./data/relay.db` |
 | `ADMIN_PUBKEYS` | Comma-separated hex pubkeys for NIP-86 management API access (in addition to `PUBKEY`) | empty |
+| `LONGFORM_ENABLED` | When `true`, also accept kind-30023 (NIP-23 long-form) events and enable the second Typesense collection. See [Long-form support](#long-form-nip-23-kind-30023). | `false` |
+| `TS_COLLECTION_LONGFORM` | Collection name for long-form structured fields | `longform_30023` |
 | `HYDRATE_ON_START` | When `true`, runs an in-process BoltDB ↔ Typesense reconciliation pass before the listener opens. See [Recovering from BoltDB ↔ Typesense skew](#recovering-from-boltdb--typesense-skew). Fail-open on TS errors; bounded by a 30-min context. Adds startup time proportional to corpus size (≈3 min per 100k events). | `false` |
 
 ### Semantic Search (Optional)
@@ -133,6 +135,25 @@ Test with nak:
 
 ```bash
 nak req --search "photosynthese" -k 30142 -k 21142 --limit 5 ws://localhost:3334
+```
+
+### Long-form (NIP-23 kind 30023)
+
+With `LONGFORM_ENABLED=true` the relay additionally accepts kind-30023
+long-form events (requiring `d` + `title` tags). Their structured fields go
+to a **separate** Typesense collection (`longform_30023` /
+`TS_COLLECTION_LONGFORM`), so the AMB collection stays pristine; the search
+path merges both collections by kind.
+
+`amb-indexer` chunks a 30023 event's `content` directly (no external fetch or
+Tika) and writes the chunks into the same shared chunk collection used for
+AMB resources, with kind-prefixed coords (`30023:<pubkey>:<d>`). A NIP-50
+search over `kinds:[30142,30023]` therefore returns both content types
+interleaved and ranked by chunk score; opt-in snippet events (add `21142`)
+carry the correct parent `k` tag (`30142` or `30023`).
+
+```bash
+nak req --search "klimawandel" -k 30142 -k 30023 --limit 5 ws://localhost:3334
 ```
 
 ## Deployment

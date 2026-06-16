@@ -62,6 +62,13 @@ Embedding runs in-stack as the `embed` service (`./embed`) — a small FastAPI c
 - Queries support NIP-01 filter fields, tag filters, and NIP-50 search — see [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md) for full query documentation
 - Tags using the `ext:<ns>:<facet>:<sub>` shape (NIP-AMB extension namespace) are folded into a separate `ext` object in Typesense and queryable via NIP-50 (`ext.<ns>.<facet>.id:val`) and tag filter (`#ext:<ns>:<facet>:id`).
 
+**Long-form (NIP-23 kind-30023), gated behind `LONGFORM_ENABLED`:**
+- When `LONGFORM_ENABLED=true`, the relay also accepts kind-30023 long-form events. Required tags: `d` + `title` (validated in OnEvent; rejected when missing).
+- 30023 structured fields are projected (`nostrToLongform`, `longform.go`) into a SEPARATE Typesense collection (`longform_30023` / `TS_COLLECTION_LONGFORM`), keeping the AMB collection pristine. StoreEvent/ReplaceEvent route 30023 to the second backend (`tsDB2`); DeleteEvent targets both collections.
+- The query path merges both collections by kind (`combinedFetch`, `query_combined.go`): a filter's `kinds` selects which backends to hit, and the ID-only parent fetch from chunk re-ranking queries both.
+- amb-indexer chunks 30023 `event.content` DIRECTLY (no external fetch/Tika) and writes to the SAME shared chunk collection (`amb_chunks_30142`); chunk coords are kind-prefixed (`30023:<pubkey>:<d>`).
+- NIP-50 search over `kinds:[30142,30023]` returns interleaved results ranked by chunk score; opted-in clients (adding `21142`) receive a snippet kind-21142 event after each result carrying the correct parent `k` tag (`parentKind` derives it from the coord prefix).
+
 **Typesense Schema Management:**
 - Custom NIP-86 methods (`getcollectionschema`, `updatecollectionschema`, `resetcollectionschema`, `reindex`, `getreindexstatus`) via khatru's `Generic` handler
 - Schema config persisted in BoltDB; on startup, custom schema (if stored) overrides the hardcoded default
@@ -138,6 +145,8 @@ Required in `.env` (copy from `.env.example`):
 - `TS_COLLECTION`: Collection name for events
 - `DB_PATH`: BoltDB file path (default: `./data/relay.db`)
 - `ADMIN_PUBKEYS`: Comma-separated hex pubkeys for NIP-86 management API access (in addition to `PUBKEY`)
+- `LONGFORM_ENABLED`: Set to `true` to accept kind-30023 (NIP-23 long-form) events and enable the second Typesense collection (default `false`).
+- `TS_COLLECTION_LONGFORM`: Collection name for long-form structured fields (default `longform_30023`).
 
 Optional chunk re-ranking (`chunk_rerank.go`): when `CHUNK_RERANK_ENABLED=true` and `INDEXER_API_TOKEN` is set, NIP-50 searches are re-ranked by the best matching fulltext passage from amb-indexer's `POST /search_chunks` (`INDEXER_BASE_URL`, default `http://amb-indexer:8080`). Falls back to plain Typesense search on any indexer error or empty chunk result, so recall never degrades. Negentropy syncs carry no search field and bypass it naturally. Searches that additionally opt in with `kinds:[30142,21142]` receive an
 ephemeral kind-21142 snippet event after each result, carrying the best
