@@ -33,7 +33,7 @@ func coordFor(e nostr.Event) string {
 
 // TestCrossContent_RerankInterleavesBothCollections is the end-to-end proof
 // that a NIP-50 search over kinds:[30142,30023] merges the two Typesense
-// collections (combinedFetch), ranks the parents by chunk score, and emits a
+// collections via the registry, ranks the parents by chunk score, and emits a
 // kind-21142 snippet carrying the correct parent k tag after each — all
 // without a live Typesense.
 func TestCrossContent_RerankInterleavesBothCollections(t *testing.T) {
@@ -47,7 +47,11 @@ func TestCrossContent_RerankInterleavesBothCollections(t *testing.T) {
 	// filter.Matches, exactly like the real Typesense-backed fetch.
 	ambStore := &fakeStore{events: []nostr.Event{amb}}
 	lfStore := &fakeStore{events: []nostr.Event{lf}}
-	fetch := combinedFetch(ambStore.fetch, lfStore.fetch)
+	reg := newRegistry(
+		contentType{kinds: []nostr.Kind{30142}, fetch: ambStore.fetch},
+		contentType{kinds: []nostr.Kind{30023}, fetch: lfStore.fetch},
+	)
+	fetch := reg.fetch
 
 	// Long-form scores higher than AMB, so it must come first regardless of
 	// which collection it lives in. Coords carry the kind-prefix the snippet
