@@ -6,28 +6,21 @@ import (
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/typesense30142"
+	"fiatjaf.com/nostr/khatru/relaykit"
 	"fiatjaf.com/nostr/nip86"
 	"go.etcd.io/bbolt"
 )
 
 var (
-	bucketBannedPubKeys   = []byte("banned_pubkeys")
-	bucketBannedEvents    = []byte("banned_events")
 	bucketTypesenseSchema = []byte("typesense_schema")
 	bucketSemanticConfig  = []byte("semantic_config")
 	bucketAccessControl   = []byte("access_control")
 	bucketWriteAllowlist  = []byte("write_allowlist")
 	bucketReadAllowlist   = []byte("read_allowlist")
 	bucketListReferences  = []byte("list_references")
-	bucketAdmins          = []byte("admins")
 	bucketFetchedContent  = []byte("fetched_content") // resource fulltext keyed by event_id
 	bucketNeedsRefetch    = []byte("needs_refetch")   // event_ids flagged for re-ingestion
 )
-
-type adminEntry struct {
-	FullAccess bool     `json:"full_access"`
-	Methods    []string `json:"methods,omitempty"`
-}
 
 const schemaKey = "current"
 const semanticConfigKey = "config"
@@ -48,13 +41,17 @@ func DefaultSemanticConfig() SemanticConfig {
 }
 
 type ManagementStore struct {
-	DB *bbolt.DB
+	*relaykit.Store
 }
 
 func (m *ManagementStore) Init(db *bbolt.DB) error {
-	m.DB = db
+	store, err := relaykit.NewStore(db)
+	if err != nil {
+		return err
+	}
+	m.Store = store
 	return db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range [][]byte{bucketBannedPubKeys, bucketBannedEvents, bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketAdmins, bucketFetchedContent, bucketNeedsRefetch} {
+		for _, bucket := range [][]byte{bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketFetchedContent, bucketNeedsRefetch} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
@@ -65,98 +62,6 @@ func (m *ManagementStore) Init(db *bbolt.DB) error {
 
 type reasonEntry struct {
 	Reason string `json:"reason,omitempty"`
-}
-
-// BanPubKey adds a pubkey to the ban list.
-func (m *ManagementStore) BanPubKey(pubkey nostr.PubKey, reason string) error {
-	val, _ := json.Marshal(reasonEntry{Reason: reason})
-	return m.DB.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket(bucketBannedPubKeys).Put([]byte(pubkey.Hex()), val)
-	})
-}
-
-// AllowPubKey removes a pubkey from the ban list.
-func (m *ManagementStore) AllowPubKey(pubkey nostr.PubKey) error {
-	return m.DB.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket(bucketBannedPubKeys).Delete([]byte(pubkey.Hex()))
-	})
-}
-
-// ListBannedPubKeys returns all banned pubkeys.
-func (m *ManagementStore) ListBannedPubKeys() ([]nip86.PubKeyReason, error) {
-	var result []nip86.PubKeyReason
-	err := m.DB.View(func(tx *bbolt.Tx) error {
-		return tx.Bucket(bucketBannedPubKeys).ForEach(func(k, v []byte) error {
-			pk, err := nostr.PubKeyFromHex(string(k))
-			if err != nil {
-				return nil // skip invalid entries
-			}
-			var entry reasonEntry
-			json.Unmarshal(v, &entry)
-			result = append(result, nip86.PubKeyReason{PubKey: pk, Reason: entry.Reason})
-			return nil
-		})
-	})
-	return result, err
-}
-
-// IsPubKeyBanned checks if a pubkey is banned.
-func (m *ManagementStore) IsPubKeyBanned(pubkey nostr.PubKey) bool {
-	var banned bool
-	m.DB.View(func(tx *bbolt.Tx) error {
-		if tx.Bucket(bucketBannedPubKeys).Get([]byte(pubkey.Hex())) != nil {
-			banned = true
-		}
-		return nil
-	})
-	return banned
-}
-
-// BanEvent adds an event ID to the ban list.
-func (m *ManagementStore) BanEvent(id nostr.ID, reason string) error {
-	val, _ := json.Marshal(reasonEntry{Reason: reason})
-	return m.DB.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket(bucketBannedEvents).Put([]byte(id.Hex()), val)
-	})
-}
-
-// AllowEvent removes an event ID from the ban list.
-func (m *ManagementStore) AllowEvent(id nostr.ID) error {
-	return m.DB.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket(bucketBannedEvents).Delete([]byte(id.Hex()))
-	})
-}
-
-// IsEventBanned checks if an event id is in the ban list. Used to reject
-// resubmission of events the operator has previously deleted via NIP-86
-// `banevent`.
-func (m *ManagementStore) IsEventBanned(id nostr.ID) bool {
-	var banned bool
-	m.DB.View(func(tx *bbolt.Tx) error {
-		if tx.Bucket(bucketBannedEvents).Get([]byte(id.Hex())) != nil {
-			banned = true
-		}
-		return nil
-	})
-	return banned
-}
-
-// ListBannedEvents returns all banned event IDs.
-func (m *ManagementStore) ListBannedEvents() ([]nip86.IDReason, error) {
-	var result []nip86.IDReason
-	err := m.DB.View(func(tx *bbolt.Tx) error {
-		return tx.Bucket(bucketBannedEvents).ForEach(func(k, v []byte) error {
-			id, err := nostr.IDFromHex(string(k))
-			if err != nil {
-				return nil // skip invalid entries
-			}
-			var entry reasonEntry
-			json.Unmarshal(v, &entry)
-			result = append(result, nip86.IDReason{ID: id, Reason: entry.Reason})
-			return nil
-		})
-	})
-	return result, err
 }
 
 // SaveSchema stores a custom Typesense collection schema in BoltDB.
@@ -362,70 +267,6 @@ func (m *ManagementStore) LoadListReferences() (map[string]ListReference, error)
 	return result, err
 }
 
-// AddAdmin grants admin access to a pubkey. If methods is empty, full access is granted.
-// If methods is non-empty, they are merged with any existing methods.
-func (m *ManagementStore) AddAdmin(pubkey string, methods []string) error {
-	return m.DB.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketAdmins)
-		var entry adminEntry
-		if existing := b.Get([]byte(pubkey)); existing != nil {
-			json.Unmarshal(existing, &entry)
-		}
-		if len(methods) == 0 {
-			entry.FullAccess = true
-			entry.Methods = nil
-		} else if !entry.FullAccess {
-			seen := make(map[string]bool)
-			for _, m := range entry.Methods {
-				seen[m] = true
-			}
-			for _, m := range methods {
-				if !seen[m] {
-					entry.Methods = append(entry.Methods, m)
-				}
-			}
-		}
-		val, _ := json.Marshal(entry)
-		return b.Put([]byte(pubkey), val)
-	})
-}
-
-// RemoveAdmin revokes admin access. If methods is empty, the admin is removed entirely.
-// If methods is non-empty, only those methods are removed; if none remain, the admin is deleted.
-func (m *ManagementStore) RemoveAdmin(pubkey string, methods []string) error {
-	return m.DB.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketAdmins)
-		if len(methods) == 0 {
-			return b.Delete([]byte(pubkey))
-		}
-		existing := b.Get([]byte(pubkey))
-		if existing == nil {
-			return nil
-		}
-		var entry adminEntry
-		json.Unmarshal(existing, &entry)
-		if entry.FullAccess {
-			return nil // cannot partially revoke a full-access admin via methods
-		}
-		remove := make(map[string]bool)
-		for _, m := range methods {
-			remove[m] = true
-		}
-		var remaining []string
-		for _, m := range entry.Methods {
-			if !remove[m] {
-				remaining = append(remaining, m)
-			}
-		}
-		if len(remaining) == 0 {
-			return b.Delete([]byte(pubkey))
-		}
-		entry.Methods = remaining
-		val, _ := json.Marshal(entry)
-		return b.Put([]byte(pubkey), val)
-	})
-}
-
 // MarkNeedsRefetch flags an event id for re-ingestion by the indexer.
 // Idempotent: marking the same id twice is a no-op.
 func (m *ManagementStore) MarkNeedsRefetch(eventID string) error {
@@ -454,18 +295,3 @@ func (m *ManagementStore) ListNeedsRefetch() ([]string, error) {
 	return result, err
 }
 
-// ListAdmins returns all persisted admin entries.
-func (m *ManagementStore) ListAdmins() (map[string]adminEntry, error) {
-	result := make(map[string]adminEntry)
-	err := m.DB.View(func(tx *bbolt.Tx) error {
-		return tx.Bucket(bucketAdmins).ForEach(func(k, v []byte) error {
-			var entry adminEntry
-			if err := json.Unmarshal(v, &entry); err != nil {
-				return nil
-			}
-			result[string(k)] = entry
-			return nil
-		})
-	})
-	return result, err
-}

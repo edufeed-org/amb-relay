@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
-	"sync"
 	"time"
 
 	"fiatjaf.com/nostr"
@@ -18,6 +17,7 @@ import (
 	"fiatjaf.com/nostr/eventstore/typesense30142"
 	"fiatjaf.com/nostr/khatru"
 	"fiatjaf.com/nostr/khatru/landing"
+	"fiatjaf.com/nostr/khatru/relaykit"
 	"fiatjaf.com/nostr/nip11"
 	"fiatjaf.com/nostr/nip86"
 	"github.com/edufeed-org/amb-relay/internal/hydrate"
@@ -75,23 +75,21 @@ func main() {
 	}
 
 	// Build admin pubkey set
-	admins := &adminSet{
-		static:  make(map[nostr.PubKey]bool),
-		dynamic: make(map[nostr.PubKey]*adminEntry),
-	}
+	var staticAdmins []nostr.PubKey
 	if operatorPK != (nostr.PubKey{}) {
-		admins.static[operatorPK] = true
+		staticAdmins = append(staticAdmins, operatorPK)
 	}
 	if adminList := os.Getenv("ADMIN_PUBKEYS"); adminList != "" {
 		for _, hex := range strings.Split(adminList, ",") {
 			hex = strings.TrimSpace(hex)
 			if pk, err := nostr.PubKeyFromHex(hex); err == nil {
-				admins.static[pk] = true
+				staticAdmins = append(staticAdmins, pk)
 			} else {
 				fmt.Printf("Error parsing admin pubkey %q: %v\n", hex, err)
 			}
 		}
 	}
+	admins := relaykit.NewAdminSet(staticAdmins)
 
 	// BoltDB backend (raw event persistence) — initialized first so we can load schema
 	dbPath := os.Getenv("DB_PATH")
@@ -124,8 +122,11 @@ func main() {
 	} else {
 		for hex, entry := range persistedAdmins {
 			if pk, err := nostr.PubKeyFromHex(hex); err == nil {
-				e := entry
-				admins.dynamic[pk] = &e
+				if entry.FullAccess {
+					admins.Grant(pk, nil)
+				} else {
+					admins.Grant(pk, entry.Methods)
+				}
 			}
 		}
 		if len(persistedAdmins) > 0 {
@@ -314,7 +315,7 @@ func main() {
 		if mgmt.IsEventBanned(event.ID) {
 			return true, "event is banned"
 		}
-		if acl.IsWriteRestricted() && !admins.isAdmin(event.PubKey) && !acl.IsWriteAllowed(event.PubKey.Hex()) {
+		if acl.IsWriteRestricted() && !admins.IsAdmin(event.PubKey) && !acl.IsWriteAllowed(event.PubKey.Hex()) {
 			return true, "restricted: pubkey not on write allowlist"
 		}
 		if event.Kind == nostr.KindDeletion {
@@ -344,7 +345,7 @@ func main() {
 		if !ok {
 			return true, "auth-required: authentication required to read"
 		}
-		if admins.isAdmin(authed) {
+		if admins.IsAdmin(authed) {
 			return false, ""
 		}
 		if !acl.IsReadAllowed(authed.Hex()) {
@@ -361,7 +362,7 @@ func main() {
 			return false
 		}
 		for _, pk := range ws.AuthedPublicKeys {
-			if admins.isAdmin(pk) || acl.IsReadAllowed(pk.Hex()) {
+			if admins.IsAdmin(pk) || acl.IsReadAllowed(pk.Hex()) {
 				return false
 			}
 		}
@@ -385,7 +386,7 @@ func main() {
 		if !ok {
 			return true, "not authenticated"
 		}
-		if !admins.isAllowed(authed, mp.MethodName()) {
+		if !admins.IsAllowed(authed, mp.MethodName()) {
 			return true, "not authorized"
 		}
 		return false, ""
@@ -422,17 +423,17 @@ func main() {
 		if err := mgmt.AddAdmin(pubkey.Hex(), methods); err != nil {
 			return err
 		}
-		admins.grant(pubkey, methods)
+		admins.Grant(pubkey, methods)
 		return nil
 	}
 	relay.ManagementAPI.RevokeAdmin = func(ctx context.Context, pubkey nostr.PubKey, methods []string) error {
-		if admins.isStatic(pubkey) {
+		if admins.IsStatic(pubkey) {
 			return fmt.Errorf("cannot revoke env-configured admin")
 		}
 		if err := mgmt.RemoveAdmin(pubkey.Hex(), methods); err != nil {
 			return err
 		}
-		admins.revoke(pubkey, methods)
+		admins.Revoke(pubkey, methods)
 		return nil
 	}
 
@@ -849,104 +850,6 @@ func main() {
 }
 
 var startTime = time.Now()
-
-type adminSet struct {
-	mu      sync.RWMutex
-	static  map[nostr.PubKey]bool        // env-var admins (always full access, unrevokable)
-	dynamic map[nostr.PubKey]*adminEntry // NIP-86 managed admins (persisted in BoltDB)
-}
-
-func (a *adminSet) isAdmin(pk nostr.PubKey) bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.static[pk] {
-		return true
-	}
-	_, ok := a.dynamic[pk]
-	return ok
-}
-
-func (a *adminSet) isAllowed(pk nostr.PubKey, method string) bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.static[pk] {
-		return true
-	}
-	entry, ok := a.dynamic[pk]
-	if !ok {
-		return false
-	}
-	if entry.FullAccess {
-		return true
-	}
-	for _, m := range entry.Methods {
-		if m == method {
-			return true
-		}
-	}
-	return false
-}
-
-func (a *adminSet) isStatic(pk nostr.PubKey) bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.static[pk]
-}
-
-func (a *adminSet) grant(pk nostr.PubKey, methods []string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	entry, ok := a.dynamic[pk]
-	if !ok {
-		entry = &adminEntry{}
-		a.dynamic[pk] = entry
-	}
-	if len(methods) == 0 {
-		entry.FullAccess = true
-		entry.Methods = nil
-		return
-	}
-	if entry.FullAccess {
-		return
-	}
-	seen := make(map[string]bool)
-	for _, m := range entry.Methods {
-		seen[m] = true
-	}
-	for _, m := range methods {
-		if !seen[m] {
-			entry.Methods = append(entry.Methods, m)
-		}
-	}
-}
-
-func (a *adminSet) revoke(pk nostr.PubKey, methods []string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if len(methods) == 0 {
-		delete(a.dynamic, pk)
-		return
-	}
-	entry, ok := a.dynamic[pk]
-	if !ok || entry.FullAccess {
-		return
-	}
-	remove := make(map[string]bool)
-	for _, m := range methods {
-		remove[m] = true
-	}
-	var remaining []string
-	for _, m := range entry.Methods {
-		if !remove[m] {
-			remaining = append(remaining, m)
-		}
-	}
-	if len(remaining) == 0 {
-		delete(a.dynamic, pk)
-	} else {
-		entry.Methods = remaining
-	}
-}
 
 // ensureContentFields appends the three content fields to the schema if they
 // are not already present. Idempotent: safe to call on default or custom schemas.
