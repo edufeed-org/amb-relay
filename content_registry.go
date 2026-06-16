@@ -6,6 +6,10 @@ import (
 	"fiatjaf.com/nostr"
 )
 
+// fetchFunc abstracts a content type's event query (e.g. tsDB.QueryEvents) so
+// the registry and the semantic rerank layer can consume it without Typesense.
+type fetchFunc func(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event]
+
 // contentType is one content shape the relay serves. Its fields are exactly the
 // per-kind variation the event path switched on before the registry existed —
 // discovered from the AMB (30142) and long-form (30023) duplication. Projection

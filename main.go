@@ -18,6 +18,7 @@ import (
 	"fiatjaf.com/nostr/khatru"
 	"fiatjaf.com/nostr/khatru/landing"
 	"fiatjaf.com/nostr/khatru/relaykit"
+	"fiatjaf.com/nostr/khatru/semantic"
 	"fiatjaf.com/nostr/nip11"
 	"fiatjaf.com/nostr/nip86"
 	"github.com/edufeed-org/amb-relay/internal/hydrate"
@@ -352,7 +353,7 @@ func main() {
 	// Off by default; when enabled, searches are ranked by best matching
 	// passage in the chunk index and fall back to plain Typesense search on
 	// any indexer error (see chunk_rerank.go).
-	var chunkSearcher ChunkSearcher
+	var chunkSearcher semantic.ChunkSearcher
 	if os.Getenv("CHUNK_RERANK_ENABLED") == "true" {
 		indexerURL := os.Getenv("INDEXER_BASE_URL")
 		if indexerURL == "" {
@@ -362,7 +363,7 @@ func main() {
 		if token == "" {
 			fmt.Println("Warning: CHUNK_RERANK_ENABLED but INDEXER_API_TOKEN unset — chunk re-ranking disabled")
 		} else {
-			chunkSearcher = newHTTPChunkSearcher(indexerURL, token)
+			chunkSearcher = semantic.NewHTTPChunkSearcher(indexerURL, token)
 			fmt.Printf("Chunk re-ranking enabled via %s\n", indexerURL)
 		}
 	}
@@ -373,7 +374,7 @@ func main() {
 		if khatru.IsNegentropySession(ctx) {
 			maxLimit = 250 * 20
 		}
-		return chunkRerankQuery(ctx, filter, chunkSearcher, reg.fetch, maxLimit, relaySK)
+		return semantic.ChunkRerankQuery(ctx, filter, chunkSearcher, reg.fetch, maxLimit, relaySK)
 	}
 	relay.Count = func(ctx context.Context, filter nostr.Filter) (uint32, error) {
 		return reg.count(filter)

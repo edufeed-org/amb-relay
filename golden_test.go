@@ -8,6 +8,7 @@ import (
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/typesense30142"
+	"fiatjaf.com/nostr/khatru/semantic"
 )
 
 func sampleAMBEvent(t *testing.T) nostr.Event {
@@ -45,7 +46,7 @@ func TestGoldenAMBProjection(t *testing.T) {
 
 func TestGoldenSnippetEvent(t *testing.T) {
 	sk := nostr.MustSecretKeyFromHex("0000000000000000000000000000000000000000000000000000000000000abc")
-	hit := ChunkHit{
+	hit := semantic.ChunkHit{
 		EventID:    "abc123",
 		EventCoord: "30142:0000000000000000000000000000000000000000000000000000000000000001:resource-123",
 		Score:      0.9876,
@@ -54,7 +55,7 @@ func TestGoldenSnippetEvent(t *testing.T) {
 		Heading:    "Einführung",
 		SourceURL:  "https://example.org/bruch.pdf",
 	}
-	snip, ok := buildSnippetEvent(sk, hit)
+	snip, ok := semantic.BuildSnippetEvent(sk, hit)
 	if !ok {
 		t.Fatal("buildSnippetEvent returned ok=false")
 	}

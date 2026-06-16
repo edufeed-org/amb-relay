@@ -2,11 +2,81 @@ package main
 
 import (
 	"context"
+	"iter"
 	"strconv"
 	"testing"
 
 	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/khatru/semantic"
 )
+
+// fakeChunkSearcher records calls and returns canned hits/err.
+type fakeChunkSearcher struct {
+	hits   []semantic.ChunkHit
+	err    error
+	called bool
+	gotQ   string
+	gotK   int
+}
+
+func (f *fakeChunkSearcher) SearchChunks(ctx context.Context, q string, k int) ([]semantic.ChunkHit, error) {
+	f.called = true
+	f.gotQ = q
+	f.gotK = k
+	return f.hits, f.err
+}
+
+// fakeStore implements the fetch function backed by an in-memory event slice.
+// It applies filter.Matches so tests exercise the same post-filter semantics
+// the real Typesense-backed fetch provides.
+type fakeStore struct {
+	events []nostr.Event
+	calls  []nostr.Filter
+}
+
+func (f *fakeStore) fetch(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event] {
+	f.calls = append(f.calls, filter)
+	return func(yield func(nostr.Event) bool) {
+		n := 0
+		for _, e := range f.events {
+			if !filter.Matches(e) {
+				continue
+			}
+			if !yield(e) {
+				return
+			}
+			n++
+			if maxLimit > 0 && n >= maxLimit {
+				return
+			}
+		}
+	}
+}
+
+func collectEvents(seq iter.Seq[nostr.Event]) []nostr.Event {
+	var out []nostr.Event
+	for e := range seq {
+		out = append(out, e)
+	}
+	return out
+}
+
+func idsOf(events []nostr.Event) []string {
+	out := make([]string, 0, len(events))
+	for _, e := range events {
+		out = append(out, e.ID.Hex())
+	}
+	return out
+}
+
+func tagValue(t *testing.T, e nostr.Event, key string) string {
+	t.Helper()
+	tag := e.Tags.Find(key)
+	if tag == nil {
+		t.Fatalf("missing %q tag in %v", key, e.Tags)
+	}
+	return tag[1]
+}
 
 // mkLongformEvent builds a signed kind-30023 (NIP-23 long-form) event with the
 // d + title tags the relay requires when LONGFORM_ENABLED is on.
@@ -56,17 +126,17 @@ func TestCrossContent_RerankInterleavesBothCollections(t *testing.T) {
 	// Long-form scores higher than AMB, so it must come first regardless of
 	// which collection it lives in. Coords carry the kind-prefix the snippet
 	// k tag is derived from.
-	searcher := &fakeChunkSearcher{hits: []ChunkHit{
+	searcher := &fakeChunkSearcher{hits: []semantic.ChunkHit{
 		{EventID: amb.ID.Hex(), EventCoord: coordFor(amb), Score: 0.40, Snippet: "amb passage"},
 		{EventID: lf.ID.Hex(), EventCoord: coordFor(lf), Score: 0.95, Snippet: "longform passage"},
 	}}
 
 	filter := nostr.Filter{
 		Search: "mathematik",
-		Kinds:  []nostr.Kind{30142, 30023, kindSearchSnippet},
+		Kinds:  []nostr.Kind{30142, 30023, semantic.KindSearchSnippet},
 		Limit:  10,
 	}
-	got := collectEvents(chunkRerankQuery(context.Background(), filter, searcher, fetch, 250, relaySK))
+	got := collectEvents(semantic.ChunkRerankQuery(context.Background(), filter, searcher, fetch, 250, relaySK))
 
 	// Expect: lf, lf-snippet, amb, amb-snippet.
 	if len(got) != 4 {
@@ -99,7 +169,7 @@ func TestCrossContent_RerankInterleavesBothCollections(t *testing.T) {
 		{amb, got[3], "30142", "amb passage"},
 	}
 	for i, c := range cases {
-		if c.snip.Kind != kindSearchSnippet {
+		if c.snip.Kind != semantic.KindSearchSnippet {
 			t.Fatalf("case %d: event kind = %d, want 21142 snippet", i, c.snip.Kind)
 		}
 		if c.snip.PubKey != nostr.GetPublicKey(relaySK) {
