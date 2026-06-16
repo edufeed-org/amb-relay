@@ -31,7 +31,7 @@ func NewAllowlistManager(mgmt *ManagementStore) *AllowlistManager {
 		readAllowed:  make(map[string]bool),
 		listPubkeys:  make(map[string]map[string]bool),
 		listRefs:     make(map[string]ListReference),
-		pool:         nostr.NewPool(nostr.PoolOptions{}),
+		pool:         nostr.NewPool(),
 		stopCh:       make(chan struct{}),
 	}
 }

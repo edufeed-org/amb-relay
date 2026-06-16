@@ -71,7 +71,7 @@ func (b *BoltWriteBuffer) process(op boltOp) {
 	for attempt := range boltMaxRetries {
 		var err error
 		if op.replace {
-			err = b.boltDB.ReplaceEvent(op.event)
+			_, err = b.boltDB.ReplaceEvent(op.event)
 		} else {
 			err = b.boltDB.SaveEvent(op.event)
 		}
