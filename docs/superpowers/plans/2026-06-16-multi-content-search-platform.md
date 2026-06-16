@@ -44,7 +44,13 @@ The cosmetic `amb-relay → nope-relay` rename is decoupled and deferred (Phase 
 
 ---
 
-## Phase 1: Extract `khatru/relaykit` (ban + admin core)
+## Phase 1: Extract `khatru/relaykit` (ban + admin core) — ✅ COMPLETE (2026-06-16)
+
+> Done & reviewed clean. nostrlib `relaykit` pushed (`e3f312d`); amb-relay (`dev`)
+> and calendar-relay (`main`) rewired + go.mod pinned, committed locally. Data-compat
+> verified byte-identical (bucket names, hex-string keys, JSON formats). Known
+> out-of-scope: calendar-relay `OnEvent` lacks an `IsEventBanned` check — pre-existing,
+> not a regression of this refactor.
 
 **Rationale:** Pure deduplication of verbatim-copied code. No behavior change, no AMB risk. Establishes the shared-package workflow (`go.work` local dev, `bump-nostrlib.sh` for Docker) before any content-type work.
 
