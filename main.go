@@ -58,11 +58,15 @@ func main() {
 	}
 
 	longformEnabled := os.Getenv("LONGFORM_ENABLED") == "true"
+	wikiEnabled := os.Getenv("WIKI_ENABLED") == "true"
 
 	// NIP-11: Retention
 	retentionKinds := [][]int{{5}, {30142}}
 	if longformEnabled {
 		retentionKinds = append(retentionKinds, []int{30023})
+	}
+	if wikiEnabled {
+		retentionKinds = append(retentionKinds, []int{30818})
 	}
 	relay.Info.Retention = []*nip11.RelayRetentionDocument{
 		{Kinds: retentionKinds},
@@ -200,6 +204,28 @@ func main() {
 		fmt.Printf("Long-form (kind 30023) enabled — collection %s\n", lfColl)
 	}
 
+	// Wiki (kind 30818) Typesense backend — gated behind WIKI_ENABLED. Disjoint
+	// collection; nil when the flag is off so the registry simply omits it.
+	var tsDB3 *typesense30142.TSBackend
+	if wikiEnabled {
+		wikiColl := os.Getenv("TS_COLLECTION_WIKI")
+		if wikiColl == "" {
+			wikiColl = "wiki_30818"
+		}
+		wSchema := wikiSchema(wikiColl)
+		tsDB3 = &typesense30142.TSBackend{
+			ApiKey:         os.Getenv("TS_APIKEY"),
+			Host:           os.Getenv("TS_HOST"),
+			CollectionName: wikiColl,
+			RawEventStore:  &boltDB,
+			Schema:         &wSchema,
+		}
+		if err := tsDB3.Init(); err != nil {
+			panic(fmt.Sprintf("wiki TSBackend init: %v", err))
+		}
+		fmt.Printf("Wiki (kind 30818) enabled — collection %s\n", wikiColl)
+	}
+
 	// Optional: reconcile BoltDB ↔ Typesense at startup. Both stores are
 	// open and the listener hasn't started yet, so this runs single-threaded
 	// against the relay's own opened BoltDB — no lock juggling, unlike the
@@ -253,6 +279,16 @@ func main() {
 			fetch:    tsDB2.QueryEvents,
 			count:    tsDB2.CountEvents,
 			deleteID: tsDB2.DeleteEvent,
+		})
+	}
+	if wikiEnabled && tsDB3 != nil {
+		contentTypes = append(contentTypes, contentType{
+			kinds:    []nostr.Kind{30818},
+			validate: validateWiki,
+			store:    func(e nostr.Event) { storeWiki(true, tsDB3, e) },
+			fetch:    tsDB3.QueryEvents,
+			count:    tsDB3.CountEvents,
+			deleteID: tsDB3.DeleteEvent,
 		})
 	}
 	reg := newRegistry(contentTypes...)
