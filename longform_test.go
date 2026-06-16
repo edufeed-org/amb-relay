@@ -1,14 +1,9 @@
 package main
 
 import (
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"fiatjaf.com/nostr"
-	"fiatjaf.com/nostr/eventstore/typesense30142"
 )
 
 func TestNostrToLongform(t *testing.T) {
@@ -62,33 +57,6 @@ func TestNostrToLongformMissingDTag(t *testing.T) {
 	evt := nostr.Event{Kind: 30023, Tags: nostr.Tags{{"title", "x"}}}
 	if _, err := nostrToLongform(&evt); err == nil {
 		t.Fatal("expected error for missing d tag")
-	}
-}
-
-func TestUpsertLongformPostsUpsert(t *testing.T) {
-	var gotQuery, gotKey string
-	var gotBody []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.Path + "?" + r.URL.RawQuery
-		gotKey = r.Header.Get("X-TYPESENSE-API-KEY")
-		gotBody, _ = io.ReadAll(r.Body)
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte(`{"success":true}`))
-	}))
-	defer srv.Close()
-	ts := &typesense30142.TSBackend{Host: srv.URL, CollectionName: "longform_30023", ApiKey: "k"}
-	doc := &LongformDocument{ID: "p:d", Title: "x"}
-	if err := upsertLongform(ts, doc); err != nil {
-		t.Fatalf("upsertLongform: %v", err)
-	}
-	if !strings.Contains(gotQuery, "/collections/longform_30023/documents/import") || !strings.Contains(gotQuery, "action=upsert") {
-		t.Errorf("query = %q", gotQuery)
-	}
-	if gotKey != "k" {
-		t.Errorf("api key header = %q", gotKey)
-	}
-	if !strings.Contains(string(gotBody), `"title":"x"`) {
-		t.Errorf("body = %s", gotBody)
 	}
 }
 

@@ -1,11 +1,7 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strconv"
 
 	"fiatjaf.com/nostr"
@@ -13,9 +9,9 @@ import (
 )
 
 // LongformDocument is the Typesense document shape for NIP-23 kind-30023
-// long-form events stored in the longform_30023 collection. It deliberately
-// duplicates the envelope fields of AMBMetadata rather than sharing a type —
-// see Phase 2 of the multi-content-search plan.
+// long-form events stored in the longform_30023 collection. It embeds the
+// shared structuredEnvelope so the raw-event fields are promoted to top-level
+// JSON keys (byte-identical to the pre-extraction layout).
 type LongformDocument struct {
 	ID          string   `json:"id"`
 	D           string   `json:"d"`
@@ -25,12 +21,7 @@ type LongformDocument struct {
 	PublishedAt int64    `json:"published_at,omitempty"`
 	Topics      []string `json:"t,omitempty"`
 	Image       string   `json:"image,omitempty"`
-
-	EventID        string `json:"eventID"`
-	EventKind      int    `json:"eventKind"`
-	EventPubKey    string `json:"eventPubKey"`
-	EventCreatedAt int64  `json:"eventCreatedAt"`
-	EventRaw       string `json:"eventRaw"`
+	structuredEnvelope
 }
 
 // nostrToLongform projects a kind-30023 event into a LongformDocument.
@@ -40,20 +31,16 @@ func nostrToLongform(event *nostr.Event) (*LongformDocument, error) {
 		return nil, fmt.Errorf("longform event %s missing required 'd' tag", event.ID.Hex())
 	}
 
-	raw, err := json.Marshal(event)
+	env, err := newStructuredEnvelope(event)
 	if err != nil {
-		return nil, fmt.Errorf("marshal raw event: %w", err)
+		return nil, err
 	}
 
 	doc := &LongformDocument{
-		ID:             typesense30142.GenerateDocumentID(event.PubKey.Hex(), dTag),
-		D:              dTag,
-		Content:        event.Content,
-		EventID:        event.ID.Hex(),
-		EventKind:      int(event.Kind),
-		EventPubKey:    event.PubKey.Hex(),
-		EventCreatedAt: int64(event.CreatedAt),
-		EventRaw:       string(raw),
+		ID:                 typesense30142.GenerateDocumentID(event.PubKey.Hex(), dTag),
+		D:                  dTag,
+		Content:            event.Content,
+		structuredEnvelope: env,
 	}
 
 	for _, tag := range event.Tags {
@@ -78,58 +65,10 @@ func nostrToLongform(event *nostr.Event) (*LongformDocument, error) {
 	return doc, nil
 }
 
-// upsertLongform synchronously upserts a LongformDocument into the long-form
-// Typesense collection via the import API. Mirrors typesense30142.upsertDocument
-// but lives here because that lib helper (and its X-TYPESENSE-API-KEY-setting
-// HTTP client) is unexported. Long-form write volume is low, so a synchronous
-// POST per event is fine — no write buffer needed.
-func upsertLongform(ts *typesense30142.TSBackend, doc *LongformDocument) error {
-	jsonData, err := json.Marshal(doc)
-	if err != nil {
-		return fmt.Errorf("marshal longform doc: %w", err)
-	}
-	url := fmt.Sprintf("%s/collections/%s/documents/import?action=upsert", ts.Host, ts.CollectionName)
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(jsonData))
-	if err != nil {
-		return fmt.Errorf("build longform upsert request: %w", err)
-	}
-	req.Header.Set("X-TYPESENSE-API-KEY", ts.ApiKey)
-	req.Header.Set("Content-Type", "text/plain")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("longform upsert request: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("longform upsert failed, status %d: %s", resp.StatusCode, string(body))
-	}
-	var result struct {
-		Success bool   `json:"success"`
-		Error   string `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(body, &result); err == nil && !result.Success && result.Error != "" {
-		return fmt.Errorf("longform upsert failed: %s", result.Error)
-	}
-	return nil
-}
-
 // storeLongform projects and upserts a kind-30023 event to the long-form
-// Typesense collection. No-op when long-form is disabled. Errors are logged,
-// not returned — the event is already durably in BoltDB; a TS blip must not
-// reject the write (mirrors the AMB buffer's fire-and-forget semantics).
+// Typesense collection via the shared structured-collection helper.
 func storeLongform(enabled bool, ts *typesense30142.TSBackend, event nostr.Event) {
-	if !enabled || ts == nil {
-		return
-	}
-	doc, err := nostrToLongform(&event)
-	if err != nil {
-		fmt.Printf("longform project %s: %v\n", event.ID.Hex(), err)
-		return
-	}
-	if err := upsertLongform(ts, doc); err != nil {
-		fmt.Printf("longform upsert %s: %v\n", event.ID.Hex(), err)
-	}
+	storeStructured(enabled, ts, event, "longform", nostrToLongform)
 }
 
 // longformSchema returns the Typesense collection schema for kind-30023
@@ -139,7 +78,7 @@ func longformSchema(name string) typesense30142.CollectionSchema {
 	return typesense30142.CollectionSchema{
 		Name:                name,
 		DefaultSortingField: "eventCreatedAt",
-		Fields: []typesense30142.Field{
+		Fields: append([]typesense30142.Field{
 			{Name: "id", Type: "string"},
 			{Name: "d", Type: "string"},
 			{Name: "title", Type: "string"},
@@ -148,11 +87,6 @@ func longformSchema(name string) typesense30142.CollectionSchema {
 			{Name: "published_at", Type: "int64", Optional: true, Facet: true},
 			{Name: "t", Type: "string[]", Optional: true, Facet: true},
 			{Name: "image", Type: "string", Optional: true},
-			{Name: "eventID", Type: "string"},
-			{Name: "eventKind", Type: "int32", Facet: true},
-			{Name: "eventPubKey", Type: "string", Facet: true},
-			{Name: "eventCreatedAt", Type: "int64"},
-			{Name: "eventRaw", Type: "string", Optional: true},
-		},
+		}, structuredEnvelopeFields()...),
 	}
 }
