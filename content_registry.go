@@ -65,4 +65,45 @@ func (r *registry) store(event nostr.Event) {
 	}
 }
 
-var _ = iter.Seq[nostr.Event](nil) // iter used by fetch (Task 2)
+// selected returns indices of the content types a filter targets: those owning
+// any kind in filter.Kinds, or all types when filter.Kinds is empty (a
+// kind-agnostic query, e.g. the chunk-rerank parent fetch or Negentropy).
+func (r *registry) selected(filter nostr.Filter) []int {
+	if len(filter.Kinds) == 0 {
+		idx := make([]int, len(r.types))
+		for i := range r.types {
+			idx[i] = i
+		}
+		return idx
+	}
+	seen := make(map[int]bool)
+	var idx []int
+	for _, k := range filter.Kinds {
+		if i, ok := r.byKind[k]; ok && !seen[i] {
+			seen[i] = true
+			idx = append(idx, i)
+		}
+	}
+	return idx
+}
+
+// fetch is a fetchFunc fanning a filter out to every selected content type,
+// merging events in registration order and de-duplicating by id. Caller
+// early-exit is preserved: once yield returns false it stops pulling. With a
+// single registered type this is an exact passthrough of that type's fetch.
+func (r *registry) fetch(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event] {
+	return func(yield func(nostr.Event) bool) {
+		seen := make(map[nostr.ID]bool)
+		for _, i := range r.selected(filter) {
+			for ev := range r.types[i].fetch(filter, maxLimit) {
+				if seen[ev.ID] {
+					continue
+				}
+				seen[ev.ID] = true
+				if !yield(ev) {
+					return
+				}
+			}
+		}
+	}
+}

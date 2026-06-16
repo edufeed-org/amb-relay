@@ -1,6 +1,7 @@
 package main
 
 import (
+	"iter"
 	"testing"
 
 	"fiatjaf.com/nostr"
@@ -51,5 +52,71 @@ func TestRegistryKindsUnion(t *testing.T) {
 	got := reg.kinds()
 	if len(got) != 2 || got[0] != 30142 || got[1] != 30023 {
 		t.Fatalf("kinds() = %v, want [30142 30023]", got)
+	}
+}
+
+func mkFetch(events ...nostr.Event) fetchFunc {
+	return func(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event] {
+		return func(yield func(nostr.Event) bool) {
+			for _, e := range events {
+				if !yield(e) {
+					return
+				}
+			}
+		}
+	}
+}
+
+func collect(seq iter.Seq[nostr.Event]) []nostr.Event {
+	var out []nostr.Event
+	for e := range seq {
+		out = append(out, e)
+	}
+	return out
+}
+
+func TestRegistryFetchRoutingAndDedup(t *testing.T) {
+	amb := nostr.Event{ID: nostr.ID{1}, Kind: 30142}
+	lf := nostr.Event{ID: nostr.ID{2}, Kind: 30023}
+	reg := newRegistry(
+		contentType{kinds: []nostr.Kind{30142}, fetch: mkFetch(amb)},
+		contentType{kinds: []nostr.Kind{30023}, fetch: mkFetch(lf)},
+	)
+
+	// kind-scoped: only the AMB backend.
+	got := collect(reg.fetch(nostr.Filter{Kinds: []nostr.Kind{30142}}, 10))
+	if len(got) != 1 || got[0].ID != amb.ID {
+		t.Fatalf("30142 filter = %v, want [amb]", got)
+	}
+	// no kinds: both, in registration order.
+	got = collect(reg.fetch(nostr.Filter{}, 10))
+	if len(got) != 2 || got[0].ID != amb.ID || got[1].ID != lf.ID {
+		t.Fatalf("no-kind filter = %v, want [amb lf]", got)
+	}
+}
+
+func TestRegistryFetchDedupAcrossBackends(t *testing.T) {
+	dup := nostr.Event{ID: nostr.ID{7}, Kind: 30142}
+	reg := newRegistry(
+		contentType{kinds: []nostr.Kind{30142}, fetch: mkFetch(dup)},
+		contentType{kinds: []nostr.Kind{30023}, fetch: mkFetch(dup)}, // same id leaks in
+	)
+	got := collect(reg.fetch(nostr.Filter{}, 10))
+	if len(got) != 1 {
+		t.Fatalf("expected de-dup to 1 event, got %d", len(got))
+	}
+}
+
+func TestRegistryFetchEarlyExit(t *testing.T) {
+	a := nostr.Event{ID: nostr.ID{1}, Kind: 30142}
+	b := nostr.Event{ID: nostr.ID{2}, Kind: 30142}
+	reg := newRegistry(contentType{kinds: []nostr.Kind{30142}, fetch: mkFetch(a, b)})
+	var seen int
+	for range reg.fetch(nostr.Filter{}, 10) {
+		seen++
+		break // caller early-exit
+	}
+	if seen != 1 {
+		t.Fatalf("early exit yielded %d, want 1", seen)
 	}
 }
