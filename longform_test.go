@@ -59,3 +59,24 @@ func TestNostrToLongformMissingDTag(t *testing.T) {
 		t.Fatal("expected error for missing d tag")
 	}
 }
+
+func TestLongformSchemaFields(t *testing.T) {
+	s := longformSchema("longform_30023")
+	if s.Name != "longform_30023" {
+		t.Errorf("Name = %q", s.Name)
+	}
+	want := map[string]bool{
+		"id": true, "d": true, "title": true, "summary": true, "content": true,
+		"published_at": true, "t": true, "eventID": true, "eventKind": true,
+		"eventPubKey": true, "eventCreatedAt": true, "eventRaw": true,
+	}
+	got := map[string]bool{}
+	for _, f := range s.Fields {
+		got[f.Name] = true
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("schema missing field %q", name)
+		}
+	}
+}

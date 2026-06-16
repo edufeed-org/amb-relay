@@ -74,3 +74,28 @@ func nostrToLongform(event *nostr.Event) (*LongformDocument, error) {
 	}
 	return doc, nil
 }
+
+// longformSchema returns the Typesense collection schema for kind-30023
+// long-form events. Mirrors the envelope-field naming of DefaultSchema() so
+// the shared query path reconstructs events identically.
+func longformSchema(name string) typesense30142.CollectionSchema {
+	return typesense30142.CollectionSchema{
+		Name:                name,
+		DefaultSortingField: "eventCreatedAt",
+		Fields: []typesense30142.Field{
+			{Name: "id", Type: "string"},
+			{Name: "d", Type: "string"},
+			{Name: "title", Type: "string"},
+			{Name: "summary", Type: "string", Optional: true},
+			{Name: "content", Type: "string", Optional: true},
+			{Name: "published_at", Type: "int64", Optional: true, Facet: true},
+			{Name: "t", Type: "string[]", Optional: true, Facet: true},
+			{Name: "image", Type: "string", Optional: true},
+			{Name: "eventID", Type: "string"},
+			{Name: "eventKind", Type: "int32", Facet: true},
+			{Name: "eventPubKey", Type: "string", Facet: true},
+			{Name: "eventCreatedAt", Type: "int64"},
+			{Name: "eventRaw", Type: "string", Optional: true},
+		},
+	}
+}
