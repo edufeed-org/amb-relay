@@ -36,3 +36,14 @@ func TestValidateLongform(t *testing.T) {
 		t.Fatalf("missing title = %v %q", reject, msg)
 	}
 }
+
+func TestValidateWiki(t *testing.T) {
+	ok := nostr.Event{Kind: 30818, Tags: nostr.Tags{{"d", "x"}}}
+	if reject, _ := validateWiki(ok); reject {
+		t.Error("valid wiki event (d only) rejected")
+	}
+	noD := nostr.Event{Kind: 30818, Tags: nostr.Tags{{"title", "x"}}}
+	if reject, _ := validateWiki(noD); !reject {
+		t.Error("wiki event missing d tag accepted")
+	}
+}

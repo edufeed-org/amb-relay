@@ -22,3 +22,10 @@ func validateLongform(event nostr.Event) (reject bool, msg string) {
 	}
 	return false, ""
 }
+
+func validateWiki(event nostr.Event) (reject bool, msg string) {
+	if event.Tags.GetD() == "" {
+		return true, "missing required 'd' tag"
+	}
+	return false, ""
+}
