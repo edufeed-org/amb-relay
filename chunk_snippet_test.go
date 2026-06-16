@@ -106,3 +106,27 @@ func TestBuildSnippetEvent_EmptySnippet_NotEmitted(t *testing.T) {
 		t.Error("ok=true for empty snippet, want false")
 	}
 }
+
+func TestBuildSnippetEventUsesParentKind(t *testing.T) {
+	sk := nostr.MustSecretKeyFromHex("0000000000000000000000000000000000000000000000000000000000000abc")
+	hit := ChunkHit{
+		EventID:    "e1",
+		EventCoord: "30023:pk:d1",
+		Kind:       30023,
+		Score:      0.5,
+		Snippet:    "long-form passage",
+	}
+	snip, ok := buildSnippetEvent(sk, hit)
+	if !ok {
+		t.Fatal("ok=false")
+	}
+	var kTag string
+	for _, tag := range snip.Tags {
+		if len(tag) >= 2 && tag[0] == "k" {
+			kTag = tag[1]
+		}
+	}
+	if kTag != "30023" {
+		t.Errorf("k tag = %q, want 30023", kTag)
+	}
+}

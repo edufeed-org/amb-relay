@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 
 	"fiatjaf.com/nostr"
 )
@@ -25,7 +26,7 @@ func buildSnippetEvent(sk nostr.SecretKey, hit ChunkHit) (nostr.Event, bool) {
 	tags := nostr.Tags{
 		{"e", hit.EventID},
 		{"a", hit.EventCoord},
-		{"k", "30142"},
+		{"k", strconv.Itoa(parentKind(hit))},
 		{"score", fmt.Sprintf("%.4f", hit.Score)},
 	}
 	if hit.Page > 0 {
@@ -50,4 +51,18 @@ func buildSnippetEvent(sk nostr.SecretKey, hit ChunkHit) (nostr.Event, bool) {
 		return nostr.Event{}, false
 	}
 	return evt, true
+}
+
+// parentKind returns the hit's parent kind, falling back to parsing the
+// EventCoord prefix ("<kind>:<pubkey>:<d>") when Kind is unset, then to 30142.
+func parentKind(hit ChunkHit) int {
+	if hit.Kind != 0 {
+		return hit.Kind
+	}
+	if i := strings.IndexByte(hit.EventCoord, ':'); i > 0 {
+		if k, err := strconv.Atoi(hit.EventCoord[:i]); err == nil {
+			return k
+		}
+	}
+	return 30142
 }

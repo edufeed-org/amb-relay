@@ -17,6 +17,7 @@ type ChunkHit struct {
 	EventID    string
 	EventCoord string // "30142:<pubkey>:<d-tag>", verbatim from the indexer
 	Score      float64
+	Kind       int // parent event kind, derived from EventCoord prefix
 	Snippet    string
 	Page       int // 0 = unknown
 	Heading    string
