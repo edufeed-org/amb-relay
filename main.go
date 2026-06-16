@@ -318,7 +318,24 @@ func main() {
 		return chunkRerankQuery(ctx, filter, chunkSearcher, fetch, maxLimit, relaySK)
 	}
 	relay.Count = func(ctx context.Context, filter nostr.Filter) (uint32, error) {
-		return tsDB.CountEvents(filter)
+		n1, err := tsDB.CountEvents(filter)
+		if err != nil || !longformEnabled || tsDB2 == nil {
+			return n1, err
+		}
+		// Fan out to the long-form collection only when the filter could match
+		// 30023 (explicit kind or no kind filter), mirroring combinedFetch.
+		wantsLongform := len(filter.Kinds) == 0
+		for _, k := range filter.Kinds {
+			if k == 30023 {
+				wantsLongform = true
+				break
+			}
+		}
+		if !wantsLongform {
+			return n1, nil
+		}
+		n2, err := tsDB2.CountEvents(filter)
+		return n1 + n2, err
 	}
 	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error {
 		boltBuf.Queue(event, false)
@@ -468,6 +485,14 @@ func main() {
 		// kind-5 deletion path (see relay.DeleteEvent above).
 		boltDB.DeleteEvent(id)
 		_ = contentStore.Delete(id.Hex()) // idempotent
+		// Same collection-agnostic delete as relay.DeleteEvent: the id may live
+		// in either collection, so attempt the long-form delete too (no-op when
+		// the id is in the AMB collection).
+		if longformEnabled && tsDB2 != nil {
+			if err := tsDB2.DeleteEvent(id); err != nil {
+				fmt.Printf("longform ban-delete %s: %v\n", id.Hex(), err)
+			}
+		}
 		if err := tsDB.DeleteEvent(id); err != nil {
 			return err
 		}
