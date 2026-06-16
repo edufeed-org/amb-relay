@@ -1,5 +1,7 @@
-git.edufeed.org/edufeed/nostrlib v0.0.0-20260616082750-e3f312db3dda h1:XTXZX0my62caNx2bFgH/JmsDnO0pupoV3DBVsx/dcYI=
-git.edufeed.org/edufeed/nostrlib v0.0.0-20260616082750-e3f312db3dda/go.mod h1:ue7yw0zHfZj23Ml2kVSdBx0ENEaZiuvGxs/8VEN93FU=
+fiatjaf.com/lib v0.3.7 h1:mXZOn7NrUcjSdy4oNvwQyAmes7Ueb+Zr5hjqMIe2dxI=
+fiatjaf.com/lib v0.3.7/go.mod h1:UlHaZvPHj25PtKLh9GjZkUHRmQ2xZ8Jkoa4VRaLeeQ8=
+git.edufeed.org/edufeed/nostrlib v0.0.0-20260616123950-4d062576533f h1:zWqOn2vUWT48rVmvDdakhdnuCp+uApTQAdl5bcqRfjc=
+git.edufeed.org/edufeed/nostrlib v0.0.0-20260616123950-4d062576533f/go.mod h1:b1EIUDnd133Ie8Pg8O/biaKdFyCMz28aD4n64g1GqvM=
 github.com/FastFilter/xorfilter v0.2.1 h1:lbdeLG9BdpquK64ZsleBS8B4xO/QW1IM0gMzF7KaBKc=
 github.com/FastFilter/xorfilter v0.2.1/go.mod h1:aumvdkhscz6YBZF9ZA/6O4fIoNod4YR50kIVGGZ7l9I=
 github.com/ImVexed/fasturl v0.0.0-20230304231329-4e41488060f3 h1:ClzzXMDDuUbWfNNZqGeYq4PnYOlwlOVIvSyNaIy0ykg=
