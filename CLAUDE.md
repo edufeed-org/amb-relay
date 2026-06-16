@@ -65,9 +65,14 @@ Embedding runs in-stack as the `embed` service (`./embed`) — a small FastAPI c
 **Long-form (NIP-23 kind-30023), gated behind `LONGFORM_ENABLED`:**
 - When `LONGFORM_ENABLED=true`, the relay also accepts kind-30023 long-form events. Required tags: `d` + `title` (validated in OnEvent; rejected when missing).
 - 30023 structured fields are projected (`nostrToLongform`, `longform.go`) into a SEPARATE Typesense collection (`longform_30023` / `TS_COLLECTION_LONGFORM`), keeping the AMB collection pristine. StoreEvent/ReplaceEvent route 30023 to the second backend (`tsDB2`); DeleteEvent targets both collections.
-- The query path merges both collections by kind (`combinedFetch`, `query_combined.go`): a filter's `kinds` selects which backends to hit, and the ID-only parent fetch from chunk re-ranking queries both.
+- The query path merges all registered collections by kind via the content-type registry (`content_registry.go`): a filter's `kinds` selects which backends to hit (`registry.selected`/`registry.fetch`), and the ID-only parent fetch from chunk re-ranking queries every registered type.
 - amb-indexer chunks 30023 `event.content` DIRECTLY (no external fetch/Tika) and writes to the SAME shared chunk collection (`amb_chunks_30142`); chunk coords are kind-prefixed (`30023:<pubkey>:<d>`).
 - NIP-50 search over `kinds:[30142,30023]` returns interleaved results ranked by chunk score; opted-in clients (adding `21142`) receive a snippet kind-21142 event after each result carrying the correct parent `k` tag (`parentKind` derives it from the coord prefix).
+
+**Wiki (NIP-54 kind-30818), gated behind `WIKI_ENABLED`:**
+- When `WIKI_ENABLED=true`, the relay also accepts kind-30818 wiki events. Required tag: `d` (validated by `validateWiki`); `title`/`summary` optional. Structurally a near-subset of long-form 30023.
+- 30818 structured fields are projected (`nostrToWiki`, `wiki.go`) into a SEPARATE Typesense collection (`wiki_30818` / `TS_COLLECTION_WIKI`), registered as a third `contentType` in the registry with its own backend (`tsDB3`). Long-form and wiki share the synchronous import-upsert + envelope helpers in `structured.go` (`upsertStructuredDoc`, `structuredEnvelope`, `storeStructured`); the AMB collection stays special (write buffer, embedder, NIP-86 schema).
+- amb-indexer chunks 30818 `event.content` via the SAME content-direct path as 30023 (no external fetch/Tika/setcontent) into the shared chunk collection; chunk coords are kind-prefixed (`30818:<pubkey>:<d>`). Wiki content is Djot, so its headings are not parsed as ATX — wiki chunks carry no heading locators.
 
 **Typesense Schema Management:**
 - Custom NIP-86 methods (`getcollectionschema`, `updatecollectionschema`, `resetcollectionschema`, `reindex`, `getreindexstatus`) via khatru's `Generic` handler
@@ -147,6 +152,8 @@ Required in `.env` (copy from `.env.example`):
 - `ADMIN_PUBKEYS`: Comma-separated hex pubkeys for NIP-86 management API access (in addition to `PUBKEY`)
 - `LONGFORM_ENABLED`: Set to `true` to accept kind-30023 (NIP-23 long-form) events and enable the second Typesense collection (default `false`).
 - `TS_COLLECTION_LONGFORM`: Collection name for long-form structured fields (default `longform_30023`).
+- `WIKI_ENABLED`: Set to `true` to accept kind-30818 (NIP-54 wiki) events and enable a third Typesense collection (default `false`).
+- `TS_COLLECTION_WIKI`: Collection name for wiki structured fields (default `wiki_30818`).
 
 Optional chunk re-ranking (`chunk_rerank.go`): when `CHUNK_RERANK_ENABLED=true` and `INDEXER_API_TOKEN` is set, NIP-50 searches are re-ranked by the best matching fulltext passage from amb-indexer's `POST /search_chunks` (`INDEXER_BASE_URL`, default `http://amb-indexer:8080`). Falls back to plain Typesense search on any indexer error or empty chunk result, so recall never degrades. Negentropy syncs carry no search field and bypass it naturally. Searches that additionally opt in with `kinds:[30142,21142]` receive an
 ephemeral kind-21142 snippet event after each result, carrying the best
