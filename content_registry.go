@@ -107,3 +107,35 @@ func (r *registry) fetch(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event
 		}
 	}
 }
+
+// count sums event counts across the content types a filter targets.
+func (r *registry) count(filter nostr.Filter) (uint32, error) {
+	var total uint32
+	for _, i := range r.selected(filter) {
+		n, err := r.types[i].count(filter)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// deleteEverywhere removes an id from every content type's search collection. A
+// NIP-09/ban delete carries only the id, not the kind, so all collections are
+// tried; per-collection delete-by-filter is idempotent (a miss is a 200/no-op).
+// Returns the first error (types are tried in registration order, AMB first);
+// any later errors go to logErr.
+func (r *registry) deleteEverywhere(id nostr.ID, logErr func(error)) error {
+	var firstErr error
+	for i := range r.types {
+		if err := r.types[i].deleteID(id); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			} else if logErr != nil {
+				logErr(err)
+			}
+		}
+	}
+	return firstErr
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"iter"
 	"testing"
 
@@ -118,5 +119,58 @@ func TestRegistryFetchEarlyExit(t *testing.T) {
 	}
 	if seen != 1 {
 		t.Fatalf("early exit yielded %d, want 1", seen)
+	}
+}
+
+func TestRegistryCountFanOut(t *testing.T) {
+	reg := newRegistry(
+		contentType{kinds: []nostr.Kind{30142}, count: func(nostr.Filter) (uint32, error) { return 3, nil }},
+		contentType{kinds: []nostr.Kind{30023}, count: func(nostr.Filter) (uint32, error) { return 5, nil }},
+	)
+	// no kinds: sum both.
+	n, err := reg.count(nostr.Filter{})
+	if err != nil || n != 8 {
+		t.Fatalf("count(all) = %d %v, want 8 nil", n, err)
+	}
+	// kind-scoped: only AMB.
+	n, err = reg.count(nostr.Filter{Kinds: []nostr.Kind{30142}})
+	if err != nil || n != 3 {
+		t.Fatalf("count(30142) = %d %v, want 3 nil", n, err)
+	}
+	// unowned kind: zero.
+	n, err = reg.count(nostr.Filter{Kinds: []nostr.Kind{40000}})
+	if err != nil || n != 0 {
+		t.Fatalf("count(unowned) = %d %v, want 0 nil", n, err)
+	}
+}
+
+func TestRegistryDeleteEverywhere(t *testing.T) {
+	var hitAMB, hitLF int
+	reg := newRegistry(
+		contentType{kinds: []nostr.Kind{30142}, deleteID: func(nostr.ID) error { hitAMB++; return nil }},
+		contentType{kinds: []nostr.Kind{30023}, deleteID: func(nostr.ID) error { hitLF++; return nil }},
+	)
+	if err := reg.deleteEverywhere(nostr.ID{9}, nil); err != nil {
+		t.Fatalf("deleteEverywhere err = %v", err)
+	}
+	if hitAMB != 1 || hitLF != 1 {
+		t.Fatalf("delete hits = %d %d, want 1 1 (id carries no kind, so all collections tried)", hitAMB, hitLF)
+	}
+}
+
+func TestRegistryDeleteEverywhereReturnsFirstErrorLogsRest(t *testing.T) {
+	errAMB := errors.New("amb boom")
+	errLF := errors.New("lf boom")
+	var logged []error
+	reg := newRegistry(
+		contentType{kinds: []nostr.Kind{30142}, deleteID: func(nostr.ID) error { return errAMB }},
+		contentType{kinds: []nostr.Kind{30023}, deleteID: func(nostr.ID) error { return errLF }},
+	)
+	err := reg.deleteEverywhere(nostr.ID{9}, func(e error) { logged = append(logged, e) })
+	if err != errAMB {
+		t.Fatalf("first error = %v, want amb boom", err)
+	}
+	if len(logged) != 1 || logged[0] != errLF {
+		t.Fatalf("logged = %v, want [lf boom]", logged)
 	}
 }
