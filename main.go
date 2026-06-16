@@ -231,6 +231,32 @@ func main() {
 	boltBuf := NewBoltWriteBuffer(&boltDB)
 	defer boltBuf.Close()
 
+	// Content-type registry: one registration per kind the relay serves. AMB
+	// is always present; long-form is appended only when enabled, so every
+	// event-path dispatch below is kind-agnostic and flag-free. Adding a
+	// content type = appending one contentType here.
+	contentTypes := []contentType{
+		{
+			kinds:    []nostr.Kind{30142},
+			validate: validateAMB,
+			store:    func(e nostr.Event) { tsBuf.Queue(e) },
+			fetch:    tsDB.QueryEvents,
+			count:    tsDB.CountEvents,
+			deleteID: tsDB.DeleteEvent,
+		},
+	}
+	if longformEnabled && tsDB2 != nil {
+		contentTypes = append(contentTypes, contentType{
+			kinds:    []nostr.Kind{30023},
+			validate: validateLongform,
+			store:    func(e nostr.Event) { storeLongform(true, tsDB2, e) },
+			fetch:    tsDB2.QueryEvents,
+			count:    tsDB2.CountEvents,
+			deleteID: tsDB2.DeleteEvent,
+		})
+	}
+	reg := newRegistry(contentTypes...)
+
 	// Initialize embedding client if configured
 	var embedder *EmbeddingClient
 	if endpoint := os.Getenv("EMBED_ENDPOINT"); endpoint != "" {
@@ -311,64 +337,29 @@ func main() {
 		if khatru.IsNegentropySession(ctx) {
 			maxLimit = 250 * 20
 		}
-		var fetch fetchFunc = tsDB.QueryEvents
-		if longformEnabled && tsDB2 != nil {
-			fetch = combinedFetch(tsDB.QueryEvents, tsDB2.QueryEvents)
-		}
-		return chunkRerankQuery(ctx, filter, chunkSearcher, fetch, maxLimit, relaySK)
+		return chunkRerankQuery(ctx, filter, chunkSearcher, reg.fetch, maxLimit, relaySK)
 	}
 	relay.Count = func(ctx context.Context, filter nostr.Filter) (uint32, error) {
-		n1, err := tsDB.CountEvents(filter)
-		if err != nil || !longformEnabled || tsDB2 == nil {
-			return n1, err
-		}
-		// Fan out to the long-form collection only when the filter could match
-		// 30023 (explicit kind or no kind filter), mirroring combinedFetch.
-		wantsLongform := len(filter.Kinds) == 0
-		for _, k := range filter.Kinds {
-			if k == 30023 {
-				wantsLongform = true
-				break
-			}
-		}
-		if !wantsLongform {
-			return n1, nil
-		}
-		n2, err := tsDB2.CountEvents(filter)
-		return n1 + n2, err
+		return reg.count(filter)
 	}
 	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error {
 		boltBuf.Queue(event, false)
-		switch event.Kind {
-		case 30142:
-			tsBuf.Queue(event)
-		case 30023:
-			storeLongform(longformEnabled, tsDB2, event)
-		}
+		reg.store(event)
 		return nil
 	}
 	relay.ReplaceEvent = func(ctx context.Context, event nostr.Event) error {
 		boltBuf.Queue(event, true)
-		switch event.Kind {
-		case 30142:
-			tsBuf.Queue(event)
-		case 30023:
-			storeLongform(longformEnabled, tsDB2, event)
-		}
+		reg.store(event)
 		return nil
 	}
 	relay.DeleteEvent = func(ctx context.Context, id nostr.ID) error {
 		boltDB.DeleteEvent(id)
 		_ = contentStore.Delete(id.Hex()) // idempotent; safe when no content row existed
-		// DeleteEvent only carries the id, not the kind, so we don't know which
-		// collection holds the doc. The long-form delete is a no-op (num_deleted:0)
-		// when the id lives in the AMB collection, so attempting both is safe.
-		if longformEnabled && tsDB2 != nil {
-			if err := tsDB2.DeleteEvent(id); err != nil {
-				fmt.Printf("longform delete %s: %v\n", id.Hex(), err)
-			}
-		}
-		return tsDB.DeleteEvent(id)
+		// The id carries no kind, so try every collection (each delete is a
+		// no-op when the id lives elsewhere).
+		return reg.deleteEverywhere(id, func(err error) {
+			fmt.Printf("delete %s (secondary collection): %v\n", id.Hex(), err)
+		})
 	}
 
 	relay.Negentropy = true
@@ -387,28 +378,7 @@ func main() {
 		if event.Kind == nostr.KindDeletion {
 			return false, ""
 		}
-		switch event.Kind {
-		case 30142:
-			if event.Tags.GetD() == "" {
-				return true, "missing required 'd' tag"
-			}
-			if !event.Tags.Has("name") {
-				return true, "missing required 'name' tag"
-			}
-		case 30023:
-			if !longformEnabled {
-				return true, "kind 30023 not enabled on this relay"
-			}
-			if event.Tags.GetD() == "" {
-				return true, "missing required 'd' tag"
-			}
-			if !event.Tags.Has("title") {
-				return true, "missing required 'title' tag"
-			}
-		default:
-			return true, "kind not accepted"
-		}
-		return false, ""
+		return reg.validate(event)
 	}
 
 	// Read access enforcement (NIP-42 auth required when read-restricted)
@@ -480,20 +450,11 @@ func main() {
 		return mgmt.AllowPubKey(pubkey)
 	}
 	relay.ManagementAPI.BanEvent = func(ctx context.Context, id nostr.ID, reason string) error {
-		// Delete from all three stores so the event is actually gone, then
-		// record the id on the ban list to block resubmission. Mirrors the
-		// kind-5 deletion path (see relay.DeleteEvent above).
 		boltDB.DeleteEvent(id)
 		_ = contentStore.Delete(id.Hex()) // idempotent
-		// Same collection-agnostic delete as relay.DeleteEvent: the id may live
-		// in either collection, so attempt the long-form delete too (no-op when
-		// the id is in the AMB collection).
-		if longformEnabled && tsDB2 != nil {
-			if err := tsDB2.DeleteEvent(id); err != nil {
-				fmt.Printf("longform ban-delete %s: %v\n", id.Hex(), err)
-			}
-		}
-		if err := tsDB.DeleteEvent(id); err != nil {
+		if err := reg.deleteEverywhere(id, func(e error) {
+			fmt.Printf("ban-delete %s (secondary collection): %v\n", id.Hex(), e)
+		}); err != nil {
 			return err
 		}
 		return mgmt.BanEvent(id, reason)
