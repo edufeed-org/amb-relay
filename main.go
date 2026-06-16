@@ -343,6 +343,14 @@ func main() {
 	relay.DeleteEvent = func(ctx context.Context, id nostr.ID) error {
 		boltDB.DeleteEvent(id)
 		_ = contentStore.Delete(id.Hex()) // idempotent; safe when no content row existed
+		// DeleteEvent only carries the id, not the kind, so we don't know which
+		// collection holds the doc. The long-form delete is a no-op (num_deleted:0)
+		// when the id lives in the AMB collection, so attempting both is safe.
+		if longformEnabled && tsDB2 != nil {
+			if err := tsDB2.DeleteEvent(id); err != nil {
+				fmt.Printf("longform delete %s: %v\n", id.Hex(), err)
+			}
+		}
 		return tsDB.DeleteEvent(id)
 	}
 
