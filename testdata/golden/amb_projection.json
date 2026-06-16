@@ -1,0 +1,21 @@
+{
+  "id": "0000000000000000000000000000000000000000000000000000000000000001:resource-123",
+  "d": "resource-123",
+  "type": [
+    "LearningResource"
+  ],
+  "name": "Bruchrechnung Grundlagen",
+  "description": "Eine Einführung in die Bruchrechnung.",
+  "about": [
+    {
+      "id": "https://w3id.org/kim/schulfaecher/s1017"
+    }
+  ],
+  "eventID": "665c5d48bf1a6045ca73ac941598dbc8e7aa4f13f8ee4d8f3d75cf22fef0838c",
+  "eventKind": 30142,
+  "eventPubKey": "0000000000000000000000000000000000000000000000000000000000000001",
+  "eventSignature": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "eventCreatedAt": 1700000000,
+  "eventContent": "",
+  "eventRaw": "{\"kind\":30142,\"id\":\"665c5d48bf1a6045ca73ac941598dbc8e7aa4f13f8ee4d8f3d75cf22fef0838c\",\"pubkey\":\"0000000000000000000000000000000000000000000000000000000000000001\",\"created_at\":1700000000,\"tags\":[[\"d\",\"resource-123\"],[\"name\",\"Bruchrechnung Grundlagen\"],[\"description\",\"Eine Einführung in die Bruchrechnung.\"],[\"keywords\",\"Mathematik\"],[\"keywords\",\"Brüche\"],[\"about:id\",\"https://w3id.org/kim/schulfaecher/s1017\"]],\"content\":\"\"}"
+}

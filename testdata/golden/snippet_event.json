@@ -1,0 +1,36 @@
+{
+  "kind": 21142,
+  "pubkey": "3ef30130654689a64c864d6dd38760481c55fc525e2c6c7084e2d2d3d4d51be9",
+  "created_at": 0,
+  "tags": [
+    [
+      "e",
+      "abc123"
+    ],
+    [
+      "a",
+      "30142:0000000000000000000000000000000000000000000000000000000000000001:resource-123"
+    ],
+    [
+      "k",
+      "30142"
+    ],
+    [
+      "score",
+      "0.9876"
+    ],
+    [
+      "page",
+      "3"
+    ],
+    [
+      "heading",
+      "Einführung"
+    ],
+    [
+      "source_url",
+      "https://example.org/bruch.pdf"
+    ]
+  ],
+  "content": "Brüche sind Teile eines Ganzen."
+}
