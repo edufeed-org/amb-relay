@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strconv"
 
 	"fiatjaf.com/nostr"
@@ -73,6 +76,60 @@ func nostrToLongform(event *nostr.Event) (*LongformDocument, error) {
 		}
 	}
 	return doc, nil
+}
+
+// upsertLongform synchronously upserts a LongformDocument into the long-form
+// Typesense collection via the import API. Mirrors typesense30142.upsertDocument
+// but lives here because that lib helper (and its X-TYPESENSE-API-KEY-setting
+// HTTP client) is unexported. Long-form write volume is low, so a synchronous
+// POST per event is fine — no write buffer needed.
+func upsertLongform(ts *typesense30142.TSBackend, doc *LongformDocument) error {
+	jsonData, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("marshal longform doc: %w", err)
+	}
+	url := fmt.Sprintf("%s/collections/%s/documents/import?action=upsert", ts.Host, ts.CollectionName)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(jsonData))
+	if err != nil {
+		return fmt.Errorf("build longform upsert request: %w", err)
+	}
+	req.Header.Set("X-TYPESENSE-API-KEY", ts.ApiKey)
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("longform upsert request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("longform upsert failed, status %d: %s", resp.StatusCode, string(body))
+	}
+	var result struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(body, &result); err == nil && !result.Success && result.Error != "" {
+		return fmt.Errorf("longform upsert failed: %s", result.Error)
+	}
+	return nil
+}
+
+// storeLongform projects and upserts a kind-30023 event to the long-form
+// Typesense collection. No-op when long-form is disabled. Errors are logged,
+// not returned — the event is already durably in BoltDB; a TS blip must not
+// reject the write (mirrors the AMB buffer's fire-and-forget semantics).
+func storeLongform(enabled bool, ts *typesense30142.TSBackend, event nostr.Event) {
+	if !enabled || ts == nil {
+		return
+	}
+	doc, err := nostrToLongform(&event)
+	if err != nil {
+		fmt.Printf("longform project %s: %v\n", event.ID.Hex(), err)
+		return
+	}
+	if err := upsertLongform(ts, doc); err != nil {
+		fmt.Printf("longform upsert %s: %v\n", event.ID.Hex(), err)
+	}
 }
 
 // longformSchema returns the Typesense collection schema for kind-30023

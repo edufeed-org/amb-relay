@@ -57,9 +57,15 @@ func main() {
 		AuthRequired:     false,
 	}
 
+	longformEnabled := os.Getenv("LONGFORM_ENABLED") == "true"
+
 	// NIP-11: Retention
+	retentionKinds := [][]int{{5}, {30142}}
+	if longformEnabled {
+		retentionKinds = append(retentionKinds, []int{30023})
+	}
 	relay.Info.Retention = []*nip11.RelayRetentionDocument{
-		{Kinds: [][]int{{5}, {30142}}},
+		{Kinds: retentionKinds},
 	}
 
 	// Parse relay operator pubkey
@@ -169,6 +175,29 @@ func main() {
 
 	if err := tsDB.Init(); err != nil {
 		panic(err)
+	}
+
+	// Long-form (kind 30023) Typesense backend — gated behind LONGFORM_ENABLED.
+	// Disjoint collection from the AMB events; nil when the flag is off so the
+	// query/store closures degrade to the exact pre-flag behavior.
+	var tsDB2 *typesense30142.TSBackend
+	if longformEnabled {
+		lfColl := os.Getenv("TS_COLLECTION_LONGFORM")
+		if lfColl == "" {
+			lfColl = "longform_30023"
+		}
+		lfSchema := longformSchema(lfColl)
+		tsDB2 = &typesense30142.TSBackend{
+			ApiKey:         os.Getenv("TS_APIKEY"),
+			Host:           os.Getenv("TS_HOST"),
+			CollectionName: lfColl,
+			RawEventStore:  &boltDB,
+			Schema:         &lfSchema,
+		}
+		if err := tsDB2.Init(); err != nil {
+			panic(fmt.Sprintf("longform TSBackend init: %v", err))
+		}
+		fmt.Printf("Long-form (kind 30023) enabled — collection %s\n", lfColl)
 	}
 
 	// Optional: reconcile BoltDB ↔ Typesense at startup. Both stores are
@@ -282,21 +311,33 @@ func main() {
 		if khatru.IsNegentropySession(ctx) {
 			maxLimit = 250 * 20
 		}
-		return chunkRerankQuery(ctx, filter, chunkSearcher, tsDB.QueryEvents, maxLimit, relaySK)
+		var fetch fetchFunc = tsDB.QueryEvents
+		if longformEnabled && tsDB2 != nil {
+			fetch = combinedFetch(tsDB.QueryEvents, tsDB2.QueryEvents)
+		}
+		return chunkRerankQuery(ctx, filter, chunkSearcher, fetch, maxLimit, relaySK)
 	}
 	relay.Count = func(ctx context.Context, filter nostr.Filter) (uint32, error) {
 		return tsDB.CountEvents(filter)
 	}
 	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error {
 		boltBuf.Queue(event, false)
-		if event.Kind == 30142 {
+		switch event.Kind {
+		case 30142:
 			tsBuf.Queue(event)
+		case 30023:
+			storeLongform(longformEnabled, tsDB2, event)
 		}
 		return nil
 	}
 	relay.ReplaceEvent = func(ctx context.Context, event nostr.Event) error {
 		boltBuf.Queue(event, true)
-		tsBuf.Queue(event)
+		switch event.Kind {
+		case 30142:
+			tsBuf.Queue(event)
+		case 30023:
+			storeLongform(longformEnabled, tsDB2, event)
+		}
 		return nil
 	}
 	relay.DeleteEvent = func(ctx context.Context, id nostr.ID) error {
@@ -321,14 +362,26 @@ func main() {
 		if event.Kind == nostr.KindDeletion {
 			return false, ""
 		}
-		if event.Kind != 30142 {
-			return true, "only kind 30142 events are accepted"
-		}
-		if event.Tags.GetD() == "" {
-			return true, "missing required 'd' tag"
-		}
-		if !event.Tags.Has("name") {
-			return true, "missing required 'name' tag"
+		switch event.Kind {
+		case 30142:
+			if event.Tags.GetD() == "" {
+				return true, "missing required 'd' tag"
+			}
+			if !event.Tags.Has("name") {
+				return true, "missing required 'name' tag"
+			}
+		case 30023:
+			if !longformEnabled {
+				return true, "kind 30023 not enabled on this relay"
+			}
+			if event.Tags.GetD() == "" {
+				return true, "missing required 'd' tag"
+			}
+			if !event.Tags.Has("title") {
+				return true, "missing required 'title' tag"
+			}
+		default:
+			return true, "kind not accepted"
 		}
 		return false, ""
 	}
