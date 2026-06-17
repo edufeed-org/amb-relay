@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"iter"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,18 @@ const (
 	reindexMaxEvents  = 10_000_000
 	reindexBatchSize  = 100
 )
+
+// structuredReindexTarget describes one structured (long-form/wiki) collection
+// to rebuild during a reindex: drop+recreate it, then reproject every BoltDB
+// event of its kinds. recreate/reproject are closures so reindex.go stays free
+// of per-kind schema/projection detail (they are built in main.go beside the
+// backends).
+type structuredReindexTarget struct {
+	label     string
+	kinds     []nostr.Kind
+	recreate  func() error
+	reproject func(nostr.Event) error
+}
 
 type ReindexStatus struct {
 	Running         bool   `json:"running"`
@@ -32,6 +45,8 @@ type Reindexer struct {
 	mgmt    *ManagementStore
 	content *ContentStore
 
+	structured []structuredReindexTarget
+
 	mu              sync.Mutex
 	running         atomic.Bool
 	total           atomic.Int64
@@ -42,12 +57,13 @@ type Reindexer struct {
 	lastErr         atomic.Value // stores string
 }
 
-func NewReindexer(tsDB *typesense30142.TSBackend, boltDB *boltdb.BoltBackend, mgmt *ManagementStore, content *ContentStore) *Reindexer {
+func NewReindexer(tsDB *typesense30142.TSBackend, boltDB *boltdb.BoltBackend, mgmt *ManagementStore, content *ContentStore, structured []structuredReindexTarget) *Reindexer {
 	return &Reindexer{
-		tsDB:    tsDB,
-		boltDB:  boltDB,
-		mgmt:    mgmt,
-		content: content,
+		tsDB:       tsDB,
+		boltDB:     boltDB,
+		mgmt:       mgmt,
+		content:    content,
+		structured: structured,
 	}
 }
 
@@ -183,9 +199,50 @@ func (r *Reindexer) run() {
 		r.contentPatched.Add(1)
 	}
 
+	// Rebuild every enabled structured (long-form/wiki) collection from BoltDB
+	// truth. Empty when LONGFORM/WIKI are disabled, so reindex is byte-for-byte
+	// unchanged in that case.
+	for _, t := range r.structured {
+		r.reindexStructured(t)
+	}
+
 	log.Printf("reindex: completed. total=%d indexed=%d errors=%d content_patched=%d content_orphaned=%d",
 		r.total.Load(), r.indexed.Load(), r.errors.Load(),
 		r.contentPatched.Load(), r.contentOrphaned.Load())
+}
+
+// reindexStructuredEvents reprojects each event, returning (total, indexed,
+// errs). Pure over its inputs so it is unit-testable without live Typesense or
+// BoltDB. Continues past a failing event, mirroring the AMB batch path.
+func reindexStructuredEvents(label string, events iter.Seq[nostr.Event], reproject func(nostr.Event) error) (total, indexed, errs int64) {
+	for event := range events {
+		total++
+		if err := reproject(event); err != nil {
+			log.Printf("reindex: %s reproject %s failed: %v", label, event.ID.Hex(), err)
+			errs++
+			continue
+		}
+		indexed++
+	}
+	return
+}
+
+// reindexStructured drops+recreates a structured collection then reprojects all
+// its BoltDB events into the shared reindex counters.
+func (r *Reindexer) reindexStructured(t structuredReindexTarget) {
+	if err := t.recreate(); err != nil {
+		log.Printf("reindex: recreate %s collection failed: %v", t.label, err)
+		r.errors.Add(1)
+		return
+	}
+	total, indexed, errs := reindexStructuredEvents(
+		t.label,
+		r.boltDB.QueryEvents(nostr.Filter{Kinds: t.kinds}, reindexMaxEvents),
+		t.reproject,
+	)
+	r.total.Add(total)
+	r.indexed.Add(indexed)
+	r.errors.Add(errs)
 }
 
 // GetStatus returns the current reindex status.

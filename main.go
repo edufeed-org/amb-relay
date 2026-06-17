@@ -325,8 +325,29 @@ func main() {
 		fmt.Println("Semantic search disabled")
 	}
 
+	// Structured-collection reindex targets: each enabled structured type is
+	// dropped+reprojected from BoltDB during a reindex (the AMB collection has
+	// its own special path). Empty when both flags are off.
+	var structuredTargets []structuredReindexTarget
+	if longformEnabled && tsDB2 != nil {
+		structuredTargets = append(structuredTargets, structuredReindexTarget{
+			label:     "longform",
+			kinds:     []nostr.Kind{30023},
+			recreate:  func() error { return tsDB2.RecreateCollection(tsDB2.Schema) },
+			reproject: func(e nostr.Event) error { return reprojectStructured(tsDB2, e, nostrToLongform) },
+		})
+	}
+	if wikiEnabled && tsDB3 != nil {
+		structuredTargets = append(structuredTargets, structuredReindexTarget{
+			label:     "wiki",
+			kinds:     []nostr.Kind{30818},
+			recreate:  func() error { return tsDB3.RecreateCollection(tsDB3.Schema) },
+			reproject: func(e nostr.Event) error { return reprojectStructured(tsDB3, e, nostrToWiki) },
+		})
+	}
+
 	// Reindexer for rebuilding Typesense from BoltDB
-	reindexer := NewReindexer(&tsDB, &boltDB, &mgmt, contentStore)
+	reindexer := NewReindexer(&tsDB, &boltDB, &mgmt, contentStore, structuredTargets)
 
 	relay.OnConnect = func(ctx context.Context) {
 		khatru.RequestAuth(ctx)

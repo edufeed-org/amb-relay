@@ -85,6 +85,20 @@ func upsertStructuredDoc(ts *typesense30142.TSBackend, doc any) error {
 	return nil
 }
 
+// reprojectStructured projects an addressable event and synchronously upserts
+// it, returning any error. Unlike storeStructured (fire-and-forget for the live
+// write path), the error is propagated so the reindexer can count failures.
+func reprojectStructured[T any](ts *typesense30142.TSBackend, event nostr.Event, project func(*nostr.Event) (*T, error)) error {
+	doc, err := project(&event)
+	if err != nil {
+		return fmt.Errorf("project: %w", err)
+	}
+	if err := upsertStructuredDoc(ts, doc); err != nil {
+		return fmt.Errorf("upsert: %w", err)
+	}
+	return nil
+}
+
 // storeStructured projects and upserts an addressable event to a simple
 // structured Typesense collection. No-op when disabled or ts is nil. Errors are
 // logged, not returned — the event is already durable in BoltDB; a TS blip must
@@ -93,12 +107,7 @@ func storeStructured[T any](enabled bool, ts *typesense30142.TSBackend, event no
 	if !enabled || ts == nil {
 		return
 	}
-	doc, err := project(&event)
-	if err != nil {
-		fmt.Printf("%s project %s: %v\n", label, event.ID.Hex(), err)
-		return
-	}
-	if err := upsertStructuredDoc(ts, doc); err != nil {
-		fmt.Printf("%s upsert %s: %v\n", label, event.ID.Hex(), err)
+	if err := reprojectStructured(ts, event, project); err != nil {
+		fmt.Printf("%s %s: %v\n", label, event.ID.Hex(), err)
 	}
 }
