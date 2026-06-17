@@ -158,3 +158,30 @@ func TestCalendarSchemaFields(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateCalendar(t *testing.T) {
+	cases := []struct {
+		name       string
+		evt        nostr.Event
+		wantReject bool
+	}{
+		{"31923 ok", nostr.Event{Kind: 31923, Tags: nostr.Tags{{"d", "a"}, {"title", "T"}, {"start", "1"}}}, false},
+		{"31923 no d", nostr.Event{Kind: 31923, Tags: nostr.Tags{{"title", "T"}, {"start", "1"}}}, true},
+		{"31923 no title", nostr.Event{Kind: 31923, Tags: nostr.Tags{{"d", "a"}, {"start", "1"}}}, true},
+		{"31923 no start", nostr.Event{Kind: 31923, Tags: nostr.Tags{{"d", "a"}, {"title", "T"}}}, true},
+		{"31922 ok", nostr.Event{Kind: 31922, Tags: nostr.Tags{{"d", "a"}, {"title", "T"}, {"start", "2026-06-17"}}}, false},
+		{"31924 ok", nostr.Event{Kind: 31924, Tags: nostr.Tags{{"d", "a"}, {"title", "T"}}}, false},
+		{"31924 no title", nostr.Event{Kind: 31924, Tags: nostr.Tags{{"d", "a"}}}, true},
+		{"31925 ok", nostr.Event{Kind: 31925, Tags: nostr.Tags{{"d", "a"}, {"a", "31923:pk:wd"}, {"status", "accepted"}}}, false},
+		{"31925 no a", nostr.Event{Kind: 31925, Tags: nostr.Tags{{"d", "a"}, {"status", "accepted"}}}, true},
+		{"31925 bad status", nostr.Event{Kind: 31925, Tags: nostr.Tags{{"d", "a"}, {"a", "x"}, {"status", "maybe"}}}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			reject, msg := validateCalendar(c.evt)
+			if reject != c.wantReject {
+				t.Errorf("validateCalendar = (%v, %q), want reject=%v", reject, msg, c.wantReject)
+			}
+		})
+	}
+}
