@@ -118,9 +118,9 @@ func TestNostrToCalendarDateBased(t *testing.T) {
 	if err != nil {
 		t.Fatalf("nostrToCalendar: %v", err)
 	}
-	// 2026-06-17T00:00:00Z = 1781481600
-	if doc.Start != 1781481600 {
-		t.Errorf("Start = %d, want 1781481600 (2026-06-17 UTC)", doc.Start)
+	// 2026-06-17T00:00:00Z = 1781654400
+	if doc.Start != 1781654400 {
+		t.Errorf("Start = %d, want 1781654400 (2026-06-17 UTC)", doc.Start)
 	}
 }
 
@@ -327,7 +327,7 @@ func calendarSchema(name string) typesense30142.CollectionSchema {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./... -run TestNostrToCalendar -v` then `go test ./... -run TestCalendarSchemaFields -v`
-Expected: PASS. (If `TestNostrToCalendarDateBased` fails on the exact Unix value, confirm `nip52.DateFormat` parses as UTC; `time.Parse("2006-01-02", "2026-06-17").Unix()` = `1781481600`.)
+Expected: PASS. (`time.Parse("2006-01-02", "2026-06-17").UTC().Unix()` = `1781654400`.)
 
 - [ ] **Step 5: Commit**
 
