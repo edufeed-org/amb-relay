@@ -74,6 +74,18 @@ Embedding runs in-stack as the `embed` service (`./embed`) — a small FastAPI c
 - 30818 structured fields are projected (`nostrToWiki`, `wiki.go`) into a SEPARATE Typesense collection (`wiki_30818` / `TS_COLLECTION_WIKI`), registered as a third `contentType` in the registry with its own backend (`tsDB3`). Long-form and wiki share the synchronous import-upsert + envelope helpers in `structured.go` (`upsertStructuredDoc`, `structuredEnvelope`, `storeStructured`); the AMB collection stays special (write buffer, embedder, NIP-86 schema).
 - amb-indexer chunks 30818 `event.content` via the SAME content-direct path as 30023 (no external fetch/Tika/setcontent) into the shared chunk collection; chunk coords are kind-prefixed (`30818:<pubkey>:<d>`). Wiki content is Djot, so its headings are not parsed as ATX — wiki chunks carry no heading locators.
 
+**Calendar (NIP-52 kinds 31922/31923/31924/31925), gated behind `CALENDAR_ENABLED`:**
+- When `CALENDAR_ENABLED=true`, the relay accepts NIP-52 date events (31922), time events (31923), calendars (31924), and RSVPs (31925). Validation (`validateCalendar`): event kinds require `d`+`title`+`start`; calendars require `d`+`title`; RSVPs require `d`+`a`+`status` ∈ {accepted,declined,tentative}.
+- Calendar events are **dual-indexed**. Structured fields project (`nostrToCalendar`, `calendar.go`) into a SEPARATE Typesense collection (`calendar_31922` / `TS_COLLECTION_CALENDAR`) for full-text/kind/tag search; the nostrlib `khatru/calendar` BoltDB index (`CALENDAR_INDEX_PATH`, default `./data/calendar_index.db`) holds start/end/geohash for range and location queries. A `CalendarStore` wraps the shared BoltDB but is used ONLY for its index + range-query path (never `SaveEvent`/`Close`, since boltBuf persists and boltDB is closed elsewhere).
+- The calendar `contentType`'s `fetch` routes per query (`calendarFetch`): a filter carrying range/geo params (`#start_after`, `#start_before`, `#end_after`, `#end_before`, `#g`) over the event kinds (31922/31923) hits the Bolt index; everything else — full-text `search`, plain kind listing, 31924/31925 — hits Typesense. When both range params and `search` are present, the Bolt path wins and `search` is ignored for that REQ.
+- Reindex appends a `structuredReindexTarget` (in `main.go`) covering all four kinds: one BoltDB pass rebuilds both the Typesense collection and the Bolt index (`reproject` indexes event kinds then upserts to Typesense). The Bolt index is not cleared first, so entries for events no longer in BoltDB persist as harmless orphans.
+
+**Canonical query shapes (the LLM/MCP contract):** the foundation for a future calendar MCP server that translates natural language into these filters.
+- "Events in the next week" (time-based): `{"kinds":[31923],"#start_after":["<now>"],"#start_before":["<now+7d>"],"limit":100}` → Bolt time index. Date-based (31922) is identical; `start` "YYYY-MM-DD" is stored as the Unix start-of-day.
+- "Events near a location": `{"kinds":[31922,31923],"#g":["u33d"],"limit":100}` → Bolt geohash prefix (prefix length = radius).
+- "Events about a topic": `{"kinds":[31922,31923,31924],"search":"mathematik","limit":50}` → Typesense full-text.
+- Combined intent ("next week, near Berlin, about math") is composed client-side: issue the Bolt range/geo REQ, then post-filter by topic against the returned events (the full event travels in `eventRaw`).
+
 **Typesense Schema Management:**
 - Custom NIP-86 methods (`getcollectionschema`, `updatecollectionschema`, `resetcollectionschema`, `reindex`, `getreindexstatus`) via khatru's `Generic` handler
 - Schema config persisted in BoltDB; on startup, custom schema (if stored) overrides the hardcoded default
