@@ -51,7 +51,7 @@ Embedding runs in-stack as the `embed` service (`./embed`) — a small FastAPI c
 
 **Management:** `management.go` - BoltDB-backed store for ban lists (pubkeys, events) and Typesense schema configuration, sharing the same bbolt database as the event store.
 
-**Reindexer:** `reindex.go` - Async reindex from BoltDB to Typesense with progress tracking, triggered via NIP-86 `reindex` method.
+**Reindexer:** `reindex.go` - Async reindex from BoltDB to Typesense with progress tracking, triggered via NIP-86 `reindex` method. Rebuilds **every** enabled content type's collection: the AMB (30142) collection via its special path (schema recreate → batch upsert → content-patch/orphan-GC), then each structured type (`longform_30023`, `wiki_30818`) via drop+reproject (`structuredReindexTarget` built in `main.go`; reprojection reuses `reprojectStructured`/`nostrToLongform`/`nostrToWiki`). With `LONGFORM_ENABLED`/`WIKI_ENABLED` off the structured targets are empty, so reindex is unchanged.
 
 **Event Flow:**
 - Banned pubkeys are rejected on submission (checked before validation)
@@ -77,7 +77,7 @@ Embedding runs in-stack as the `embed` service (`./embed`) — a small FastAPI c
 **Typesense Schema Management:**
 - Custom NIP-86 methods (`getcollectionschema`, `updatecollectionschema`, `resetcollectionschema`, `reindex`, `getreindexstatus`) via khatru's `Generic` handler
 - Schema config persisted in BoltDB; on startup, custom schema (if stored) overrides the hardcoded default
-- Reindex drops the Typesense collection and rebuilds from BoltDB events
+- Reindex drops and rebuilds every enabled content type's collection from BoltDB events (AMB keeps its content-patch/orphan-GC step; structured types are drop+reproject)
 
 ## Ingest pipeline (amb-indexer)
 
