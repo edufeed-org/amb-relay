@@ -56,6 +56,44 @@ func TestRegistryKindsUnion(t *testing.T) {
 	}
 }
 
+func TestRegistryTargetsChunked(t *testing.T) {
+	reg := newRegistry(
+		contentType{kinds: []nostr.Kind{30142}, chunked: true},
+		contentType{kinds: []nostr.Kind{31922, 31923, 31924, 31925}}, // calendar, not chunked
+	)
+
+	cases := []struct {
+		name  string
+		kinds []nostr.Kind
+		want  bool
+	}{
+		{"kind-agnostic includes chunked", nil, true},
+		{"chunked kind", []nostr.Kind{30142}, true},
+		{"calendar only", []nostr.Kind{31923}, false},
+		{"calendar mix", []nostr.Kind{31922, 31923, 31924}, false},
+		{"chunked + calendar mix", []nostr.Kind{30142, 31923}, true},
+		{"unregistered kind", []nostr.Kind{1}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := reg.targetsChunked(nostr.Filter{Kinds: c.kinds}); got != c.want {
+				t.Errorf("targetsChunked(%v) = %v, want %v", c.kinds, got, c.want)
+			}
+		})
+	}
+}
+
+// With no chunked content types registered, even a kind-agnostic filter must
+// not claim the chunk path.
+func TestRegistryTargetsChunkedNoneRegistered(t *testing.T) {
+	reg := newRegistry(
+		contentType{kinds: []nostr.Kind{31922, 31923}},
+	)
+	if reg.targetsChunked(nostr.Filter{}) {
+		t.Error("targetsChunked(kind-agnostic) = true with no chunked types, want false")
+	}
+}
+
 func mkFetch(events ...nostr.Event) fetchFunc {
 	return func(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event] {
 		return func(yield func(nostr.Event) bool) {

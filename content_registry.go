@@ -23,6 +23,12 @@ type contentType struct {
 	fetch    fetchFunc
 	count    func(nostr.Filter) (uint32, error)
 	deleteID func(nostr.ID) error
+
+	// chunked is true when amb-indexer chunks this type's content into the
+	// shared chunk collection (AMB, long-form, wiki). Calendar events are not
+	// chunked, so chunk-rerank must not own their search queries — see
+	// registry.targetsChunked.
+	chunked bool
 }
 
 // registry dispatches the event path across registered content types by kind.
@@ -110,6 +116,29 @@ func (r *registry) fetch(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event
 			}
 		}
 	}
+}
+
+// targetsChunked reports whether a search over this filter could be served by
+// the chunk index. Kind-agnostic filters (empty Kinds) include chunked content,
+// so they qualify. Otherwise at least one targeted kind must belong to a chunked
+// content type. Calendar-only searches return false, so chunk-rerank leaves them
+// to plain full-text search — calendar events are never chunked and would
+// otherwise be dropped whenever the term also matched some chunk.
+func (r *registry) targetsChunked(filter nostr.Filter) bool {
+	if len(filter.Kinds) == 0 {
+		for _, ct := range r.types {
+			if ct.chunked {
+				return true
+			}
+		}
+		return false
+	}
+	for _, k := range filter.Kinds {
+		if i, ok := r.byKind[k]; ok && r.types[i].chunked {
+			return true
+		}
+	}
+	return false
 }
 
 // count sums event counts across the content types a filter targets.

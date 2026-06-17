@@ -315,6 +315,7 @@ func main() {
 			fetch:    tsDB.QueryEvents,
 			count:    tsDB.CountEvents,
 			deleteID: tsDB.DeleteEvent,
+			chunked:  true,
 		},
 	}
 	if longformEnabled && tsDB2 != nil {
@@ -325,6 +326,7 @@ func main() {
 			fetch:    tsDB2.QueryEvents,
 			count:    tsDB2.CountEvents,
 			deleteID: tsDB2.DeleteEvent,
+			chunked:  true,
 		})
 	}
 	if wikiEnabled && tsDB3 != nil {
@@ -335,6 +337,7 @@ func main() {
 			fetch:    tsDB3.QueryEvents,
 			count:    tsDB3.CountEvents,
 			deleteID: tsDB3.DeleteEvent,
+			chunked:  true,
 		})
 	}
 	if calendarEnabled && tsDB4 != nil {
@@ -475,7 +478,14 @@ func main() {
 		if khatru.IsNegentropySession(ctx) {
 			maxLimit = 250 * 20
 		}
-		return semantic.ChunkRerankQuery(ctx, filter, chunkSearcher, reg.fetch, maxLimit, relaySK)
+		// Chunk-rerank only owns searches that can be served by the chunk index.
+		// Calendar-only (non-chunked) searches go straight to plain full-text;
+		// otherwise the rerank would drop them whenever the term also matched a
+		// chunk from another content type.
+		if reg.targetsChunked(filter) {
+			return semantic.ChunkRerankQuery(ctx, filter, chunkSearcher, reg.fetch, maxLimit, relaySK)
+		}
+		return reg.fetch(filter, maxLimit)
 	}
 	relay.Count = func(ctx context.Context, filter nostr.Filter) (uint32, error) {
 		return reg.count(filter)
