@@ -12,17 +12,19 @@ import (
 
 // fakeChunkSearcher records calls and returns canned hits/err.
 type fakeChunkSearcher struct {
-	hits   []semantic.ChunkHit
-	err    error
-	called bool
-	gotQ   string
-	gotK   int
+	hits     []semantic.ChunkHit
+	err      error
+	called   bool
+	gotQ     string
+	gotK     int
+	gotKinds []int
 }
 
-func (f *fakeChunkSearcher) SearchChunks(ctx context.Context, q string, k int) ([]semantic.ChunkHit, error) {
+func (f *fakeChunkSearcher) SearchChunks(ctx context.Context, q string, k int, kinds []int) ([]semantic.ChunkHit, error) {
 	f.called = true
 	f.gotQ = q
 	f.gotK = k
+	f.gotKinds = kinds
 	return f.hits, f.err
 }
 
