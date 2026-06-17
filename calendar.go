@@ -50,7 +50,9 @@ func nostrToCalendar(event *nostr.Event) (*CalendarDocument, error) {
 		structuredEnvelope: env,
 	}
 
-	if calendar.IsCalendarEventKind(event.Kind) { // 31922 / 31923
+	// Only 31922/31923 carry start/end/location/geohash; 31924 (calendar) and
+	// 31925 (RSVP) have no time/location data, so they take the tag-only path.
+	if calendar.IsCalendarEventKind(event.Kind) {
 		cal := nip52.ParseCalendarEvent(*event)
 		doc.Title = cal.Title
 		if !cal.Start.IsZero() {
