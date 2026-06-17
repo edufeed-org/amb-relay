@@ -175,6 +175,8 @@ func TestValidateCalendar(t *testing.T) {
 		{"31925 ok", nostr.Event{Kind: 31925, Tags: nostr.Tags{{"d", "a"}, {"a", "31923:pk:wd"}, {"status", "accepted"}}}, false},
 		{"31925 no a", nostr.Event{Kind: 31925, Tags: nostr.Tags{{"d", "a"}, {"status", "accepted"}}}, true},
 		{"31925 bad status", nostr.Event{Kind: 31925, Tags: nostr.Tags{{"d", "a"}, {"a", "x"}, {"status", "maybe"}}}, true},
+		{"unknown kind", nostr.Event{Kind: 9999, Tags: nostr.Tags{}}, false},
+		{"31925 empty status tag", nostr.Event{Kind: 31925, Tags: nostr.Tags{{"d", "a"}, {"a", "x"}, {"status"}}}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -57,7 +57,7 @@ func validateCalendar(event nostr.Event) (reject bool, msg string) {
 			return true, "missing required 'a' tag"
 		}
 		status := ""
-		if tag := event.Tags.Find("status"); tag != nil {
+		if tag := event.Tags.Find("status"); len(tag) > 1 {
 			status = tag[1]
 		}
 		if status != "accepted" && status != "declined" && status != "tentative" {
