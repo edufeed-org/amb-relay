@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"iter"
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/typesense30142"
@@ -88,6 +89,22 @@ func nostrToCalendar(event *nostr.Event) (*CalendarDocument, error) {
 // collection via the shared structured-collection helper.
 func storeCalendar(enabled bool, ts *typesense30142.TSBackend, event nostr.Event) {
 	storeStructured(enabled, ts, event, "calendar", nostrToCalendar)
+}
+
+// calendarFetch routes a calendar query: range/geo params over the event kinds
+// (31922/31923) go to the Bolt index (boltFetch); everything else — full-text
+// search, plain kind listing, 31924/31925 — goes to Typesense (tsFetch). When
+// both range params and a search term are present, the Bolt path wins and the
+// search term is ignored for that REQ (documented precedence; combined intent
+// is composed client-side by the future MCP server).
+func calendarFetch(boltFetch, tsFetch fetchFunc) fetchFunc {
+	return func(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event] {
+		cf := calendar.ExtractCalendarFilter(filter)
+		if cf.HasCalendarParams() && calendar.HasCalendarKinds(filter) {
+			return boltFetch(filter, maxLimit)
+		}
+		return tsFetch(filter, maxLimit)
+	}
 }
 
 // calendarSchema returns the Typesense collection schema for NIP-52 calendar

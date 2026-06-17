@@ -187,3 +187,50 @@ func TestValidateCalendar(t *testing.T) {
 		})
 	}
 }
+
+// The router sends range/geo queries to the Bolt fetch and everything else
+// (plain kind listing, full-text search, RSVP/calendar kinds) to Typesense.
+func TestCalendarFetchRouter(t *testing.T) {
+	bolt := &fakeStore{}
+	ts := &fakeStore{}
+	fetch := calendarFetch(bolt.fetch, ts.fetch)
+
+	// start_after present + event kind -> Bolt path.
+	collectEvents(fetch(nostr.Filter{
+		Kinds: []nostr.Kind{31923},
+		Tags:  nostr.TagMap{"start_after": []string{"1718600000"}},
+	}, 100))
+	if len(bolt.calls) != 1 || len(ts.calls) != 0 {
+		t.Fatalf("range query: bolt=%d ts=%d, want bolt=1 ts=0", len(bolt.calls), len(ts.calls))
+	}
+
+	// geohash present + event kind -> Bolt path.
+	collectEvents(fetch(nostr.Filter{
+		Kinds: []nostr.Kind{31922, 31923},
+		Tags:  nostr.TagMap{"g": []string{"u33d"}},
+	}, 100))
+	if len(bolt.calls) != 2 {
+		t.Fatalf("geohash query: bolt=%d, want 2", len(bolt.calls))
+	}
+
+	// search, no calendar params -> Typesense path.
+	collectEvents(fetch(nostr.Filter{Kinds: []nostr.Kind{31923}, Search: "yoga"}, 100))
+	if len(ts.calls) != 1 {
+		t.Fatalf("search query: ts=%d, want 1", len(ts.calls))
+	}
+
+	// RSVP kind (31925) is never a calendar-event kind -> Typesense even with params.
+	collectEvents(fetch(nostr.Filter{
+		Kinds: []nostr.Kind{31925},
+		Tags:  nostr.TagMap{"start_after": []string{"1"}},
+	}, 100))
+	if len(ts.calls) != 2 {
+		t.Fatalf("rsvp query: ts=%d, want 2", len(ts.calls))
+	}
+
+	// plain kind listing, no params -> Typesense path.
+	collectEvents(fetch(nostr.Filter{Kinds: []nostr.Kind{31923}}, 100))
+	if len(ts.calls) != 3 {
+		t.Fatalf("plain query: ts=%d, want 3", len(ts.calls))
+	}
+}
