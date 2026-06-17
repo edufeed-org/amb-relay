@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	reindexMaxEvents  = 10_000_000
-	reindexBatchSize  = 100
+	reindexMaxEvents = 10_000_000
+	reindexBatchSize = 100
 )
 
 // structuredReindexTarget describes one structured (long-form/wiki) collection
