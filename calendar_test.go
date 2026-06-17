@@ -84,6 +84,12 @@ func TestNostrToCalendarDateBased(t *testing.T) {
 	if doc.Start != 1781654400 {
 		t.Errorf("Start = %d, want 1781654400 (2026-06-17 UTC)", doc.Start)
 	}
+	if doc.D != "conf-2026" {
+		t.Errorf("D = %q, want %q", doc.D, "conf-2026")
+	}
+	if doc.Title != "Conference" {
+		t.Errorf("Title = %q, want %q", doc.Title, "Conference")
+	}
 }
 
 // 31924 calendar: title from tag, no start/end.
@@ -209,8 +215,8 @@ func TestCalendarFetchRouter(t *testing.T) {
 		Kinds: []nostr.Kind{31922, 31923},
 		Tags:  nostr.TagMap{"g": []string{"u33d"}},
 	}, 100))
-	if len(bolt.calls) != 2 {
-		t.Fatalf("geohash query: bolt=%d, want 2", len(bolt.calls))
+	if len(bolt.calls) != 2 || len(ts.calls) != 0 {
+		t.Fatalf("geohash query: bolt=%d ts=%d, want bolt=2 ts=0", len(bolt.calls), len(ts.calls))
 	}
 
 	// search, no calendar params -> Typesense path.
