@@ -16,6 +16,7 @@ import (
 	"fiatjaf.com/nostr/eventstore/boltdb"
 	"fiatjaf.com/nostr/eventstore/typesense30142"
 	"fiatjaf.com/nostr/khatru"
+	"fiatjaf.com/nostr/khatru/calendar"
 	"fiatjaf.com/nostr/khatru/landing"
 	"fiatjaf.com/nostr/khatru/relaykit"
 	"fiatjaf.com/nostr/khatru/semantic"
@@ -60,6 +61,7 @@ func main() {
 
 	longformEnabled := os.Getenv("LONGFORM_ENABLED") == "true"
 	wikiEnabled := os.Getenv("WIKI_ENABLED") == "true"
+	calendarEnabled := os.Getenv("CALENDAR_ENABLED") == "true"
 
 	// NIP-11: Retention
 	retentionKinds := [][]int{{5}, {30142}}
@@ -68,6 +70,9 @@ func main() {
 	}
 	if wikiEnabled {
 		retentionKinds = append(retentionKinds, []int{30818})
+	}
+	if calendarEnabled {
+		retentionKinds = append(retentionKinds, []int{31922}, []int{31923}, []int{31924}, []int{31925})
 	}
 	relay.Info.Retention = []*nip11.RelayRetentionDocument{
 		{Kinds: retentionKinds},
@@ -227,6 +232,43 @@ func main() {
 		fmt.Printf("Wiki (kind 30818) enabled — collection %s\n", wikiColl)
 	}
 
+	// Calendar (NIP-52 kinds 31922-31925) backends — gated behind CALENDAR_ENABLED.
+	// Dual-indexed: a Typesense collection (full-text/kind/tag) plus the nostrlib
+	// calendar BoltDB index (start/end/geohash range queries). Both nil/unused
+	// when the flag is off, so the registry simply omits calendar.
+	var tsDB4 *typesense30142.TSBackend
+	var calStore *calendar.CalendarStore
+	if calendarEnabled {
+		calColl := os.Getenv("TS_COLLECTION_CALENDAR")
+		if calColl == "" {
+			calColl = "calendar_31922"
+		}
+		calSchema := calendarSchema(calColl)
+		tsDB4 = &typesense30142.TSBackend{
+			ApiKey:         os.Getenv("TS_APIKEY"),
+			Host:           os.Getenv("TS_HOST"),
+			CollectionName: calColl,
+			RawEventStore:  &boltDB,
+			Schema:         &calSchema,
+		}
+		if err := tsDB4.Init(); err != nil {
+			panic(fmt.Sprintf("calendar TSBackend init: %v", err))
+		}
+
+		calIndexPath := os.Getenv("CALENDAR_INDEX_PATH")
+		if calIndexPath == "" {
+			calIndexPath = "./data/calendar_index.db"
+		}
+		calStore, err = calendar.NewCalendarStore(&boltDB, calIndexPath)
+		if err != nil {
+			panic(fmt.Sprintf("calendar index init: %v", err))
+		}
+		// Close ONLY the index DB on shutdown. calStore.Close() would also close
+		// the shared boltDB (double close); boltDB has its own defer in main.
+		defer calStore.GetIndex().Close()
+		fmt.Printf("Calendar (NIP-52) enabled — collection %s, index %s\n", calColl, calIndexPath)
+	}
+
 	// Optional: reconcile BoltDB ↔ Typesense at startup. Both stores are
 	// open and the listener hasn't started yet, so this runs single-threaded
 	// against the relay's own opened BoltDB — no lock juggling, unlike the
@@ -292,6 +334,26 @@ func main() {
 			deleteID: tsDB3.DeleteEvent,
 		})
 	}
+	if calendarEnabled && tsDB4 != nil {
+		contentTypes = append(contentTypes, contentType{
+			kinds:    []nostr.Kind{31922, 31923, 31924, 31925},
+			validate: validateCalendar,
+			store: func(e nostr.Event) {
+				if calendar.IsCalendarEventKind(e.Kind) {
+					if err := calStore.GetIndex().IndexEvent(e); err != nil {
+						fmt.Printf("calendar index %s: %v\n", e.ID.Hex(), err)
+					}
+				}
+				storeCalendar(true, tsDB4, e)
+			},
+			fetch: calendarFetch(calStore.QueryEvents, tsDB4.QueryEvents),
+			count: tsDB4.CountEvents,
+			deleteID: func(id nostr.ID) error {
+				_ = calStore.GetIndex().RemoveEvent(id) // best-effort index cleanup
+				return tsDB4.DeleteEvent(id)
+			},
+		})
+	}
 	reg := newRegistry(contentTypes...)
 
 	// Initialize embedding client if configured
@@ -343,6 +405,21 @@ func main() {
 			kinds:     []nostr.Kind{30818},
 			recreate:  func() error { return tsDB3.RecreateCollection(tsDB3.Schema) },
 			reproject: func(e nostr.Event) error { return reprojectStructured(tsDB3, e, nostrToWiki) },
+		})
+	}
+	if calendarEnabled && tsDB4 != nil {
+		structuredTargets = append(structuredTargets, structuredReindexTarget{
+			label:    "calendar",
+			kinds:    []nostr.Kind{31922, 31923, 31924, 31925},
+			recreate: func() error { return tsDB4.RecreateCollection(tsDB4.Schema) },
+			reproject: func(e nostr.Event) error {
+				if calendar.IsCalendarEventKind(e.Kind) {
+					if err := calStore.GetIndex().IndexEvent(e); err != nil {
+						return err
+					}
+				}
+				return reprojectStructured(tsDB4, e, nostrToCalendar)
+			},
 		})
 	}
 
