@@ -203,6 +203,7 @@ func main() {
 			CollectionName: lfColl,
 			RawEventStore:  &boltDB,
 			Schema:         &lfSchema,
+			SearchFields:   "title,summary,content",
 		}
 		if err := tsDB2.Init(); err != nil {
 			panic(fmt.Sprintf("longform TSBackend init: %v", err))
@@ -225,6 +226,7 @@ func main() {
 			CollectionName: wikiColl,
 			RawEventStore:  &boltDB,
 			Schema:         &wSchema,
+			SearchFields:   "title,summary,content",
 		}
 		if err := tsDB3.Init(); err != nil {
 			panic(fmt.Sprintf("wiki TSBackend init: %v", err))
@@ -250,6 +252,7 @@ func main() {
 			CollectionName: calColl,
 			RawEventStore:  &boltDB,
 			Schema:         &calSchema,
+			SearchFields:   "title,summary,content,location",
 		}
 		if err := tsDB4.Init(); err != nil {
 			panic(fmt.Sprintf("calendar TSBackend init: %v", err))
