@@ -20,6 +20,7 @@ var (
 	bucketListReferences  = []byte("list_references")
 	bucketFetchedContent  = []byte("fetched_content") // resource fulltext keyed by event_id
 	bucketNeedsRefetch    = []byte("needs_refetch")   // event_ids flagged for re-ingestion
+	bucketProfileQueue    = []byte("profile_queue")   // author pubkeys awaiting kind-0 fetch
 )
 
 const schemaKey = "current"
@@ -51,7 +52,7 @@ func (m *ManagementStore) Init(db *bbolt.DB) error {
 	}
 	m.Store = store
 	return db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range [][]byte{bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketFetchedContent, bucketNeedsRefetch} {
+		for _, bucket := range [][]byte{bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketFetchedContent, bucketNeedsRefetch, bucketProfileQueue} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
@@ -288,6 +289,34 @@ func (m *ManagementStore) ListNeedsRefetch() ([]string, error) {
 	var result []string
 	err := m.DB.View(func(tx *bbolt.Tx) error {
 		return tx.Bucket(bucketNeedsRefetch).ForEach(func(k, _ []byte) error {
+			result = append(result, string(k))
+			return nil
+		})
+	})
+	return result, err
+}
+
+// EnqueueProfileCandidate queues an author pubkey (hex) for kind-0 fetch.
+// Idempotent: queuing the same pubkey twice is a no-op (dedup).
+func (m *ManagementStore) EnqueueProfileCandidate(pubkey string) error {
+	return m.DB.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketProfileQueue).Put([]byte(pubkey), []byte{})
+	})
+}
+
+// RemoveProfileCandidate clears a pubkey from the profile fetch queue.
+// Idempotent: removing a non-existent pubkey is a no-op.
+func (m *ManagementStore) RemoveProfileCandidate(pubkey string) error {
+	return m.DB.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketProfileQueue).Delete([]byte(pubkey))
+	})
+}
+
+// ListProfileQueue returns all author pubkeys currently queued for kind-0 fetch.
+func (m *ManagementStore) ListProfileQueue() ([]string, error) {
+	var result []string
+	err := m.DB.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketProfileQueue).ForEach(func(k, _ []byte) error {
 			result = append(result, string(k))
 			return nil
 		})
