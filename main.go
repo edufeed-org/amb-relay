@@ -63,6 +63,7 @@ func main() {
 	longformEnabled := os.Getenv("LONGFORM_ENABLED") == "true"
 	wikiEnabled := os.Getenv("WIKI_ENABLED") == "true"
 	calendarEnabled := os.Getenv("CALENDAR_ENABLED") == "true"
+	profilesEnabled := os.Getenv("PROFILES_ENABLED") == "true"
 
 	// NIP-11: Retention
 	retentionKinds := [][]int{{5}, {30142}}
@@ -294,6 +295,33 @@ func main() {
 		fmt.Printf("Calendar (NIP-52) enabled — collection %s, index %s\n", calColl, calIndexPath)
 	}
 
+	// Profiles (kind-0) Typesense backend — gated behind PROFILES_ENABLED. One
+	// document per author pubkey, populated by ProfileManager (not by clients).
+	// RawEventStore is intentionally nil: profiles are not relay events in
+	// BoltDB, so QueryEvents reconstructs them from the stored eventRaw field.
+	var profilesDB *typesense30142.TSBackend
+	if profilesEnabled {
+		pColl := os.Getenv("TS_COLLECTION_PROFILES")
+		if pColl == "" {
+			pColl = "profiles_0"
+		}
+		pSchema := profileSchema(pColl)
+		profilesDB = &typesense30142.TSBackend{
+			ApiKey:          os.Getenv("TS_APIKEY"),
+			Host:            os.Getenv("TS_HOST"),
+			CollectionName:  pColl,
+			Schema:          &pSchema,
+			SearchFields:    "name,display_name,about,nip05",
+			StopwordsSet:    stopwordsSet,
+			StopwordsList:   stopwordsList,
+			StopwordsLocale: "de",
+		}
+		if err := profilesDB.Init(); err != nil {
+			panic(fmt.Sprintf("profiles TSBackend init: %v", err))
+		}
+		fmt.Printf("Profiles (kind 0) enabled — collection %s\n", pColl)
+	}
+
 	// Optional: reconcile BoltDB ↔ Typesense at startup. Both stores are
 	// open and the listener hasn't started yet, so this runs single-threaded
 	// against the relay's own opened BoltDB — no lock juggling, unlike the
@@ -382,7 +410,25 @@ func main() {
 			},
 		})
 	}
+	if profilesEnabled && profilesDB != nil {
+		contentTypes = append(contentTypes, contentType{
+			kinds:    []nostr.Kind{0},
+			validate: func(nostr.Event) (bool, string) { return true, "kind not accepted" }, // reject client kind-0 writes
+			store:    func(nostr.Event) {},                                                  // never reached: validate rejects first
+			fetch:    profilesDB.QueryEvents,
+			count:    profilesDB.CountEvents,
+			deleteID: profilesDB.DeleteEvent,
+			chunked:  false,
+		})
+	}
 	reg := newRegistry(contentTypes...)
+
+	var profileContentKinds []nostr.Kind
+	for _, k := range reg.kinds() {
+		if k != 0 {
+			profileContentKinds = append(profileContentKinds, k)
+		}
+	}
 
 	// Initialize embedding client if configured
 	var embedder *EmbeddingClient
@@ -454,6 +500,41 @@ func main() {
 	// Reindexer for rebuilding Typesense from BoltDB
 	reindexer := NewReindexer(&tsDB, &boltDB, &mgmt, contentStore, structuredTargets)
 
+	var profileMgr *ProfileManager
+	if profilesEnabled && profilesDB != nil {
+		profileRelays := []string{"wss://relay.edufeed.org"}
+		if raw := os.Getenv("PROFILE_RELAYS"); raw != "" {
+			profileRelays = nil
+			for _, r := range strings.Split(raw, ",") {
+				if r = strings.TrimSpace(r); r != "" {
+					profileRelays = append(profileRelays, r)
+				}
+			}
+		}
+		refreshInterval := 6 * time.Hour
+		if raw := os.Getenv("PROFILE_REFRESH_INTERVAL"); raw != "" {
+			if d, err := time.ParseDuration(raw); err == nil {
+				refreshInterval = d
+			} else {
+				fmt.Printf("profile: bad PROFILE_REFRESH_INTERVAL %q, using %s\n", raw, refreshInterval)
+			}
+		}
+		profileMgr = NewProfileManager(
+			&mgmt,
+			poolSource{pool: nostr.NewPool()},
+			func(e nostr.Event) { storeProfile(profilesEnabled, profilesDB, e) },
+			func() []nostr.PubKey { return backfillAuthors(&boltDB, profileContentKinds, 1_000_000) },
+			profileRelays,
+			50,
+		)
+		if err := profileMgr.Init(); err != nil {
+			fmt.Printf("profile: init: %v\n", err)
+		}
+		profileMgr.StartRefreshLoop(refreshInterval)
+		defer profileMgr.Stop()
+		fmt.Printf("Profiles: fetching from %v, refresh every %s\n", profileRelays, refreshInterval)
+	}
+
 	relay.OnConnect = func(ctx context.Context) {
 		khatru.RequestAuth(ctx)
 	}
@@ -521,11 +602,17 @@ func main() {
 	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error {
 		boltBuf.Queue(event, false)
 		reg.store(event)
+		if profileMgr != nil {
+			profileMgr.Enqueue(event.PubKey)
+		}
 		return nil
 	}
 	relay.ReplaceEvent = func(ctx context.Context, event nostr.Event) error {
 		boltBuf.Queue(event, true)
 		reg.store(event)
+		if profileMgr != nil {
+			profileMgr.Enqueue(event.PubKey)
+		}
 		return nil
 	}
 	relay.DeleteEvent = func(ctx context.Context, id nostr.ID) error {

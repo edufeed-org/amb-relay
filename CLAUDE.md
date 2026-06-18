@@ -80,6 +80,11 @@ Embedding runs in-stack as the `embed` service (`./embed`) — a small FastAPI c
 - The calendar `contentType`'s `fetch` routes per query (`calendarFetch`): a filter carrying range/geo params (`#start_after`, `#start_before`, `#end_after`, `#end_before`, `#g`) over the event kinds (31922/31923) hits the Bolt index; everything else — full-text `search`, plain kind listing, 31924/31925 — hits Typesense. When both range params and `search` are present, the Bolt path wins and `search` is ignored for that REQ.
 - Reindex appends a `structuredReindexTarget` (in `main.go`) covering all four kinds: one BoltDB pass rebuilds both the Typesense collection and the Bolt index (`reproject` indexes event kinds then upserts to Typesense). The Bolt index is not cleared first, so entries for events no longer in BoltDB persist as harmless orphans.
 
+**Profiles (kind-0 author index), gated behind `PROFILES_ENABLED`:**
+- When `PROFILES_ENABLED=true`, the relay indexes the kind-0 profiles of authors who publish content here, so clients can resolve org/person names to pubkeys (e.g. for calendar `authors` filters). Served via NIP-50 `search` over `kinds:[0]`.
+- Client kind-0 writes are **rejected** (`validate` returns "kind not accepted"); the index is populated only by the internal `ProfileManager` (`profile_manager.go`), which fetches kind-0 from `PROFILE_RELAYS` for every content author (enqueued on write into a durable BoltDB `profile_queue` bucket, plus a startup backfill scan and a `PROFILE_REFRESH_INTERVAL` refresh).
+- kind-0 is registered as a read-only `contentType` (`fetch: profilesDB.QueryEvents`) in a SEPARATE Typesense collection (`profiles_0` / `TS_COLLECTION_PROFILES`); `profilesDB.RawEventStore` is nil, so events are reconstructed from the stored `eventRaw`. Profiles are NOT part of the BoltDB→Typesense reindex.
+
 **Canonical query shapes (the LLM/MCP contract):** the foundation for a future calendar MCP server that translates natural language into these filters.
 - "Events in the next week" (time-based): `{"kinds":[31923],"#start_after":["<now>"],"#start_before":["<now+7d>"],"limit":100}` → Bolt time index. Date-based (31922) is identical; `start` "YYYY-MM-DD" is stored as the Unix start-of-day.
 - "Events near a location": `{"kinds":[31922,31923],"#g":["u33d"],"limit":100}` → Bolt geohash prefix (prefix length = radius).
@@ -166,6 +171,10 @@ Required in `.env` (copy from `.env.example`):
 - `TS_COLLECTION_LONGFORM`: Collection name for long-form structured fields (default `longform_30023`).
 - `WIKI_ENABLED`: Set to `true` to accept kind-30818 (NIP-54 wiki) events and enable a third Typesense collection (default `false`).
 - `TS_COLLECTION_WIKI`: Collection name for wiki structured fields (default `wiki_30818`).
+- `PROFILES_ENABLED`: Set to `true` to index kind-0 profiles of content authors and serve them via NIP-50 `search` over `kinds:[0]` (default `false`).
+- `TS_COLLECTION_PROFILES`: Collection name for kind-0 profiles (default `profiles_0`).
+- `PROFILE_RELAYS`: Comma-separated source relays the fetcher pulls kind-0 from (default `wss://relay.edufeed.org`).
+- `PROFILE_REFRESH_INTERVAL`: How often to re-fetch known authors' kind-0, as a Go duration (default `6h`).
 
 Optional chunk re-ranking (chunk-rerank + snippet layer lives in nostrlib `khatru/semantic`): when `CHUNK_RERANK_ENABLED=true` and `INDEXER_API_TOKEN` is set, NIP-50 searches are re-ranked by the best matching fulltext passage from amb-indexer's `POST /search_chunks` (`INDEXER_BASE_URL`, default `http://amb-indexer:8080`). Each `/search_chunks` call is bounded by `CHUNK_RERANK_TIMEOUT_MS` (default `5000`); the budget must clear the indexer's query-embed step (1-2s on a CPU embed service) — too tight a budget cancels legitimate warm searches mid-embed, surfacing as indexer 500s and silent fallback. Falls back to plain Typesense search on any indexer error or empty chunk result, so recall never degrades. Negentropy syncs carry no search field and bypass it naturally. Searches that additionally opt in with `kinds:[30142,21142]` receive an
 ephemeral kind-21142 snippet event after each result, carrying the best

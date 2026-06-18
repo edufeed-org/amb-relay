@@ -212,3 +212,37 @@ func TestRegistryDeleteEverywhereReturnsFirstErrorLogsRest(t *testing.T) {
 		t.Fatalf("logged = %v, want [lf boom]", logged)
 	}
 }
+
+func TestRegistryKind0ReadWriteSplit(t *testing.T) {
+	var fetched bool
+	profileType := contentType{
+		kinds:    []nostr.Kind{0},
+		validate: func(nostr.Event) (bool, string) { return true, "kind not accepted" },
+		store:    func(nostr.Event) {},
+		fetch: func(_ nostr.Filter, _ int) iter.Seq[nostr.Event] {
+			return func(yield func(nostr.Event) bool) { fetched = true }
+		},
+		count:    func(nostr.Filter) (uint32, error) { return 0, nil },
+		deleteID: func(nostr.ID) error { return nil },
+		chunked:  false,
+	}
+	reg := newRegistry(profileType)
+
+	// Write path: client kind-0 submissions are rejected.
+	reject, msg := reg.validate(nostr.Event{Kind: 0})
+	if !reject || msg != "kind not accepted" {
+		t.Fatalf("kind-0 write: reject=%v msg=%q, want reject + \"kind not accepted\"", reject, msg)
+	}
+
+	// Read path: a kind-0 REQ is routed to the profiles fetch.
+	for range reg.fetch(nostr.Filter{Kinds: []nostr.Kind{0}}, 10) {
+	}
+	if !fetched {
+		t.Fatal("kind-0 read was not routed to the profiles fetch func")
+	}
+
+	// kind-0 search must not be treated as chunked (no chunk-rerank).
+	if reg.targetsChunked(nostr.Filter{Kinds: []nostr.Kind{0}}) {
+		t.Fatal("kind-0 should not be chunked")
+	}
+}
