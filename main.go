@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -467,8 +468,14 @@ func main() {
 		if token == "" {
 			fmt.Println("Warning: CHUNK_RERANK_ENABLED but INDEXER_API_TOKEN unset — chunk re-ranking disabled")
 		} else {
-			chunkSearcher = semantic.NewHTTPChunkSearcher(indexerURL, token)
-			fmt.Printf("Chunk re-ranking enabled via %s\n", indexerURL)
+			timeout := semantic.DefaultChunkSearchTimeout
+			if ms := os.Getenv("CHUNK_RERANK_TIMEOUT_MS"); ms != "" {
+				if n, err := strconv.Atoi(ms); err == nil && n > 0 {
+					timeout = time.Duration(n) * time.Millisecond
+				}
+			}
+			chunkSearcher = semantic.NewHTTPChunkSearcherWithTimeout(indexerURL, token, timeout)
+			fmt.Printf("Chunk re-ranking enabled via %s (timeout %s)\n", indexerURL, timeout)
 		}
 	}
 
