@@ -159,12 +159,24 @@ func main() {
 	acl.StartRefreshLoop(5 * time.Minute)
 	defer acl.Stop()
 
+	// German stopword set shared by every Typesense collection (sets are
+	// global to a Typesense instance). Standard function words plus a few
+	// domain filler words so a natural-language query like "Materialien zum
+	// Thema Frieden im Religionsunterricht" reduces to its topical terms
+	// ("Frieden Religionsunterricht") before lexical scoring.
+	stopwordsList := append(append([]string{}, typesense30142.GermanStopwords...),
+		"thema", "themen", "material", "materialien")
+	const stopwordsSet = "amb_de"
+
 	// Typesense backend (search index)
 	tsDB := typesense30142.TSBackend{
-		ApiKey:         os.Getenv("TS_APIKEY"),
-		Host:           os.Getenv("TS_HOST"),
-		CollectionName: os.Getenv("TS_COLLECTION"),
-		RawEventStore:  &boltDB,
+		ApiKey:          os.Getenv("TS_APIKEY"),
+		Host:            os.Getenv("TS_HOST"),
+		CollectionName:  os.Getenv("TS_COLLECTION"),
+		RawEventStore:   &boltDB,
+		StopwordsSet:    stopwordsSet,
+		StopwordsList:   stopwordsList,
+		StopwordsLocale: "de",
 	}
 
 	// Load custom schema from BoltDB if one was stored; otherwise start from
@@ -201,10 +213,13 @@ func main() {
 		tsDB2 = &typesense30142.TSBackend{
 			ApiKey:         os.Getenv("TS_APIKEY"),
 			Host:           os.Getenv("TS_HOST"),
-			CollectionName: lfColl,
-			RawEventStore:  &boltDB,
-			Schema:         &lfSchema,
-			SearchFields:   "title,summary,content",
+			CollectionName:  lfColl,
+			RawEventStore:   &boltDB,
+			Schema:          &lfSchema,
+			SearchFields:    "title,summary,content",
+			StopwordsSet:    stopwordsSet,
+			StopwordsList:   stopwordsList,
+			StopwordsLocale: "de",
 		}
 		if err := tsDB2.Init(); err != nil {
 			panic(fmt.Sprintf("longform TSBackend init: %v", err))
@@ -224,10 +239,13 @@ func main() {
 		tsDB3 = &typesense30142.TSBackend{
 			ApiKey:         os.Getenv("TS_APIKEY"),
 			Host:           os.Getenv("TS_HOST"),
-			CollectionName: wikiColl,
-			RawEventStore:  &boltDB,
-			Schema:         &wSchema,
-			SearchFields:   "title,summary,content",
+			CollectionName:  wikiColl,
+			RawEventStore:   &boltDB,
+			Schema:          &wSchema,
+			SearchFields:    "title,summary,content",
+			StopwordsSet:    stopwordsSet,
+			StopwordsList:   stopwordsList,
+			StopwordsLocale: "de",
 		}
 		if err := tsDB3.Init(); err != nil {
 			panic(fmt.Sprintf("wiki TSBackend init: %v", err))
@@ -250,10 +268,13 @@ func main() {
 		tsDB4 = &typesense30142.TSBackend{
 			ApiKey:         os.Getenv("TS_APIKEY"),
 			Host:           os.Getenv("TS_HOST"),
-			CollectionName: calColl,
-			RawEventStore:  &boltDB,
-			Schema:         &calSchema,
-			SearchFields:   "title,summary,content,location",
+			CollectionName:  calColl,
+			RawEventStore:   &boltDB,
+			Schema:          &calSchema,
+			SearchFields:    "title,summary,content,location",
+			StopwordsSet:    stopwordsSet,
+			StopwordsList:   stopwordsList,
+			StopwordsLocale: "de",
 		}
 		if err := tsDB4.Init(); err != nil {
 			panic(fmt.Sprintf("calendar TSBackend init: %v", err))
