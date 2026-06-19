@@ -81,6 +81,39 @@ func TestUpsertStructuredDocPostsUpsert(t *testing.T) {
 	}
 }
 
+func TestNewStructuredEnvelope_Community(t *testing.T) {
+	evt := nostr.Event{
+		Kind:    30023,
+		Content: "body",
+		Tags: nostr.Tags{
+			{"d", "x"},
+			{"h", "660d8c78651f70487ec9b8ddc283e29cf2561693dda3ba246d3fd3c08dbb7083"},
+		},
+	}
+	env, err := newStructuredEnvelope(&evt)
+	if err != nil {
+		t.Fatalf("newStructuredEnvelope: %v", err)
+	}
+	if len(env.Community) != 1 || env.Community[0] != "660d8c78651f70487ec9b8ddc283e29cf2561693dda3ba246d3fd3c08dbb7083" {
+		t.Errorf("Community = %v", env.Community)
+	}
+}
+
+func TestStructuredEnvelopeFields_Community(t *testing.T) {
+	found := false
+	for _, f := range structuredEnvelopeFields() {
+		if f.Name == "community" {
+			found = true
+			if f.Type != "string[]" || !f.Optional {
+				t.Errorf("community field = %+v", f)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("community field missing from structuredEnvelopeFields")
+	}
+}
+
 // Locks the long-form document JSON so the structured-envelope refactor
 // stays byte-identical (embedded-struct field promotion preserves order).
 func TestLongformDocumentJSONStable(t *testing.T) {

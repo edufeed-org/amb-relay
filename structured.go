@@ -16,11 +16,12 @@ import (
 // reconstruct the original nostr event. Embedded (anonymously) into each
 // per-kind document so its fields are promoted to top-level JSON keys.
 type structuredEnvelope struct {
-	EventID        string `json:"eventID"`
-	EventKind      int    `json:"eventKind"`
-	EventPubKey    string `json:"eventPubKey"`
-	EventCreatedAt int64  `json:"eventCreatedAt"`
-	EventRaw       string `json:"eventRaw"`
+	EventID        string   `json:"eventID"`
+	EventKind      int      `json:"eventKind"`
+	EventPubKey    string   `json:"eventPubKey"`
+	EventCreatedAt int64    `json:"eventCreatedAt"`
+	EventRaw       string   `json:"eventRaw"`
+	Community      []string `json:"community,omitempty"`
 }
 
 // newStructuredEnvelope marshals the raw event and fills the envelope fields.
@@ -29,12 +30,19 @@ func newStructuredEnvelope(event *nostr.Event) (structuredEnvelope, error) {
 	if err != nil {
 		return structuredEnvelope{}, fmt.Errorf("marshal raw event: %w", err)
 	}
+	var community []string
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "h" {
+			community = append(community, tag[1])
+		}
+	}
 	return structuredEnvelope{
 		EventID:        event.ID.Hex(),
 		EventKind:      int(event.Kind),
 		EventPubKey:    event.PubKey.Hex(),
 		EventCreatedAt: int64(event.CreatedAt),
 		EventRaw:       string(raw),
+		Community:      community,
 	}, nil
 }
 
@@ -47,6 +55,7 @@ func structuredEnvelopeFields() []typesense30142.Field {
 		{Name: "eventPubKey", Type: "string", Facet: true},
 		{Name: "eventCreatedAt", Type: "int64"},
 		{Name: "eventRaw", Type: "string", Optional: true},
+		{Name: "community", Type: "string[]", Facet: true, Optional: true},
 	}
 }
 
