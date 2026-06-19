@@ -89,6 +89,7 @@ Embedding runs in-stack as the `embed` service (`./embed`) — a small FastAPI c
 - "Events in the next week" (time-based): `{"kinds":[31923],"#start_after":["<now>"],"#start_before":["<now+7d>"],"limit":100}` → Bolt time index. Date-based (31922) is identical; `start` "YYYY-MM-DD" is stored as the Unix start-of-day.
 - "Events near a location": `{"kinds":[31922,31923],"#g":["u33d"],"limit":100}` → Bolt geohash prefix (prefix length = radius).
 - "Events about a topic": `{"kinds":[31922,31923,31924],"search":"mathematik","limit":50}` → Typesense full-text.
+- "Content shared with a community": `{"kinds":[30142,31923],"#h":["<community-pubkey>"],"limit":50}` → `community` field exact match (folded from Nostr `h` tags across the AMB collection and every structured collection). NIP-50 equivalent: `search:"community:<community-pubkey>"`. Multi-`h` content is targeted at multiple communities and matches any of them.
 - Combined intent ("next week, near Berlin, about math") is composed client-side: issue the Bolt range/geo REQ, then post-filter by topic against the returned events (the full event travels in `eventRaw`).
 
 **Typesense Schema Management:**
