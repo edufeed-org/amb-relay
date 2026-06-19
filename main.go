@@ -587,11 +587,15 @@ func main() {
 		if khatru.IsNegentropySession(ctx) {
 			maxLimit = 250 * 20
 		}
-		// Chunk-rerank only owns searches that can be served by the chunk index.
-		// Calendar-only (non-chunked) searches go straight to plain full-text;
-		// otherwise the rerank would drop them whenever the term also matched a
-		// chunk from another content type.
-		if reg.targetsChunked(filter) {
+		// Chunk-rerank only owns searches that (a) can be served by the chunk
+		// index and (b) carry a free-text term to rank. Calendar-only
+		// (non-chunked) searches go straight to plain full-text; otherwise the
+		// rerank would drop them whenever the term also matched a chunk from
+		// another content type. Pure field-filter searches (e.g.
+		// "community:<pubkey>") have no semantic term, so rerank would send the
+		// raw string to the chunk index and drop the field filter — those must
+		// take the plain field-filter path too.
+		if reg.targetsChunked(filter) && searchHasFreeText(filter.Search) {
 			return semantic.ChunkRerankQuery(ctx, filter, chunkSearcher, reg.fetch, maxLimit, relaySK)
 		}
 		return reg.fetch(filter, maxLimit)

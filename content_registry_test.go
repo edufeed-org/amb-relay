@@ -83,6 +83,28 @@ func TestRegistryTargetsChunked(t *testing.T) {
 	}
 }
 
+func TestSearchHasFreeText(t *testing.T) {
+	cases := []struct {
+		name   string
+		search string
+		want   bool
+	}{
+		{"empty", "", false},
+		{"free term", "mathematik", true},
+		{"pure field filter", "community:abcdef", false},
+		{"dotted field filter", "publisher.name:e-teaching.org", false},
+		{"term plus field filter", "mathematik community:abcdef", true},
+		{"sort directive only", "sort:datePublished", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := searchHasFreeText(c.search); got != c.want {
+				t.Errorf("searchHasFreeText(%q) = %v, want %v", c.search, got, c.want)
+			}
+		})
+	}
+}
+
 // With no chunked content types registered, even a kind-agnostic filter must
 // not claim the chunk path.
 func TestRegistryTargetsChunkedNoneRegistered(t *testing.T) {

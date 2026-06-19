@@ -4,6 +4,7 @@ import (
 	"iter"
 
 	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/eventstore/typesense30142"
 )
 
 // fetchFunc abstracts a content type's event query (e.g. tsDB.QueryEvents) so
@@ -139,6 +140,15 @@ func (r *registry) targetsChunked(filter nostr.Filter) bool {
 		}
 	}
 	return false
+}
+
+// searchHasFreeText reports whether a NIP-50 search carries at least one
+// free-text term. Pure field:value searches (e.g. "community:<pubkey>") or
+// "sort:" directives have nothing to rank semantically, so chunk-rerank must
+// not own them — otherwise the search string is sent to the chunk index
+// literally, dropping the field filter and returning coincidental matches.
+func searchHasFreeText(search string) bool {
+	return len(typesense30142.ParseSearchQuery(search).RawTerms) > 0
 }
 
 // count sums event counts across the content types a filter targets.
