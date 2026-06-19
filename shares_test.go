@@ -109,3 +109,28 @@ func nostrToShareDocID(t *testing.T, pubkey, d string) string {
 	t.Helper()
 	return typesense30142.GenerateDocumentID(pubkey, d)
 }
+
+func TestValidateShare(t *testing.T) {
+	cases := []struct {
+		name   string
+		event  nostr.Event
+		reject bool
+	}{
+		{"repost with h + e", nostr.Event{Kind: 16, Tags: nostr.Tags{{"h", "c"}, {"e", "id"}}}, false},
+		{"repost with h + a", nostr.Event{Kind: 16, Tags: nostr.Tags{{"h", "c"}, {"a", "30142:x:y"}}}, false},
+		{"repost no community", nostr.Event{Kind: 16, Tags: nostr.Tags{{"e", "id"}, {"p", "author"}}}, true},
+		{"repost no reference", nostr.Event{Kind: 16, Tags: nostr.Tags{{"h", "c"}}}, true},
+		{"targeted via p with a + d", nostr.Event{Kind: 30222, Tags: nostr.Tags{{"d", "s"}, {"p", "c"}, {"a", "30142:x:y"}}}, false},
+		{"targeted via h with e + d", nostr.Event{Kind: 30222, Tags: nostr.Tags{{"d", "s"}, {"h", "c"}, {"e", "id"}}}, false},
+		{"targeted missing d", nostr.Event{Kind: 30222, Tags: nostr.Tags{{"p", "c"}, {"a", "30142:x:y"}}}, true},
+		{"targeted no community", nostr.Event{Kind: 30222, Tags: nostr.Tags{{"d", "s"}, {"a", "30142:x:y"}}}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			reject, msg := validateShare(c.event)
+			if reject != c.reject {
+				t.Errorf("validateShare = %v (%q), want reject=%v", reject, msg, c.reject)
+			}
+		})
+	}
+}

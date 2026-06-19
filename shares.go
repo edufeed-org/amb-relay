@@ -98,3 +98,33 @@ func nostrToShare(event *nostr.Event) (*ShareDocument, error) {
 	}
 	return doc, nil
 }
+
+// validateShare accepts a community share event. Both kinds require at least one
+// target community (kind-aware: h, or p for 30222) AND at least one content
+// reference (e or a). Kind 30222 is addressable, so it additionally requires a
+// `d` tag. A kind-16 repost without an `h` tag is a plain repost, not a community
+// share, and is rejected.
+func validateShare(event nostr.Event) (reject bool, msg string) {
+	if len(shareCommunities(&event)) == 0 {
+		return true, "share event missing community target (h tag, or p tag for kind 30222)"
+	}
+	hasRef, hasD := false, false
+	for _, tag := range event.Tags {
+		if len(tag) < 2 {
+			continue
+		}
+		switch tag[0] {
+		case "e", "a":
+			hasRef = true
+		case "d":
+			hasD = true
+		}
+	}
+	if !hasRef {
+		return true, "share event missing content reference (e or a tag)"
+	}
+	if event.Kind == kindTargetedPublication && !hasD {
+		return true, "targeted publication missing required 'd' tag"
+	}
+	return false, ""
+}
