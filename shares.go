@@ -128,3 +128,27 @@ func validateShare(event nostr.Event) (reject bool, msg string) {
 	}
 	return false, ""
 }
+
+// sharesSchema returns the Typesense collection schema for community share
+// events. Reuses the envelope fields (eventID/eventKind/…/community) so the
+// shared query path reconstructs events and #h / community:<pubkey> queries hit
+// the same `community` field as every other collection.
+func sharesSchema(name string) typesense30142.CollectionSchema {
+	return typesense30142.CollectionSchema{
+		Name:                name,
+		DefaultSortingField: "eventCreatedAt",
+		Fields: append([]typesense30142.Field{
+			{Name: "id", Type: "string"},
+			{Name: "refE", Type: "string[]", Optional: true, Facet: true},
+			{Name: "refA", Type: "string[]", Optional: true, Facet: true},
+			{Name: "refKind", Type: "int32", Optional: true, Facet: true},
+		}, structuredEnvelopeFields()...),
+	}
+}
+
+// storeShare projects and upserts a share event to the community_shares Typesense
+// collection via the shared structured-collection helper (fire-and-forget; the
+// event is already durable in BoltDB).
+func storeShare(enabled bool, ts *typesense30142.TSBackend, event nostr.Event) {
+	storeStructured(enabled, ts, event, "share", nostrToShare)
+}

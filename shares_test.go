@@ -134,3 +134,27 @@ func TestValidateShare(t *testing.T) {
 		})
 	}
 }
+
+func TestSharesSchema(t *testing.T) {
+	schema := sharesSchema("community_shares")
+	if schema.Name != "community_shares" {
+		t.Fatalf("schema name = %q", schema.Name)
+	}
+	want := map[string]string{
+		"id":        "string",
+		"refE":      "string[]",
+		"refA":      "string[]",
+		"refKind":   "int32",
+		"community": "string[]", // from structuredEnvelopeFields — drives #h / community:
+		"eventID":   "string",   // delete-by-eventID needs this present
+	}
+	got := make(map[string]string)
+	for _, f := range schema.Fields {
+		got[f.Name] = f.Type
+	}
+	for name, typ := range want {
+		if got[name] != typ {
+			t.Errorf("field %q type = %q, want %q", name, got[name], typ)
+		}
+	}
+}
