@@ -399,20 +399,36 @@ Schema changes are deferred — `updatecollectionschema` only stores the schema,
 
 #### Schema migrations after a release
 
-When a new relay release changes the hardcoded default schema (e.g. adding a new indexed field), running operators need to roll the live Typesense collection forward. BoltDB is the source of truth, so the recipe is "drop and rebuild from BoltDB":
+When a new relay release changes the hardcoded default schema (e.g. adding a new indexed field), running operators need to roll the live Typesense collection forward. BoltDB is the source of truth, so the recipe is "drop and rebuild from BoltDB".
+
+NIP-86 management methods are served over an **HTTP** endpoint (`POST https://<relay-host>/`) with `Content-Type: application/nostr+json+rpc` and a NIP-98 `Authorization` header — **not** over the websocket. (`nak event -k 24242 ... wss://...` does not work; the relay rejects kind-24242 events on the WS path.) The body is `{"method":"<method>","params":[...]}`. The relay's NIP-98 check requires the auth event (kind 27235) to carry a `u` tag matching the relay base URL and a `payload` tag holding the hex SHA-256 of the exact request body, signed no more than 30s before the request.
 
 ```bash
+HOST="https://<relay-host>"
+
+call() {  # call <method>
+  local body="{\"method\":\"$1\",\"params\":[]}"
+  local hash=$(printf '%s' "$body" | sha256sum | cut -d' ' -f1)
+  local auth=$(nak event -k 27235 \
+    -t "u=$HOST" -t "method=POST" -t "payload=$hash" \
+    --sec "$ADMIN_NSEC" | base64 -w0)
+  curl -s -X POST "$HOST/" \
+    -H "Content-Type: application/nostr+json+rpc" \
+    -H "Authorization: Nostr $auth" \
+    -d "$body"
+}
+
 # 1. Pull the new code and restart the relay container
 docker compose pull && docker compose up -d --build amb-relay
 
 # 2. Apply the new default schema (clears any stored custom schema)
-nak event -k 24242 --tag method=resetcollectionschema --sec $ADMIN_NSEC --auth wss://<relay-host>
+call resetcollectionschema
 
 # 3. Drop and rebuild the Typesense collection from BoltDB
-nak event -k 24242 --tag method=reindex --sec $ADMIN_NSEC --auth wss://<relay-host>
+call reindex
 
 # 4. Poll until done
-nak event -k 24242 --tag method=getreindexstatus --sec $ADMIN_NSEC --auth wss://<relay-host>
+call getreindexstatus
 ```
 
 Skip step 2 if the running relay was previously configured with `updatecollectionschema` and you want to keep that custom schema. Step 3 also re-runs the fulltext replay pass, so `content` rows are preserved across the rebuild. Search is unavailable for the duration of step 3.
