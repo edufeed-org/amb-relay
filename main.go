@@ -77,6 +77,9 @@ func main() {
 	if calendarEnabled {
 		retentionKinds = append(retentionKinds, []int{31922}, []int{31923}, []int{31924}, []int{31925})
 	}
+	if sharesEnabled {
+		retentionKinds = append(retentionKinds, []int{16}, []int{30222})
+	}
 	relay.Info.Retention = []*nip11.RelayRetentionDocument{
 		{Kinds: retentionKinds},
 	}
