@@ -64,6 +64,7 @@ func main() {
 	wikiEnabled := os.Getenv("WIKI_ENABLED") == "true"
 	calendarEnabled := os.Getenv("CALENDAR_ENABLED") == "true"
 	profilesEnabled := os.Getenv("PROFILES_ENABLED") == "true"
+	sharesEnabled := os.Getenv("COMMUNITY_SHARES_ENABLED") == "true"
 
 	// NIP-11: Retention
 	retentionKinds := [][]int{{5}, {30142}}
@@ -322,6 +323,35 @@ func main() {
 		fmt.Printf("Profiles (kind 0) enabled — collection %s\n", pColl)
 	}
 
+	// Community shares (kind 16 repost + legacy kind 30222) Typesense backend —
+	// gated behind COMMUNITY_SHARES_ENABLED. Disjoint id-keyed collection; nil
+	// when the flag is off so the registry omits it. SearchFields is set to a
+	// real indexed string field (eventID) because shares carry no fulltext —
+	// they are queried by #h / community:<pubkey> / kind, never by free text.
+	var tsDB5 *typesense30142.TSBackend
+	if sharesEnabled {
+		shColl := os.Getenv("TS_COLLECTION_SHARES")
+		if shColl == "" {
+			shColl = "community_shares"
+		}
+		shSchema := sharesSchema(shColl)
+		tsDB5 = &typesense30142.TSBackend{
+			ApiKey:          os.Getenv("TS_APIKEY"),
+			Host:            os.Getenv("TS_HOST"),
+			CollectionName:  shColl,
+			RawEventStore:   &boltDB,
+			Schema:          &shSchema,
+			SearchFields:    "eventID",
+			StopwordsSet:    stopwordsSet,
+			StopwordsList:   stopwordsList,
+			StopwordsLocale: "de",
+		}
+		if err := tsDB5.Init(); err != nil {
+			panic(fmt.Sprintf("shares TSBackend init: %v", err))
+		}
+		fmt.Printf("Community shares (kinds 16, 30222) enabled — collection %s\n", shColl)
+	}
+
 	// Optional: reconcile BoltDB ↔ Typesense at startup. Both stores are
 	// open and the listener hasn't started yet, so this runs single-threaded
 	// against the relay's own opened BoltDB — no lock juggling, unlike the
@@ -421,6 +451,17 @@ func main() {
 			chunked:  false,
 		})
 	}
+	if sharesEnabled && tsDB5 != nil {
+		contentTypes = append(contentTypes, contentType{
+			kinds:    []nostr.Kind{16, 30222},
+			validate: validateShare,
+			store:    func(e nostr.Event) { storeShare(true, tsDB5, e) },
+			fetch:    tsDB5.QueryEvents,
+			count:    tsDB5.CountEvents,
+			deleteID: tsDB5.DeleteEvent,
+			chunked:  false,
+		})
+	}
 	reg := newRegistry(contentTypes...)
 
 	var profileContentKinds []nostr.Kind
@@ -494,6 +535,14 @@ func main() {
 				}
 				return reprojectStructured(tsDB4, e, nostrToCalendar)
 			},
+		})
+	}
+	if sharesEnabled && tsDB5 != nil {
+		structuredTargets = append(structuredTargets, structuredReindexTarget{
+			label:     "shares",
+			kinds:     []nostr.Kind{16, 30222},
+			recreate:  func() error { return tsDB5.RecreateCollection(tsDB5.Schema) },
+			reproject: func(e nostr.Event) error { return reprojectStructured(tsDB5, e, nostrToShare) },
 		})
 	}
 
