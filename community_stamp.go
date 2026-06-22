@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/typesense30142"
@@ -177,3 +178,48 @@ func hintsFromRefs(refs []shareRef) []string {
 	}
 	return hints
 }
+
+const communityStampTimeout = 60 * time.Second
+
+// reconcileShare resolves a share to its referenced content and reconciles it.
+func (s *CommunityStamper) reconcileShare(event nostr.Event) {
+	if ref, ok := shareToRef(event); ok {
+		s.reconcile(ref.Coord, ref.Kind, ref.Pubkey, ref.DTag)
+	}
+}
+
+// reconcileAll reconciles every distinct content coord referenced by any share.
+// This is both the periodic sweep (retrying absent fetches and re-evaluating
+// IsMember) and the post-reindex replay (re-applying stamps the projection
+// wiped). The shares collection is the work list — no durable queue.
+func (s *CommunityStamper) reconcileAll() {
+	seen := make(map[string]bool)
+	for _, ev := range s.allShares() {
+		ref, ok := shareToRef(ev)
+		if ok && !seen[ref.Coord] {
+			seen[ref.Coord] = true
+			s.reconcile(ref.Coord, ref.Kind, ref.Pubkey, ref.DTag)
+		}
+	}
+}
+
+func (s *CommunityStamper) Init() {
+	go s.reconcileAll()
+}
+
+func (s *CommunityStamper) StartSweepLoop(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.reconcileAll()
+			case <-s.stopCh:
+				return
+			}
+		}
+	}()
+}
+
+func (s *CommunityStamper) Stop() { close(s.stopCh) }

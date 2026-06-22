@@ -175,3 +175,66 @@ func TestReconcileAbsentNoDesiredSkips(t *testing.T) {
 		t.Fatalf("absent content with no desired communities must not patch, got %+v", *patches)
 	}
 }
+
+func TestReconcileAllDistinctCoords(t *testing.T) {
+	const owner = "776c7bfe528c041cd1114efb6d48100b2e49d4faf27e301fb3f83c64a28694f4"
+	c1 := "30023:" + owner + ":d1"
+	c2 := "30023:" + owner + ":d2"
+	s, patches := newTestStamper()
+	s.allShares = func() []nostr.Event {
+		return []nostr.Event{mkShare(owner, c1, "C1"), mkShare(owner, c1, "C1"), mkShare(owner, c2, "C2")}
+	}
+	s.sharesFor = func(coord string) []nostr.Event {
+		var out []nostr.Event
+		for _, e := range s.allShares() {
+			if ref, ok := shareToRef(e); ok && ref.Coord == coord {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+	s.lookup = func(string) (nostr.Event, bool) {
+		return nostr.Event{Kind: 30023, PubKey: pkOrZero(owner), Tags: nostr.Tags{{"d", "x"}}}, true
+	}
+	s.reconcileAll()
+	if len(*patches) != 2 {
+		t.Fatalf("want 2 distinct-coord patches, got %d (%+v)", len(*patches), *patches)
+	}
+}
+
+func TestReconcileFetchesAbsentThenStampsAndStores(t *testing.T) {
+	const owner = "776c7bfe528c041cd1114efb6d48100b2e49d4faf27e301fb3f83c64a28694f4"
+	coord := "30023:" + owner + ":d9"
+	s, patches := newTestStamper()
+	s.sharesFor = func(string) []nostr.Event { return []nostr.Event{mkShare(owner, coord, "C1")} }
+	s.lookup = func(string) (nostr.Event, bool) { return nostr.Event{}, false } // absent
+	var fetched, stored bool
+	s.fetch = func(ref shareRef, _ []string) (nostr.Event, bool) {
+		fetched = true
+		return nostr.Event{Kind: 30023, PubKey: pkOrZero(owner), Tags: nostr.Tags{{"d", "d9"}}}, true
+	}
+	s.validate = func(nostr.Event) (bool, string) { return false, "" }
+	s.store = func(nostr.Event) { stored = true }
+	s.reconcile(coord, 30023, owner, "d9")
+	if !fetched || !stored || len(*patches) != 1 {
+		t.Fatalf("absent path: fetched=%v stored=%v patches=%d", fetched, stored, len(*patches))
+	}
+}
+
+func TestReconcileFetchRejectedNotStored(t *testing.T) {
+	const owner = "776c7bfe528c041cd1114efb6d48100b2e49d4faf27e301fb3f83c64a28694f4"
+	coord := "30023:" + owner + ":dx"
+	s, patches := newTestStamper()
+	s.sharesFor = func(string) []nostr.Event { return []nostr.Event{mkShare(owner, coord, "C1")} }
+	s.lookup = func(string) (nostr.Event, bool) { return nostr.Event{}, false }
+	s.fetch = func(shareRef, []string) (nostr.Event, bool) {
+		return nostr.Event{Kind: 30023, PubKey: pkOrZero(owner), Tags: nostr.Tags{{"d", "dx"}}}, true
+	}
+	s.validate = func(nostr.Event) (bool, string) { return true, "rejected" }
+	var stored bool
+	s.store = func(nostr.Event) { stored = true }
+	s.reconcile(coord, 30023, owner, "dx")
+	if stored || len(*patches) != 0 {
+		t.Fatalf("rejected fetch must not store or patch: stored=%v patches=%d", stored, len(*patches))
+	}
+}
