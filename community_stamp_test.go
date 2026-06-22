@@ -112,6 +112,7 @@ func newTestStamper() (*CommunityStamper, *[]stampPatchCall) {
 			patches = append(patches, stampPatchCall{kind, docID, communities})
 			return nil
 		},
+		stopCh: make(chan struct{}),
 	}
 	return s, &patches
 }
