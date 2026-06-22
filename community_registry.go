@@ -228,3 +228,73 @@ func (r *CommunityRegistry) StartRefreshLoop(interval time.Duration) {
 }
 
 func (r *CommunityRegistry) Stop() { close(r.stopCh) }
+
+// membersFromTags collects the p-tag pubkeys from a kind-30000 (or contact)
+// list event into a set.
+func membersFromTags(tags nostr.Tags) map[string]bool {
+	set := make(map[string]bool)
+	for _, tag := range tags {
+		if len(tag) >= 2 && tag[0] == "p" {
+			set[tag[1]] = true
+		}
+	}
+	return set
+}
+
+type poolCommunitySource struct {
+	pool *nostr.Pool
+}
+
+func (s poolCommunitySource) Resolve(ctx context.Context, relays []string, community string) (communityMembership, bool) {
+	pk, err := nostr.PubKeyFromHex(community)
+	if err != nil {
+		return communityMembership{}, false
+	}
+	def := s.pool.QuerySingle(ctx, relays, nostr.Filter{
+		Kinds:   []nostr.Kind{10222},
+		Authors: []nostr.PubKey{pk},
+		Limit:   1,
+	}, nostr.SubscriptionOptions{})
+	if def == nil {
+		return communityMembership{}, false
+	}
+	sections := parseCommunitySections(&def.Event)
+	lists := make(map[string]map[string]bool)
+	for _, sec := range sections {
+		if sec.List == nil {
+			continue
+		}
+		key := listKey(sec.List)
+		if _, done := lists[key]; done {
+			continue
+		}
+		if set, ok := s.fetchList(ctx, relays, sec.List); ok {
+			lists[key] = set
+		}
+	}
+	return buildMembership(community, sections, lists), true
+}
+
+// fetchList resolves one kind-30000 member list, hint-first. Returns (set,true)
+// only on success; (nil,false) on failure so buildMembership makes the kind
+// owner-only.
+func (s poolCommunitySource) fetchList(ctx context.Context, fallback []string, lc *listCoord) (map[string]bool, bool) {
+	pk, err := nostr.PubKeyFromHex(lc.Pubkey)
+	if err != nil {
+		return nil, false
+	}
+	relays := fallback
+	if lc.Relay != "" {
+		relays = append([]string{lc.Relay}, fallback...)
+	}
+	res := s.pool.QuerySingle(ctx, relays, nostr.Filter{
+		Kinds:   []nostr.Kind{30000},
+		Authors: []nostr.PubKey{pk},
+		Tags:    nostr.TagMap{"d": []string{lc.DTag}},
+		Limit:   1,
+	}, nostr.SubscriptionOptions{})
+	if res == nil {
+		return nil, false
+	}
+	return membersFromTags(res.Tags), true
+}
