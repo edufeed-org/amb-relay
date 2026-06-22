@@ -55,6 +55,7 @@ type Reindexer struct {
 	contentPatched  atomic.Int64
 	contentOrphaned atomic.Int64
 	lastErr         atomic.Value // stores string
+	afterRun        func()        // optional; invoked once after a reindex completes (stamp replay)
 }
 
 func NewReindexer(tsDB *typesense30142.TSBackend, boltDB *boltdb.BoltBackend, mgmt *ManagementStore, content *ContentStore, structured []structuredReindexTarget) *Reindexer {
@@ -209,6 +210,14 @@ func (r *Reindexer) run() {
 	log.Printf("reindex: completed. total=%d indexed=%d errors=%d content_patched=%d content_orphaned=%d",
 		r.total.Load(), r.indexed.Load(), r.errors.Load(),
 		r.contentPatched.Load(), r.contentOrphaned.Load())
+	r.runAfter()
+}
+
+// runAfter invokes the post-reindex callback if set. Separated for testability.
+func (r *Reindexer) runAfter() {
+	if r.afterRun != nil {
+		r.afterRun()
+	}
 }
 
 // reindexStructuredEvents reprojects each event, returning (total, indexed,

@@ -737,6 +737,7 @@ func main() {
 			stopCh:     make(chan struct{}),
 		}
 		stamper.Init()
+		reindexer.afterRun = func() { stamper.reconcileAll() }
 		stamper.StartSweepLoop(communityRefresh) // reuse Phase-3 interval
 		defer stamper.Stop()
 		fmt.Printf("Community stamper: member-gated denormalization active (sweep every %s)\n", communityRefresh)

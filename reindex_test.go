@@ -83,3 +83,14 @@ func TestReindexStructuredEvents_CountsAndContinues(t *testing.T) {
 		t.Errorf("reproject call order = %v, want [a bad c]", seen)
 	}
 }
+
+// TestReindexerAfterRunCallbackFires verifies that the afterRun callback is
+// invoked when runAfter() is called.
+func TestReindexerAfterRunCallbackFires(t *testing.T) {
+	called := false
+	r := &Reindexer{afterRun: func() { called = true }}
+	r.runAfter()
+	if !called {
+		t.Fatal("afterRun must be invoked by runAfter")
+	}
+}
