@@ -122,33 +122,36 @@ func TestBackfillCommunitiesDistinct(t *testing.T) {
 }
 
 func TestRefreshResolvesAndOpenDefault(t *testing.T) {
+	const c1 = "0000000000000000000000000000000000000000000000000000000000000002"
+	const c2 = "0000000000000000000000000000000000000000000000000000000000000003"
 	src := &fakeCommunitySource{resolved: map[string]communityMembership{
-		"C1": {Owner: "C1", Members: map[nostr.Kind]map[string]bool{30023: {"alice": true}}},
+		c1: {Owner: c1, Members: map[nostr.Kind]map[string]bool{30023: {"alice": true}}},
 	}}
-	r := NewCommunityRegistry(src, func() []string { return []string{"C1", "C2"} }, []string{"wss://r"})
+	r := NewCommunityRegistry(src, func() []string { return []string{c1, c2} }, []string{"wss://r"})
 	r.refresh(context.Background())
 
-	if r.IsMember("C1", "mallory", 30023) {
+	if r.IsMember(c1, "mallory", 30023) {
 		t.Fatal("C1 30023 restricted; mallory denied")
 	}
-	if !r.IsMember("C1", "alice", 30023) {
+	if !r.IsMember(c1, "alice", 30023) {
 		t.Fatal("alice is a member")
 	}
-	if !r.IsMember("C2", "anyone", 30023) {
+	if !r.IsMember(c2, "anyone", 30023) {
 		t.Fatal("unresolved community open by default")
 	}
 }
 
 func TestRefreshKeepsLastKnownOnFailure(t *testing.T) {
+	const c1 = "0000000000000000000000000000000000000000000000000000000000000002"
 	src := &fakeCommunitySource{resolved: map[string]communityMembership{
-		"C1": {Owner: "C1", Members: map[nostr.Kind]map[string]bool{30023: {"alice": true}}},
+		c1: {Owner: c1, Members: map[nostr.Kind]map[string]bool{30023: {"alice": true}}},
 	}}
-	r := NewCommunityRegistry(src, func() []string { return []string{"C1"} }, []string{"wss://r"})
+	r := NewCommunityRegistry(src, func() []string { return []string{c1} }, []string{"wss://r"})
 	r.refresh(context.Background()) // C1 resolved restricted
 	// now C1 disappears
 	src.resolved = map[string]communityMembership{}
 	r.refresh(context.Background())
-	if r.IsMember("C1", "mallory", 30023) {
+	if r.IsMember(c1, "mallory", 30023) {
 		t.Fatal("failed re-resolve must keep last-known restriction, not flip open")
 	}
 }

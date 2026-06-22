@@ -188,6 +188,9 @@ func (r *CommunityRegistry) IsMember(community, pubkey string, kind nostr.Kind) 
 // open), satisfying keep-last-known.
 func (r *CommunityRegistry) refresh(ctx context.Context) {
 	for _, c := range r.backfill() {
+		if _, err := nostr.PubKeyFromHex(c); err != nil {
+			continue
+		}
 		m, ok := r.src.Resolve(ctx, r.relays, c)
 		if !ok {
 			continue
