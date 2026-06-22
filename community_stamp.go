@@ -105,7 +105,28 @@ type CommunityStamper struct {
 	store     func(nostr.Event)
 	patch     func(kind nostr.Kind, docID string, communities []string) error
 
+	// stampKinds is the set of content kinds whose docs can be stamped.
+	// Populated in main.go from stampTargets keys. Used to skip goroutine
+	// spawning for non-content kinds (kind-0, share kinds, etc.).
+	stampKinds map[nostr.Kind]bool
+
 	stopCh chan struct{}
+}
+
+// isStampKind reports whether a kind is in the set of stampable content kinds.
+func (s *CommunityStamper) isStampKind(kind nostr.Kind) bool {
+	return s.stampKinds[kind]
+}
+
+// contentCoord derives the addressable coord of a content event.
+func contentCoord(event nostr.Event) (coord string, kind nostr.Kind, pubkey, dTag string, ok bool) {
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "d" {
+			pk := event.PubKey.Hex()
+			return fmt.Sprintf("%d:%s:%s", event.Kind, pk, tag[1]), event.Kind, pk, tag[1], true
+		}
+	}
+	return "", 0, "", "", false
 }
 
 // reconcile recomputes the full `community` field for one addressable content

@@ -587,9 +587,11 @@ func main() {
 		fmt.Printf("Profiles: fetching from %v, refresh every %s\n", profileRelays, refreshInterval)
 	}
 
+	var communityRelays []string
+	var communityRefresh time.Duration
 	var communityReg *CommunityRegistry
 	if sharesEnabled {
-		communityRelays := []string{"wss://relay.edufeed.org"}
+		communityRelays = []string{"wss://relay.edufeed.org"}
 		if raw := os.Getenv("COMMUNITY_RELAYS"); raw != "" {
 			communityRelays = nil
 			for _, r := range strings.Split(raw, ",") {
@@ -598,7 +600,7 @@ func main() {
 				}
 			}
 		}
-		communityRefresh := 6 * time.Hour
+		communityRefresh = 6 * time.Hour
 		if raw := os.Getenv("COMMUNITY_REFRESH_INTERVAL"); raw != "" {
 			if d, err := time.ParseDuration(raw); err == nil {
 				communityRefresh = d
@@ -621,7 +623,124 @@ func main() {
 		defer communityReg.Stop()
 		fmt.Printf("Community registry: resolving from %v, refresh every %s\n", communityRelays, communityRefresh)
 	}
-	_ = communityReg // Phase 4 consumes IsMember; keep referenced until then
+	var stamper *CommunityStamper
+	if sharesEnabled && communityReg != nil && tsDB5 != nil {
+		// Per-kind stamp target: which Typesense backend holds each content kind.
+		stampTargets := map[nostr.Kind]*typesense30142.TSBackend{30142: &tsDB}
+		if longformEnabled && tsDB2 != nil {
+			stampTargets[30023] = tsDB2
+		}
+		if wikiEnabled && tsDB3 != nil {
+			stampTargets[30818] = tsDB3
+		}
+		if calendarEnabled && tsDB4 != nil {
+			for _, k := range []nostr.Kind{31922, 31923, 31924, 31925} {
+				stampTargets[k] = tsDB4
+			}
+		}
+
+		stampPool := nostr.NewPool()
+		// Reuse the Phase-3 community relays for fetch fallback.
+		stampRelays := communityRelays
+
+		// Populate stampKinds for the kind guard in triggers.
+		stampKinds := make(map[nostr.Kind]bool, len(stampTargets))
+		for k := range stampTargets {
+			stampKinds[k] = true
+		}
+
+		stamper = &CommunityStamper{
+			isMember: communityReg.IsMember,
+			sharesFor: func(coord string) []nostr.Event {
+				var out []nostr.Event
+				// refA is a filterable facet on the shares collection; QueryEvents
+				// honors tag filters via #a-style TagMap.
+				for ev := range tsDB5.QueryEvents(nostr.Filter{
+					Kinds: []nostr.Kind{16, 30222},
+					Tags:  nostr.TagMap{"a": []string{coord}},
+				}, 10_000) {
+					out = append(out, ev)
+				}
+				return out
+			},
+			allShares: func() []nostr.Event {
+				var out []nostr.Event
+				for ev := range boltDB.QueryEvents(nostr.Filter{Kinds: []nostr.Kind{16, 30222}}, 1_000_000) {
+					out = append(out, ev)
+				}
+				return out
+			},
+			lookup: func(coord string) (nostr.Event, bool) {
+				parts := strings.SplitN(coord, ":", 3)
+				if len(parts) != 3 {
+					return nostr.Event{}, false
+				}
+				kn, err := strconv.Atoi(parts[0])
+				if err != nil {
+					return nostr.Event{}, false
+				}
+				pk, err := nostr.PubKeyFromHex(parts[1])
+				if err != nil {
+					return nostr.Event{}, false
+				}
+				for ev := range boltDB.QueryEvents(nostr.Filter{
+					Kinds:   []nostr.Kind{nostr.Kind(kn)},
+					Authors: []nostr.PubKey{pk},
+					Tags:    nostr.TagMap{"d": []string{parts[2]}},
+					Limit:   1,
+				}, 1) {
+					return ev, true
+				}
+				return nostr.Event{}, false
+			},
+			fetch: func(ref shareRef, hints []string) (nostr.Event, bool) {
+				pk, err := nostr.PubKeyFromHex(ref.Pubkey)
+				if err != nil {
+					return nostr.Event{}, false
+				}
+				relays := stampRelays
+				if len(hints) > 0 {
+					relays = append(append([]string{}, hints...), stampRelays...)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), communityStampTimeout)
+				defer cancel()
+				res := stampPool.QuerySingle(ctx, relays, nostr.Filter{
+					Kinds:   []nostr.Kind{ref.Kind},
+					Authors: []nostr.PubKey{pk},
+					Tags:    nostr.TagMap{"d": []string{ref.DTag}},
+					Limit:   1,
+				}, nostr.SubscriptionOptions{})
+				if res == nil {
+					return nostr.Event{}, false
+				}
+				return res.Event, true
+			},
+			validate: reg.validate,
+			store: func(e nostr.Event) {
+				boltBuf.Queue(e, false)
+				reg.store(e)
+				if profileMgr != nil {
+					profileMgr.Enqueue(e.PubKey)
+				}
+			},
+			patch: func(kind nostr.Kind, docID string, communities []string) error {
+				be, ok := stampTargets[kind]
+				if !ok {
+					return nil // not a stampable kind
+				}
+				if communities == nil {
+					communities = []string{}
+				}
+				return patchDoc(be.Host, be.ApiKey, be.CollectionName, docID, map[string]any{"community": communities})
+			},
+			stampKinds: stampKinds,
+			stopCh:     make(chan struct{}),
+		}
+		stamper.Init()
+		stamper.StartSweepLoop(communityRefresh) // reuse Phase-3 interval
+		defer stamper.Stop()
+		fmt.Printf("Community stamper: member-gated denormalization active (sweep every %s)\n", communityRefresh)
+	}
 
 	relay.OnConnect = func(ctx context.Context) {
 		khatru.RequestAuth(ctx)
@@ -697,6 +816,18 @@ func main() {
 		if profileMgr != nil {
 			profileMgr.Enqueue(event.PubKey)
 		}
+		if stamper != nil {
+			switch event.Kind {
+			case 16, 30222:
+				go stamper.reconcileShare(event)
+			default:
+				if stamper.isStampKind(event.Kind) {
+					if coord, k, pk, d, ok := contentCoord(event); ok {
+						go stamper.reconcile(coord, k, pk, d)
+					}
+				}
+			}
+		}
 		return nil
 	}
 	relay.ReplaceEvent = func(ctx context.Context, event nostr.Event) error {
@@ -705,16 +836,44 @@ func main() {
 		if profileMgr != nil {
 			profileMgr.Enqueue(event.PubKey)
 		}
+		if stamper != nil {
+			switch event.Kind {
+			case 16, 30222:
+				go stamper.reconcileShare(event)
+			default:
+				if stamper.isStampKind(event.Kind) {
+					if coord, k, pk, d, ok := contentCoord(event); ok {
+						go stamper.reconcile(coord, k, pk, d)
+					}
+				}
+			}
+		}
 		return nil
 	}
 	relay.DeleteEvent = func(ctx context.Context, id nostr.ID) error {
+		var deletedShareRef *shareRef
+		if stamper != nil {
+			for ev := range boltDB.QueryEvents(nostr.Filter{IDs: []nostr.ID{id}, Limit: 1}, 1) {
+				if ev.Kind == 16 || ev.Kind == 30222 {
+					if ref, ok := shareToRef(ev); ok {
+						r := ref
+						deletedShareRef = &r
+					}
+				}
+			}
+		}
 		boltDB.DeleteEvent(id)
 		_ = contentStore.Delete(id.Hex()) // idempotent; safe when no content row existed
 		// The id carries no kind, so try every collection (each delete is a
 		// no-op when the id lives elsewhere).
-		return reg.deleteEverywhere(id, func(err error) {
+		err := reg.deleteEverywhere(id, func(err error) {
 			fmt.Printf("delete %s (secondary collection): %v\n", id.Hex(), err)
 		})
+		if deletedShareRef != nil {
+			r := *deletedShareRef
+			go stamper.reconcile(r.Coord, r.Kind, r.Pubkey, r.DTag)
+		}
+		return err
 	}
 
 	relay.Negentropy = true
