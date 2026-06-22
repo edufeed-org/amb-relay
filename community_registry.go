@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"fiatjaf.com/nostr"
 )
@@ -116,4 +119,81 @@ func buildMembership(owner string, sections []communitySection, lists map[string
 		members[k] = set
 	}
 	return communityMembership{Owner: owner, Members: members}
+}
+
+// Task 3: registry refresh + IsMember (open-default, keep-last-known)
+
+const communityRefreshTimeout = 30 * time.Second
+
+type communitySource interface {
+	Resolve(ctx context.Context, relays []string, community string) (communityMembership, bool)
+}
+
+// backfillCommunities enumerates distinct community targets across stored
+// events of the given kinds (shares + content), first-seen order.
+func backfillCommunities(q eventQuerier, kinds []nostr.Kind, maxLimit int) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for ev := range q.QueryEvents(nostr.Filter{Kinds: kinds}, maxLimit) {
+		ev := ev
+		for _, c := range shareCommunities(&ev) {
+			if !seen[c] {
+				seen[c] = true
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+}
+
+// CommunityRegistry resolves each discovered community's kind-10222 (+ optional
+// kind-30000 lists) into an in-memory membership cache and answers IsMember.
+// Modeled on AllowlistManager: RWMutex map + pool fetch + refresh loop. The
+// cache is never pruned on refresh, so a fetch failure keeps last-known.
+type CommunityRegistry struct {
+	src      communitySource
+	backfill func() []string
+	relays   []string
+
+	mu       sync.RWMutex
+	resolved map[string]communityMembership
+	stopCh   chan struct{}
+}
+
+func NewCommunityRegistry(src communitySource, backfill func() []string, relays []string) *CommunityRegistry {
+	return &CommunityRegistry{
+		src:      src,
+		backfill: backfill,
+		relays:   relays,
+		resolved: make(map[string]communityMembership),
+		stopCh:   make(chan struct{}),
+	}
+}
+
+// IsMember reports whether pubkey may publish kind into community. An unresolved
+// community is open by default.
+func (r *CommunityRegistry) IsMember(community, pubkey string, kind nostr.Kind) bool {
+	r.mu.RLock()
+	m, ok := r.resolved[community]
+	r.mu.RUnlock()
+	if !ok {
+		return true
+	}
+	return m.allows(pubkey, kind)
+}
+
+// refresh re-derives the known-community set from the backfill scan and
+// re-resolves each. Entries are updated in place and never deleted: a failed or
+// not-yet-resolved community simply retains its prior value (or stays absent ⇒
+// open), satisfying keep-last-known.
+func (r *CommunityRegistry) refresh(ctx context.Context) {
+	for _, c := range r.backfill() {
+		m, ok := r.src.Resolve(ctx, r.relays, c)
+		if !ok {
+			continue
+		}
+		r.mu.Lock()
+		r.resolved[c] = m
+		r.mu.Unlock()
+	}
 }

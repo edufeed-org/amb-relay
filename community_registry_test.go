@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 
 	"fiatjaf.com/nostr"
@@ -91,5 +92,63 @@ func TestBuildMembershipUnreachableListOwnerOnly(t *testing.T) {
 	}
 	if !m.allows("owner1", 30023) || m.allows("alice", 30023) {
 		t.Fatal("owner-only restriction misbehaves")
+	}
+}
+
+// --- Task 3: registry tests ---
+
+type fakeCommunitySource struct {
+	resolved map[string]communityMembership // present ⇒ (m, true)
+	calls    int
+}
+
+func (f *fakeCommunitySource) Resolve(_ context.Context, _ []string, c string) (communityMembership, bool) {
+	f.calls++
+	m, ok := f.resolved[c]
+	return m, ok
+}
+
+func TestBackfillCommunitiesDistinct(t *testing.T) {
+	q := sliceQuerier{events: []nostr.Event{
+		{Kind: 16, Tags: nostr.Tags{{"h", "C1"}, {"e", "x"}}},
+		{Kind: 30142, Tags: nostr.Tags{{"h", "C1"}, {"h", "C2"}}},
+		{Kind: 30222, Tags: nostr.Tags{{"p", "C3"}, {"d", "z"}, {"e", "y"}}},
+	}}
+	got := backfillCommunities(q, []nostr.Kind{16, 30142, 30222}, 1000)
+	// first-seen order: C1, C2, C3
+	if len(got) != 3 || got[0] != "C1" || got[1] != "C2" || got[2] != "C3" {
+		t.Fatalf("backfillCommunities = %v", got)
+	}
+}
+
+func TestRefreshResolvesAndOpenDefault(t *testing.T) {
+	src := &fakeCommunitySource{resolved: map[string]communityMembership{
+		"C1": {Owner: "C1", Members: map[nostr.Kind]map[string]bool{30023: {"alice": true}}},
+	}}
+	r := NewCommunityRegistry(src, func() []string { return []string{"C1", "C2"} }, []string{"wss://r"})
+	r.refresh(context.Background())
+
+	if r.IsMember("C1", "mallory", 30023) {
+		t.Fatal("C1 30023 restricted; mallory denied")
+	}
+	if !r.IsMember("C1", "alice", 30023) {
+		t.Fatal("alice is a member")
+	}
+	if !r.IsMember("C2", "anyone", 30023) {
+		t.Fatal("unresolved community open by default")
+	}
+}
+
+func TestRefreshKeepsLastKnownOnFailure(t *testing.T) {
+	src := &fakeCommunitySource{resolved: map[string]communityMembership{
+		"C1": {Owner: "C1", Members: map[nostr.Kind]map[string]bool{30023: {"alice": true}}},
+	}}
+	r := NewCommunityRegistry(src, func() []string { return []string{"C1"} }, []string{"wss://r"})
+	r.refresh(context.Background()) // C1 resolved restricted
+	// now C1 disappears
+	src.resolved = map[string]communityMembership{}
+	r.refresh(context.Background())
+	if r.IsMember("C1", "mallory", 30023) {
+		t.Fatal("failed re-resolve must keep last-known restriction, not flip open")
 	}
 }
