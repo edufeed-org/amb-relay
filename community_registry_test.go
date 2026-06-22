@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"testing"
+	"time"
 
 	"fiatjaf.com/nostr"
 )
@@ -153,5 +154,27 @@ func TestRefreshKeepsLastKnownOnFailure(t *testing.T) {
 	r.refresh(context.Background())
 	if r.IsMember(c1, "mallory", 30023) {
 		t.Fatal("failed re-resolve must keep last-known restriction, not flip open")
+	}
+}
+
+func TestInitResolvesInBackground(t *testing.T) {
+	const c1 = "0000000000000000000000000000000000000000000000000000000000000002"
+	src := &fakeCommunitySource{resolved: map[string]communityMembership{c1: {Owner: c1}}}
+	r := NewCommunityRegistry(src, func() []string { return []string{c1} }, []string{"wss://r"})
+	if err := r.Init(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		r.mu.RLock()
+		_, ok := r.resolved[c1]
+		r.mu.RUnlock()
+		if ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !r.IsMember(c1, c1, 30023) {
+		t.Fatal("owner of resolved community must be a member after Init")
 	}
 }

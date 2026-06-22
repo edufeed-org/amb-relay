@@ -200,3 +200,31 @@ func (r *CommunityRegistry) refresh(ctx context.Context) {
 		r.mu.Unlock()
 	}
 }
+
+func (r *CommunityRegistry) Init() error {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), communityRefreshTimeout)
+		defer cancel()
+		r.refresh(ctx)
+	}()
+	return nil
+}
+
+func (r *CommunityRegistry) StartRefreshLoop(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), communityRefreshTimeout)
+				r.refresh(ctx)
+				cancel()
+			case <-r.stopCh:
+				return
+			}
+		}
+	}()
+}
+
+func (r *CommunityRegistry) Stop() { close(r.stopCh) }
