@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"testing"
 
 	"fiatjaf.com/nostr"
@@ -85,4 +86,92 @@ func mustPK(t *testing.T, hex string) nostr.PubKey {
 		t.Fatalf("bad pubkey hex %q: %v", hex, err)
 	}
 	return pk
+}
+
+// pkOrZero parses a hex pubkey, falling back to the zero key for fixtures that
+// don't care about the author identity.
+func pkOrZero(hexKey string) nostr.PubKey {
+	if pk, err := nostr.PubKeyFromHex(hexKey); err == nil {
+		return pk
+	}
+	pk, _ := nostr.PubKeyFromHex("0000000000000000000000000000000000000000000000000000000000000002")
+	return pk
+}
+
+type stampPatchCall struct {
+	kind        nostr.Kind
+	docID       string
+	communities []string
+}
+
+func newTestStamper() (*CommunityStamper, *[]stampPatchCall) {
+	var patches []stampPatchCall
+	s := &CommunityStamper{
+		isMember: func(_, _ string, _ nostr.Kind) bool { return true },
+		patch: func(kind nostr.Kind, docID string, communities []string) error {
+			patches = append(patches, stampPatchCall{kind, docID, communities})
+			return nil
+		},
+	}
+	return s, &patches
+}
+
+func mkShare(author, coord, community string) nostr.Event {
+	return nostr.Event{
+		Kind:   16,
+		PubKey: pkOrZero(author),
+		Tags:   nostr.Tags{{"a", coord}, {"k", "30023"}, {"h", community}},
+	}
+}
+
+func TestReconcileLocalStampsOwnPlusShared(t *testing.T) {
+	const owner = "776c7bfe528c041cd1114efb6d48100b2e49d4faf27e301fb3f83c64a28694f4"
+	coord := "30023:" + owner + ":d1"
+	s, patches := newTestStamper()
+	s.sharesFor = func(c string) []nostr.Event {
+		if c != coord {
+			return nil
+		}
+		return []nostr.Event{mkShare(owner, coord, "C1")}
+	}
+	s.lookup = func(c string) (nostr.Event, bool) {
+		// local content carries its own h tag C0
+		return nostr.Event{Kind: 30023, PubKey: pkOrZero(owner), Tags: nostr.Tags{{"d", "d1"}, {"h", "C0"}}}, true
+	}
+	s.reconcile(coord, 30023, owner, "d1")
+
+	if len(*patches) != 1 {
+		t.Fatalf("want 1 patch, got %d", len(*patches))
+	}
+	got := (*patches)[0]
+	want := []string{"C0", "C1"}
+	sort.Strings(got.communities)
+	if got.kind != 30023 || len(got.communities) != 2 || got.communities[0] != want[0] || got.communities[1] != want[1] {
+		t.Fatalf("stampPatch = %+v", got)
+	}
+}
+
+func TestReconcileNonMemberNotStamped(t *testing.T) {
+	const owner = "776c7bfe528c041cd1114efb6d48100b2e49d4faf27e301fb3f83c64a28694f4"
+	coord := "30023:" + owner + ":d1"
+	s, patches := newTestStamper()
+	s.isMember = func(_, _ string, _ nostr.Kind) bool { return false }
+	s.sharesFor = func(string) []nostr.Event { return []nostr.Event{mkShare(owner, coord, "C1")} }
+	s.lookup = func(string) (nostr.Event, bool) {
+		return nostr.Event{Kind: 30023, PubKey: pkOrZero(owner), Tags: nostr.Tags{{"d", "d1"}}}, true
+	}
+	s.reconcile(coord, 30023, owner, "d1")
+	if len(*patches) != 1 || len((*patches)[0].communities) != 0 {
+		t.Fatalf("non-member share must yield empty community set, got %+v", *patches)
+	}
+}
+
+func TestReconcileAbsentNoDesiredSkips(t *testing.T) {
+	s, patches := newTestStamper()
+	s.sharesFor = func(string) []nostr.Event { return nil } // no shares → no desired
+	s.lookup = func(string) (nostr.Event, bool) { return nostr.Event{}, false }
+	s.reconcile("30023:p:d", 30023, "p", "d")
+	if len(*patches) != 0 {
+		t.Fatalf("absent content with no desired communities must not patch, got %+v", *patches)
+	}
 }

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
 	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/eventstore/typesense30142"
 )
 
 // shareRef is one share event resolved to the addressable content it targets.
@@ -87,4 +90,90 @@ func deriveStamps(refs []shareRef, isMember func(community, pubkey string, kind 
 		}
 	}
 	return stamps
+}
+
+// CommunityStamper recomputes and patches the `community` field on content docs
+// whenever a community share event references them.
+type CommunityStamper struct {
+	isMember  func(community, pubkey string, kind nostr.Kind) bool
+	sharesFor func(coord string) []nostr.Event
+	allShares func() []nostr.Event
+	lookup    func(coord string) (nostr.Event, bool)
+	fetch     func(ref shareRef, hints []string) (nostr.Event, bool)
+	validate  func(nostr.Event) (reject bool, msg string)
+	store     func(nostr.Event)
+	patch     func(kind nostr.Kind, docID string, communities []string) error
+
+	stopCh chan struct{}
+}
+
+// reconcile recomputes the full `community` field for one addressable content
+// coord and PATCHes it. The desired set is the member-gated union of every
+// share that references this coord; the written value is own-h-tags ∪ desired.
+// Absent content with at least one desired community is fetched, validated, and
+// stored first-class before stamping. A fetch miss is left for the next sweep.
+func (s *CommunityStamper) reconcile(coord string, kind nostr.Kind, pubkey, dTag string) {
+	var refs []shareRef
+	for _, ev := range s.sharesFor(coord) {
+		if ref, ok := shareToRef(ev); ok {
+			refs = append(refs, ref)
+		}
+	}
+	desired := deriveStamps(refs, s.isMember)[coord] // may be nil
+
+	ev, local := s.lookup(coord)
+	if !local {
+		if len(desired) == 0 {
+			return // nothing to stamp and nothing to fetch
+		}
+		if s.fetch == nil {
+			return
+		}
+		fetched, ok := s.fetch(shareRef{Coord: coord, Kind: kind, Pubkey: pubkey, DTag: dTag}, hintsFromRefs(refs))
+		if !ok {
+			return // retried by the next sweep
+		}
+		if s.validate != nil {
+			if reject, _ := s.validate(fetched); reject {
+				return
+			}
+		}
+		if s.store != nil {
+			s.store(fetched)
+		}
+		ev = fetched
+	}
+
+	final := unionSorted(contentOwnCommunities(ev), desired)
+	docID := typesense30142.GenerateDocumentID(pubkey, dTag)
+	if err := s.patch(kind, docID, final); err != nil {
+		fmt.Printf("community stamp: patch %s (%d): %v\n", coord, kind, err)
+	}
+}
+
+// unionSorted returns the sorted, de-duplicated union of a slice and a set.
+func unionSorted(a []string, b map[string]bool) []string {
+	set := make(map[string]bool, len(a)+len(b))
+	for _, v := range a {
+		set[v] = true
+	}
+	for v := range b {
+		set[v] = true
+	}
+	out := make([]string, 0, len(set))
+	for v := range set {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func hintsFromRefs(refs []shareRef) []string {
+	var hints []string
+	for _, r := range refs {
+		if r.RelayHint != "" {
+			hints = append(hints, r.RelayHint)
+		}
+	}
+	return hints
 }
