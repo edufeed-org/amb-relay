@@ -587,6 +587,42 @@ func main() {
 		fmt.Printf("Profiles: fetching from %v, refresh every %s\n", profileRelays, refreshInterval)
 	}
 
+	var communityReg *CommunityRegistry
+	if sharesEnabled {
+		communityRelays := []string{"wss://relay.edufeed.org"}
+		if raw := os.Getenv("COMMUNITY_RELAYS"); raw != "" {
+			communityRelays = nil
+			for _, r := range strings.Split(raw, ",") {
+				if r = strings.TrimSpace(r); r != "" {
+					communityRelays = append(communityRelays, r)
+				}
+			}
+		}
+		communityRefresh := 6 * time.Hour
+		if raw := os.Getenv("COMMUNITY_REFRESH_INTERVAL"); raw != "" {
+			if d, err := time.ParseDuration(raw); err == nil {
+				communityRefresh = d
+			} else {
+				fmt.Printf("community: bad COMMUNITY_REFRESH_INTERVAL %q, using %s\n", raw, communityRefresh)
+			}
+		}
+		// Discovery scope: share kinds + content kinds. profileContentKinds
+		// (main.go:470) already excludes kind 0 and is populated unconditionally.
+		communityKinds := append([]nostr.Kind{16, 30222}, profileContentKinds...)
+		communityReg = NewCommunityRegistry(
+			poolCommunitySource{pool: nostr.NewPool()},
+			func() []string { return backfillCommunities(&boltDB, communityKinds, 1_000_000) },
+			communityRelays,
+		)
+		if err := communityReg.Init(); err != nil {
+			fmt.Printf("community: init: %v\n", err)
+		}
+		communityReg.StartRefreshLoop(communityRefresh)
+		defer communityReg.Stop()
+		fmt.Printf("Community registry: resolving from %v, refresh every %s\n", communityRelays, communityRefresh)
+	}
+	_ = communityReg // Phase 4 consumes IsMember; keep referenced until then
+
 	relay.OnConnect = func(ctx context.Context) {
 		khatru.RequestAuth(ctx)
 	}
