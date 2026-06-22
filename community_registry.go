@@ -68,3 +68,52 @@ func parseCommunitySections(event *nostr.Event) []communitySection {
 	}
 	return secs
 }
+
+type communityMembership struct {
+	Owner   string
+	Members map[nostr.Kind]map[string]bool // present key = restricted; absent = open
+}
+
+func (m communityMembership) allows(pubkey string, kind nostr.Kind) bool {
+	if pubkey == m.Owner {
+		return true
+	}
+	set, restricted := m.Members[kind]
+	if !restricted {
+		return true
+	}
+	return set[pubkey]
+}
+
+func listKey(lc *listCoord) string { return lc.Pubkey + ":" + lc.DTag }
+
+// buildMembership assembles per-kind membership. Open wins: a kind with any
+// open covering section stays open. Otherwise the kind is restricted to the
+// union of its sections' resolved lists; a list absent from `lists` (fetch
+// failed) contributes nothing, making an all-unreachable kind owner-only.
+func buildMembership(owner string, sections []communitySection, lists map[string]map[string]bool) communityMembership {
+	openKinds := make(map[nostr.Kind]bool)
+	restricted := make(map[nostr.Kind]map[string]bool)
+	for _, sec := range sections {
+		for _, k := range sec.Kinds {
+			if sec.List == nil {
+				openKinds[k] = true
+				continue
+			}
+			if restricted[k] == nil {
+				restricted[k] = make(map[string]bool)
+			}
+			for pk := range lists[listKey(sec.List)] {
+				restricted[k][pk] = true
+			}
+		}
+	}
+	members := make(map[nostr.Kind]map[string]bool)
+	for k, set := range restricted {
+		if openKinds[k] {
+			continue
+		}
+		members[k] = set
+	}
+	return communityMembership{Owner: owner, Members: members}
+}

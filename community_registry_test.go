@@ -49,3 +49,47 @@ func TestParseCommunitySections(t *testing.T) {
 		t.Fatalf("chat section must ignore form ref, got list=%+v", secs[2].List)
 	}
 }
+
+func TestMembershipAllows(t *testing.T) {
+	m := communityMembership{Owner: "owner1", Members: map[nostr.Kind]map[string]bool{30023: {"alice": true}}}
+	if !m.allows("owner1", 30023) {
+		t.Fatal("owner always a member")
+	}
+	if !m.allows("alice", 30023) {
+		t.Fatal("listed member allowed")
+	}
+	if m.allows("mallory", 30023) {
+		t.Fatal("unlisted on restricted kind denied")
+	}
+	if !m.allows("mallory", 31923) {
+		t.Fatal("unrestricted kind open to anyone")
+	}
+}
+
+func TestBuildMembershipOpenWins(t *testing.T) {
+	sections := []communitySection{
+		{Kinds: []nostr.Kind{30023}, List: &listCoord{Pubkey: "owner1", DTag: "a"}},
+		{Kinds: []nostr.Kind{30023}}, // open section, same kind
+		{Kinds: []nostr.Kind{31923}, List: &listCoord{Pubkey: "owner1", DTag: "cal"}},
+	}
+	lists := map[string]map[string]bool{"owner1:a": {"alice": true}, "owner1:cal": {"bob": true}}
+	m := buildMembership("owner1", sections, lists)
+	if _, restricted := m.Members[30023]; restricted {
+		t.Fatal("open covering section ⇒ open wins for 30023")
+	}
+	if !m.Members[31923]["bob"] || m.Members[31923]["x"] {
+		t.Fatalf("31923 restricted to its list, got %+v", m.Members[31923])
+	}
+}
+
+func TestBuildMembershipUnreachableListOwnerOnly(t *testing.T) {
+	sections := []communitySection{{Kinds: []nostr.Kind{30023}, List: &listCoord{Pubkey: "owner1", DTag: "missing"}}}
+	m := buildMembership("owner1", sections, map[string]map[string]bool{}) // list fetch failed
+	set, restricted := m.Members[30023]
+	if !restricted || len(set) != 0 {
+		t.Fatalf("unreachable list ⇒ restricted owner-only, got restricted=%v set=%+v", restricted, set)
+	}
+	if !m.allows("owner1", 30023) || m.allows("alice", 30023) {
+		t.Fatal("owner-only restriction misbehaves")
+	}
+}
