@@ -652,14 +652,17 @@ func main() {
 		stamper = &CommunityStamper{
 			isMember: communityReg.IsMember,
 			sharesFor: func(coord string) []nostr.Event {
-				var out []nostr.Event
-				// refA is a filterable facet on the shares collection; QueryEvents
-				// honors tag filters via #a-style TagMap.
-				for ev := range tsDB5.QueryEvents(nostr.Filter{
-					Kinds: []nostr.Kind{16, 30222},
-					Tags:  nostr.TagMap{"a": []string{coord}},
-				}, 10_000) {
-					out = append(out, ev)
+				// refA is the filterable facet that records each share's referenced
+				// content coord. The nostr `#a` tag filter maps to `nostr_a`, which
+				// the share projection (nostrToShare) does NOT populate — it writes
+				// refA — so query the facet directly via a raw filter expression.
+				// Limit is 250: Typesense's hard per_page max (a larger value 422s
+				// inside the 200-OK multi_search envelope, silently yielding zero
+				// hits). One content coord realistically never has more shares.
+				out, err := tsDB5.SearchResourcesWithLimitAndFilter("", 250, fmt.Sprintf("refA:=`%s`", coord))
+				if err != nil {
+					fmt.Printf("community stamp: sharesFor %s: %v\n", coord, err)
+					return nil
 				}
 				return out
 			},
