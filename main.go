@@ -731,6 +731,15 @@ func main() {
 				if communities == nil {
 					communities = []string{}
 				}
+				// AMB (30142) writes through the async tsBuf; a direct PATCH would race
+				// its batched flush (which re-projects community from own h-tags only),
+				// clobbering the stamp. Route through the buffer so the patch serializes
+				// after the flush — the same idiom as setcontent's QueueContent. The
+				// other content kinds use synchronous stores, so a direct PATCH is safe.
+				if kind == 30142 {
+					tsBuf.QueueCommunityPatch(docID, communities)
+					return nil
+				}
 				return patchDoc(be.Host, be.ApiKey, be.CollectionName, docID, map[string]any{"community": communities})
 			},
 			stampKinds: stampKinds,

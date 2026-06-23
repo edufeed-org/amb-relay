@@ -9,13 +9,25 @@ import (
 	"fiatjaf.com/nostr/eventstore/typesense30142"
 )
 
-// projectionTask is one unit of work. Content==nil → event-only metadata
-// projection (batched). Content!=nil → flush the batch (including this
-// event) then patch the content. The flush-before-patch property is what
-// eliminates the setcontent dual-writer race against the live indexer.
+// stampPatch is a community-field-only PATCH routed through the buffer so it
+// serializes AFTER any pending upsert of the same doc — preserving the
+// single-writer invariant and never being clobbered by a later flush.
+type stampPatch struct {
+	DocID       string
+	Communities []string
+}
+
+// projectionTask is one unit of work:
+//   - Stamp != nil → flush the pending batch then apply a community-field PATCH.
+//   - Content != nil → flush the batch (including this event) then patch content.
+//   - Neither set → event-only metadata projection (batched).
+//
+// The flush-before-patch property (for both Content and Stamp tasks) is what
+// eliminates the dual-writer race against the live indexer / buffer flushes.
 type projectionTask struct {
 	Event   nostr.Event
 	Content *ContentEntry
+	Stamp   *stampPatch
 }
 
 // projectorWriter is the buffer's interface to Typesense. Production wires
@@ -23,6 +35,7 @@ type projectionTask struct {
 type projectorWriter interface {
 	Upsert(events []nostr.Event) (indexed int, errs []error)
 	Patch(event nostr.Event, content ContentEntry) error
+	PatchCommunity(docID string, communities []string) error
 }
 
 // TSWriteBuffer queues projection tasks and serializes them through a
@@ -70,6 +83,14 @@ func (b *TSWriteBuffer) QueueContent(event nostr.Event, content ContentEntry) {
 	b.ch <- projectionTask{Event: event, Content: &content}
 }
 
+// QueueCommunityPatch enqueues a community-field-only PATCH. The buffer
+// flushes the pending batch (so any in-flight upsert of this doc lands
+// first) before applying the patch — the same flush-before-patch guarantee
+// as QueueContent, keeping the buffer the single Typesense writer.
+func (b *TSWriteBuffer) QueueCommunityPatch(docID string, communities []string) {
+	b.ch <- projectionTask{Stamp: &stampPatch{DocID: docID, Communities: communities}}
+}
+
 // Close drains the queue and waits for the worker to finish.
 func (b *TSWriteBuffer) Close() {
 	close(b.done)
@@ -113,16 +134,24 @@ func (b *TSWriteBuffer) run() {
 	// Closed b.ch must be passed to it; caller is responsible for that.
 	drain := func() {
 		for task := range b.ch {
-			if task.Content == nil {
-				batch = append(batch, task.Event)
-				if len(batch) >= b.batchSize {
-					drainFlush()
+			switch {
+			case task.Stamp != nil:
+				// Community-patch task: flush pending upserts first so any
+				// in-flight upsert of this doc lands before the PATCH.
+				drainFlush()
+				if err := b.writer.PatchCommunity(task.Stamp.DocID, task.Stamp.Communities); err != nil {
+					log.Printf("ts-buffer: shutdown community patch %s: %v", task.Stamp.DocID, err)
 				}
-			} else {
+			case task.Content != nil:
 				batch = append(batch, task.Event)
 				drainFlush()
 				if err := b.writer.Patch(task.Event, *task.Content); err != nil {
 					log.Printf("ts-buffer: shutdown patch %s: %v", task.Event.ID.Hex(), err)
+				}
+			default:
+				batch = append(batch, task.Event)
+				if len(batch) >= b.batchSize {
+					drainFlush()
 				}
 			}
 		}
@@ -146,17 +175,25 @@ func (b *TSWriteBuffer) run() {
 				flushBatch()
 				return
 			}
-			if task.Content == nil {
-				batch = append(batch, task.Event)
-				if len(batch) >= b.batchSize {
-					flushBatch()
+			switch {
+			case task.Stamp != nil:
+				// Community-patch task: flush pending upserts first so any
+				// in-flight upsert of this doc lands before the PATCH.
+				flushBatch()
+				if err := b.writer.PatchCommunity(task.Stamp.DocID, task.Stamp.Communities); err != nil {
+					log.Printf("ts-buffer: community patch %s: %v", task.Stamp.DocID, err)
 				}
-			} else {
+			case task.Content != nil:
 				// Content task: ensure event is upserted before patching.
 				batch = append(batch, task.Event)
 				flushBatch()
 				if err := b.writer.Patch(task.Event, *task.Content); err != nil {
 					log.Printf("ts-buffer: patch %s: %v", task.Event.ID.Hex(), err)
+				}
+			default:
+				batch = append(batch, task.Event)
+				if len(batch) >= b.batchSize {
+					flushBatch()
 				}
 			}
 
@@ -241,6 +278,13 @@ func (p *productionWriter) Patch(event nostr.Event, content ContentEntry) error 
 		return err
 	}
 	return PatchContent(p.host, p.apiKey, p.colName, docID, content)
+}
+
+func (p *productionWriter) PatchCommunity(docID string, communities []string) error {
+	if communities == nil {
+		communities = []string{}
+	}
+	return patchDoc(p.host, p.apiKey, p.colName, docID, map[string]any{"community": communities})
 }
 
 // NewTSWriteBuffer is the production constructor used by main.go.

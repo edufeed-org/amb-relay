@@ -9,18 +9,24 @@ import (
 	"fiatjaf.com/nostr"
 )
 
-// fakeWriter records Upsert and Patch calls in arrival order.
+// fakeWriter records Upsert, Patch, and PatchCommunity calls in arrival order.
 type fakeWriter struct {
-	mu            sync.Mutex
-	upsertBatches [][]nostr.ID // ids per Upsert call, in arrival order
-	patches       []patchCall
-	upsertErr     []error
-	patchErr      error
+	mu               sync.Mutex
+	upsertBatches    [][]nostr.ID // ids per Upsert call, in arrival order
+	patches          []patchCall
+	communityPatches []communityPatchCall
+	upsertErr        []error
+	patchErr         error
 }
 
 type patchCall struct {
 	EventID string
 	Content ContentEntry
+}
+
+type communityPatchCall struct {
+	DocID       string
+	Communities []string
 }
 
 func (f *fakeWriter) Upsert(events []nostr.Event) (int, []error) {
@@ -45,6 +51,13 @@ func (f *fakeWriter) Patch(event nostr.Event, content ContentEntry) error {
 	defer f.mu.Unlock()
 	f.patches = append(f.patches, patchCall{EventID: event.ID.Hex(), Content: content})
 	return f.patchErr
+}
+
+func (f *fakeWriter) PatchCommunity(docID string, communities []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.communityPatches = append(f.communityPatches, communityPatchCall{DocID: docID, Communities: communities})
+	return nil
 }
 
 func mkEvent(t *testing.T, sk nostr.SecretKey, d string, ts int64) nostr.Event {
@@ -203,6 +216,80 @@ func TestTSWriteBuffer_DrainsOnClose(t *testing.T) {
 	}
 	if total != 5 {
 		t.Errorf("drained %d events on close, want 5", total)
+	}
+}
+
+// TestTSWriteBuffer_CommunityPatchForcesFlushThenPatch verifies that
+// QueueCommunityPatch flushes any pending event upserts BEFORE applying the
+// community PATCH — the same flush-before-patch ordering guarantee as
+// QueueContent. This locks in the fix for C1: AMB community stamps routed
+// through the buffer so they never race the batched flush.
+func TestTSWriteBuffer_CommunityPatchForcesFlushThenPatch(t *testing.T) {
+	w := &fakeWriter{}
+	buf := newProjectorBuffer(w, 100, 1*time.Hour) // very long tick → only forced flushes
+	defer buf.Close()
+
+	sk := nostr.Generate()
+	e1 := mkEvent(t, sk, "cp-1", 1_700_002_001)
+	e2 := mkEvent(t, sk, "cp-2", 1_700_002_002)
+	e3 := mkEvent(t, sk, "cp-3", 1_700_002_003)
+
+	buf.Queue(e1)
+	buf.Queue(e2)
+	buf.Queue(e3)
+	// Community patch: must flush e1+e2+e3 first, then call PatchCommunity.
+	const testDocID = "test-doc-id-community"
+	wantCommunities := []string{"C1", "C2"}
+	buf.QueueCommunityPatch(testDocID, wantCommunities)
+
+	waitFor(t, 2*time.Second, func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return len(w.communityPatches) >= 1
+	})
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// (a) events were upserted
+	total := 0
+	for _, b := range w.upsertBatches {
+		total += len(b)
+	}
+	if total != 3 {
+		t.Errorf("upserted %d events before community patch, want 3", total)
+	}
+
+	// (b) community patch recorded with right docID + communities
+	if len(w.communityPatches) != 1 {
+		t.Fatalf("got %d community patches, want 1", len(w.communityPatches))
+	}
+	cp := w.communityPatches[0]
+	if cp.DocID != testDocID {
+		t.Errorf("community patch docID = %q, want %q", cp.DocID, testDocID)
+	}
+	if len(cp.Communities) != 2 || cp.Communities[0] != "C1" || cp.Communities[1] != "C2" {
+		t.Errorf("community patch communities = %v, want %v", cp.Communities, wantCommunities)
+	}
+
+	// (c) upsert happened before community patch (ordering): all three events
+	// must appear in upsertBatches (single-goroutine guarantee: if they're
+	// there, they were written before the patch call in the same goroutine).
+	sawE1, sawE2, sawE3 := false, false, false
+	for _, b := range w.upsertBatches {
+		for _, id := range b {
+			switch id {
+			case e1.ID:
+				sawE1 = true
+			case e2.ID:
+				sawE2 = true
+			case e3.ID:
+				sawE3 = true
+			}
+		}
+	}
+	if !sawE1 || !sawE2 || !sawE3 {
+		t.Errorf("flush incomplete before community patch: e1=%v e2=%v e3=%v", sawE1, sawE2, sawE3)
 	}
 }
 

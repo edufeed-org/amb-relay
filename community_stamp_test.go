@@ -112,7 +112,8 @@ func newTestStamper() (*CommunityStamper, *[]stampPatchCall) {
 			patches = append(patches, stampPatchCall{kind, docID, communities})
 			return nil
 		},
-		stopCh: make(chan struct{}),
+		stampKinds: map[nostr.Kind]bool{30142: true, 30023: true, 30818: true, 31922: true, 31923: true},
+		stopCh:     make(chan struct{}),
 	}
 	return s, &patches
 }
@@ -219,6 +220,31 @@ func TestReconcileFetchesAbsentThenStampsAndStores(t *testing.T) {
 	s.reconcile(coord, 30023, owner, "d9")
 	if !fetched || !stored || len(*patches) != 1 {
 		t.Fatalf("absent path: fetched=%v stored=%v patches=%d", fetched, stored, len(*patches))
+	}
+}
+
+// TestReconcileGuardSkipsUnstampableKind locks in Finding I1: reconcile must
+// return immediately when the referenced kind is not in stampKinds, without
+// calling fetch or patch.
+func TestReconcileGuardSkipsUnstampableKind(t *testing.T) {
+	s, patches := newTestStamper()
+	// Override stampKinds so only 30023 is stampable; 9999 is not.
+	s.stampKinds = map[nostr.Kind]bool{30023: true}
+	var fetched bool
+	s.fetch = func(shareRef, []string) (nostr.Event, bool) {
+		fetched = true
+		return nostr.Event{}, true
+	}
+	s.sharesFor = func(string) []nostr.Event {
+		return []nostr.Event{mkShare("alice", "9999:p:d", "C1")}
+	}
+	s.lookup = func(string) (nostr.Event, bool) { return nostr.Event{}, false }
+	s.reconcile("9999:p:d", 9999, "p", "d")
+	if fetched {
+		t.Error("reconcile must not fetch for an unstampable kind")
+	}
+	if len(*patches) != 0 {
+		t.Errorf("reconcile must not patch for an unstampable kind, got %d patches", len(*patches))
 	}
 }
 

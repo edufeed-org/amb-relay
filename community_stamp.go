@@ -135,6 +135,9 @@ func contentCoord(event nostr.Event) (coord string, kind nostr.Kind, pubkey, dTa
 // Absent content with at least one desired community is fetched, validated, and
 // stored first-class before stamping. A fetch miss is left for the next sweep.
 func (s *CommunityStamper) reconcile(coord string, kind nostr.Kind, pubkey, dTag string) {
+	if !s.isStampKind(kind) {
+		return
+	}
 	var refs []shareRef
 	for _, ev := range s.sharesFor(coord) {
 		if ref, ok := shareToRef(ev); ok {
