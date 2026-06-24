@@ -200,3 +200,18 @@ func (p *ProfileManager) StartRefreshLoop(interval time.Duration) {
 }
 
 func (p *ProfileManager) Stop() { close(p.stopCh) }
+
+// enqueueShareCommunities enqueues the kind-0 fetch for every community a share
+// (kind 16/30222) targets, so a brand-new community's name resolves on the next
+// drain instead of waiting for the periodic backfill. nil-safe: a no-op when
+// profiles are disabled.
+func enqueueShareCommunities(pm *ProfileManager, event nostr.Event) {
+	if pm == nil {
+		return
+	}
+	for _, hexpk := range shareCommunities(&event) {
+		if pk, err := nostr.PubKeyFromHex(hexpk); err == nil {
+			pm.Enqueue(pk)
+		}
+	}
+}

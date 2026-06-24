@@ -157,6 +157,29 @@ func TestBackfillProfileCandidatesUnionsCommunities(t *testing.T) {
 	}
 }
 
+func TestEnqueueShareCommunities(t *testing.T) {
+	communityPk := nostr.Generate().Public()
+	share := nostr.Event{
+		Kind:      16,
+		PubKey:    nostr.Generate().Public(),
+		CreatedAt: 1700000000,
+		Tags:      nostr.Tags{{"h", communityPk.Hex()}, {"e", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}},
+	}
+
+	q := newFakeQueue()
+	mgr := NewProfileManager(q, fakeSource{}, func(nostr.Event) {}, func() []nostr.PubKey { return nil }, []string{"wss://x"}, 50)
+
+	enqueueShareCommunities(mgr, share)
+
+	queued, _ := q.ListProfileQueue()
+	if len(queued) != 1 || queued[0] != communityPk.Hex() {
+		t.Fatalf("queue = %v, want [%s]", queued, communityPk.Hex())
+	}
+
+	// nil ProfileManager must be a safe no-op (profiles disabled).
+	enqueueShareCommunities(nil, share)
+}
+
 func TestBackfillAuthorsDistinct(t *testing.T) {
 	skA, skB := nostr.Generate(), nostr.Generate()
 	pkA, pkB := skA.Public(), skB.Public()

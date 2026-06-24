@@ -836,6 +836,7 @@ func main() {
 		if stamper != nil {
 			switch event.Kind {
 			case 16, 30222:
+				enqueueShareCommunities(profileMgr, event)
 				go stamper.reconcileShare(event)
 			default:
 				if stamper.isStampKind(event.Kind) {
@@ -856,6 +857,7 @@ func main() {
 		if stamper != nil {
 			switch event.Kind {
 			case 16, 30222:
+				enqueueShareCommunities(profileMgr, event)
 				go stamper.reconcileShare(event)
 			default:
 				if stamper.isStampKind(event.Kind) {
