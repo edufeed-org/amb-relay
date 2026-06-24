@@ -11,11 +11,15 @@ import (
 )
 
 const (
-	// profileDrainTimeout bounds an entire drain pass. It is generous because the
-	// queue can hold many authors and each individual relay fetch is separately
-	// bounded by profileFetchTimeout — so a large backlog drains over several
-	// minutes rather than being truncated mid-queue.
-	profileDrainTimeout = 5 * time.Minute
+	// profileDrainTimeout bounds an entire drain pass. It must be large enough to
+	// walk the WHOLE queue in one pass: the queue is processed in pubkey-sorted
+	// order, so a budget that truncates mid-queue permanently starves the tail
+	// (unresolved authors at the front stay queued and are re-fetched every pass,
+	// so the window never advances past them). With thousands of queued authors in
+	// batches of batchSize, each batch costing up to two profileFetchTimeout-bounded
+	// fetches (primary then fallback), a generous budget keeps one pass covering the
+	// full backlog.
+	profileDrainTimeout = 20 * time.Minute
 	// profileFetchTimeout bounds a single relay-set fetch. A replaceable fetch
 	// waits for EOSE from every relay (or the deadline), so without this one
 	// slow/unresponsive relay — common with public profile aggregators — would
