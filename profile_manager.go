@@ -95,27 +95,29 @@ func backfillProfileCandidates(q eventQuerier, contentKinds, communityKinds []no
 // fetching kind-0 from PROFILE_RELAYS, and periodically re-enqueue known
 // authors so renamed profiles stay fresh. Modeled on AllowlistManager.
 type ProfileManager struct {
-	queue     profileQueue
-	src       profileSource
-	store     func(nostr.Event)
-	backfill  func() []nostr.PubKey
-	relays    []string
-	batchSize int
-	stopCh    chan struct{}
+	queue          profileQueue
+	src            profileSource
+	store          func(nostr.Event)
+	backfill       func() []nostr.PubKey
+	relays         []string
+	fallbackRelays []string
+	batchSize      int
+	stopCh         chan struct{}
 }
 
-func NewProfileManager(q profileQueue, src profileSource, store func(nostr.Event), backfill func() []nostr.PubKey, relays []string, batchSize int) *ProfileManager {
+func NewProfileManager(q profileQueue, src profileSource, store func(nostr.Event), backfill func() []nostr.PubKey, relays, fallbackRelays []string, batchSize int) *ProfileManager {
 	if batchSize <= 0 {
 		batchSize = 50
 	}
 	return &ProfileManager{
-		queue:     q,
-		src:       src,
-		store:     store,
-		backfill:  backfill,
-		relays:    relays,
-		batchSize: batchSize,
-		stopCh:    make(chan struct{}),
+		queue:          q,
+		src:            src,
+		store:          store,
+		backfill:       backfill,
+		relays:         relays,
+		fallbackRelays: fallbackRelays,
+		batchSize:      batchSize,
+		stopCh:         make(chan struct{}),
 	}
 }
 
@@ -129,7 +131,10 @@ func (p *ProfileManager) Enqueue(pk nostr.PubKey) {
 
 // drainOnce fetches kind-0 for every queued pubkey in batches. A pubkey whose
 // kind-0 is fetched+parsed is stored and removed; one with no returned event
-// stays queued for the next drain. Invalid hex is dropped.
+// stays queued for the next drain. Invalid hex is dropped. Pubkeys still
+// unresolved after PROFILE_RELAYS are retried against PROFILE_FALLBACK_RELAYS,
+// so a profile that lives only on a non-standard relay (e.g. relay.damus.io)
+// is still indexed.
 func (p *ProfileManager) drainOnce(ctx context.Context) {
 	queued, err := p.queue.ListProfileQueue()
 	if err != nil {
@@ -153,14 +158,33 @@ func (p *ProfileManager) drainOnce(ctx context.Context) {
 		if len(authors) == 0 {
 			continue
 		}
-		for _, ev := range p.src.Fetch(ctx, p.relays, authors) {
-			if _, err := sdk.ParseMetadata(ev); err != nil {
-				continue // leave queued; don't store a malformed profile
-			}
-			p.store(ev)
-			_ = p.queue.RemoveProfileCandidate(ev.PubKey.Hex())
+		remaining := p.fetchStore(ctx, p.relays, authors)
+		if len(remaining) > 0 && len(p.fallbackRelays) > 0 {
+			p.fetchStore(ctx, p.fallbackRelays, remaining)
 		}
 	}
+}
+
+// fetchStore fetches kind-0 for authors from relays; each successfully parsed
+// profile is stored and dequeued. It returns the authors that yielded no
+// stored profile, so the caller can escalate them to fallback relays.
+func (p *ProfileManager) fetchStore(ctx context.Context, relays []string, authors []nostr.PubKey) []nostr.PubKey {
+	stored := make(map[nostr.PubKey]bool, len(authors))
+	for _, ev := range p.src.Fetch(ctx, relays, authors) {
+		if _, err := sdk.ParseMetadata(ev); err != nil {
+			continue // leave queued; don't store a malformed profile
+		}
+		p.store(ev)
+		_ = p.queue.RemoveProfileCandidate(ev.PubKey.Hex())
+		stored[ev.PubKey] = true
+	}
+	var remaining []nostr.PubKey
+	for _, pk := range authors {
+		if !stored[pk] {
+			remaining = append(remaining, pk)
+		}
+	}
+	return remaining
 }
 
 // Init seeds the queue from a backfill scan, then drains in the background so

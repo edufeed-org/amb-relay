@@ -568,6 +568,15 @@ func main() {
 				}
 			}
 		}
+		fallbackRelays := []string{"wss://purplepag.es", "wss://relay.damus.io", "wss://relay.nostr.band"}
+		if raw, ok := os.LookupEnv("PROFILE_FALLBACK_RELAYS"); ok {
+			fallbackRelays = nil
+			for _, r := range strings.Split(raw, ",") {
+				if r = strings.TrimSpace(r); r != "" {
+					fallbackRelays = append(fallbackRelays, r)
+				}
+			}
+		}
 		refreshInterval := 6 * time.Hour
 		if raw := os.Getenv("PROFILE_REFRESH_INTERVAL"); raw != "" {
 			if d, err := time.ParseDuration(raw); err == nil {
@@ -584,6 +593,7 @@ func main() {
 				return backfillProfileCandidates(&boltDB, profileContentKinds, communityKinds, 1_000_000)
 			},
 			profileRelays,
+			fallbackRelays,
 			50,
 		)
 		if err := profileMgr.Init(); err != nil {
@@ -591,7 +601,7 @@ func main() {
 		}
 		profileMgr.StartRefreshLoop(refreshInterval)
 		defer profileMgr.Stop()
-		fmt.Printf("Profiles: fetching from %v, refresh every %s\n", profileRelays, refreshInterval)
+		fmt.Printf("Profiles: fetching from %v (fallback %v), refresh every %s\n", profileRelays, fallbackRelays, refreshInterval)
 	}
 
 	var communityRelays []string

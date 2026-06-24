@@ -83,7 +83,7 @@ Embedding runs in-stack as the `embed` service (`./embed`) — a small FastAPI c
 
 **Profiles (kind-0 author index), gated behind `PROFILES_ENABLED`:**
 - When `PROFILES_ENABLED=true`, the relay indexes the kind-0 profiles of authors who publish content here, so clients can resolve org/person names to pubkeys (e.g. for calendar `authors` filters). Served via NIP-50 `search` over `kinds:[0]`.
-- Client kind-0 writes are **rejected** (`validate` returns "kind not accepted"); the index is populated only by the internal `ProfileManager` (`profile_manager.go`), which fetches kind-0 from `PROFILE_RELAYS` for every content author (enqueued on write into a durable BoltDB `profile_queue` bucket, plus a startup backfill scan and a `PROFILE_REFRESH_INTERVAL` refresh).
+- Client kind-0 writes are **rejected** (`validate` returns "kind not accepted"); the index is populated only by the internal `ProfileManager` (`profile_manager.go`), which fetches kind-0 from `PROFILE_RELAYS` for every content author (enqueued on write into a durable BoltDB `profile_queue` bucket, plus a startup backfill scan and a `PROFILE_REFRESH_INTERVAL` refresh). Authors whose kind-0 is not found on `PROFILE_RELAYS` are retried against `PROFILE_FALLBACK_RELAYS` within the same drain, so a profile that lives only on a non-standard relay (e.g. relay.damus.io) is still indexed.
 - kind-0 is registered as a read-only `contentType` (`fetch: profilesDB.QueryEvents`) in a SEPARATE Typesense collection (`profiles_0` / `TS_COLLECTION_PROFILES`); `profilesDB.RawEventStore` is nil, so events are reconstructed from the stored `eventRaw`. Profiles are NOT part of the BoltDB→Typesense reindex.
 
 **Community shares (NIP-18 kind-16 reposts + legacy kind-30222 targeted publications), gated behind `COMMUNITY_SHARES_ENABLED`:**
@@ -189,6 +189,7 @@ Required in `.env` (copy from `.env.example`):
 - `PROFILES_ENABLED`: Set to `true` to index kind-0 profiles of content authors and serve them via NIP-50 `search` over `kinds:[0]` (default `false`).
 - `TS_COLLECTION_PROFILES`: Collection name for kind-0 profiles (default `profiles_0`).
 - `PROFILE_RELAYS`: Comma-separated source relays the fetcher pulls kind-0 from (default `wss://relay.edufeed.org`).
+- `PROFILE_FALLBACK_RELAYS`: Comma-separated fallback relays queried only for authors whose kind-0 was not found on `PROFILE_RELAYS` (default `wss://purplepag.es,wss://relay.damus.io,wss://relay.nostr.band`). Set to empty to disable. Lets profiles that live only on a non-standard relay still be indexed.
 - `PROFILE_REFRESH_INTERVAL`: How often to re-fetch known authors' kind-0, as a Go duration (default `6h`).
 - `COMMUNITY_SHARES_ENABLED`: Set to `true` to accept community-share events (NIP-18 kind-16 reposts + legacy kind-30222 targeted publications) and enable their Typesense collection (default `false`).
 - `TS_COLLECTION_SHARES`: Collection name for community share events (default `community_shares`).

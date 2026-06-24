@@ -43,6 +43,25 @@ func (f fakeSource) Fetch(_ context.Context, _ []string, pubkeys []nostr.PubKey)
 	return out
 }
 
+// relayAwareSource returns a pubkey's event only when one of the queried relays
+// is listed for it, so a test can model a profile that lives only on a fallback
+// relay.
+type relayAwareSource struct {
+	byRelay map[string]map[nostr.PubKey]nostr.Event
+}
+
+func (f relayAwareSource) Fetch(_ context.Context, relays []string, pubkeys []nostr.PubKey) []nostr.Event {
+	var out []nostr.Event
+	for _, r := range relays {
+		for _, pk := range pubkeys {
+			if ev, ok := f.byRelay[r][pk]; ok {
+				out = append(out, ev)
+			}
+		}
+	}
+	return out
+}
+
 type sliceQuerier struct{ events []nostr.Event }
 
 func (s sliceQuerier) QueryEvents(_ nostr.Filter, _ int) iter.Seq[nostr.Event] {
@@ -75,7 +94,7 @@ func TestDrainStoresFoundLeavesMissingQueued(t *testing.T) {
 
 	var stored []nostr.Event
 	src := fakeSource{byPubkey: map[nostr.PubKey]nostr.Event{pkA: evA}} // B absent
-	mgr := NewProfileManager(q, src, func(e nostr.Event) { stored = append(stored, e) }, func() []nostr.PubKey { return nil }, []string{"wss://x"}, 50)
+	mgr := NewProfileManager(q, src, func(e nostr.Event) { stored = append(stored, e) }, func() []nostr.PubKey { return nil }, []string{"wss://x"}, nil, 50)
 
 	mgr.drainOnce(context.Background())
 
@@ -88,13 +107,47 @@ func TestDrainStoresFoundLeavesMissingQueued(t *testing.T) {
 	}
 }
 
+func TestDrainFallbackResolvesMissing(t *testing.T) {
+	skA, skB := nostr.Generate(), nostr.Generate()
+	pkA, pkB := skA.Public(), skB.Public()
+	evA := mkKind0For(t, skA, "A") // on the primary relay
+	evB := mkKind0For(t, skB, "B") // only on the fallback relay
+
+	q := newFakeQueue()
+	q.EnqueueProfileCandidate(pkA.Hex())
+	q.EnqueueProfileCandidate(pkB.Hex())
+
+	src := relayAwareSource{byRelay: map[string]map[nostr.PubKey]nostr.Event{
+		"wss://primary":  {pkA: evA},
+		"wss://fallback": {pkB: evB},
+	}}
+	var stored []nostr.Event
+	mgr := NewProfileManager(q, src, func(e nostr.Event) { stored = append(stored, e) }, func() []nostr.PubKey { return nil }, []string{"wss://primary"}, []string{"wss://fallback"}, 50)
+
+	mgr.drainOnce(context.Background())
+
+	if len(stored) != 2 {
+		t.Fatalf("stored = %d events, want 2 (A from primary, B from fallback)", len(stored))
+	}
+	got := map[nostr.PubKey]bool{}
+	for _, e := range stored {
+		got[e.PubKey] = true
+	}
+	if !got[pkA] || !got[pkB] {
+		t.Fatalf("stored pubkeys = %v, want both A and B", got)
+	}
+	if left, _ := q.ListProfileQueue(); len(left) != 0 {
+		t.Fatalf("queue = %v, want empty (both resolved)", left)
+	}
+}
+
 func TestDrainDropsInvalidPubkey(t *testing.T) {
 	q := newFakeQueue()
 	q.EnqueueProfileCandidate("not-a-valid-hex-pubkey")
 
 	var stored []nostr.Event
 	src := fakeSource{byPubkey: map[nostr.PubKey]nostr.Event{}}
-	mgr := NewProfileManager(q, src, func(e nostr.Event) { stored = append(stored, e) }, func() []nostr.PubKey { return nil }, nil, 50)
+	mgr := NewProfileManager(q, src, func(e nostr.Event) { stored = append(stored, e) }, func() []nostr.PubKey { return nil }, nil, nil, 50)
 
 	mgr.drainOnce(context.Background())
 
@@ -108,7 +161,7 @@ func TestDrainDropsInvalidPubkey(t *testing.T) {
 
 func TestEnqueueDelegatesToQueue(t *testing.T) {
 	q := newFakeQueue()
-	mgr := NewProfileManager(q, fakeSource{}, func(nostr.Event) {}, func() []nostr.PubKey { return nil }, nil, 50)
+	mgr := NewProfileManager(q, fakeSource{}, func(nostr.Event) {}, func() []nostr.PubKey { return nil }, nil, nil, 50)
 	pk := nostr.Generate().Public()
 	mgr.Enqueue(pk)
 	mgr.Enqueue(pk) // dedup
@@ -167,7 +220,7 @@ func TestEnqueueShareCommunities(t *testing.T) {
 	}
 
 	q := newFakeQueue()
-	mgr := NewProfileManager(q, fakeSource{}, func(nostr.Event) {}, func() []nostr.PubKey { return nil }, []string{"wss://x"}, 50)
+	mgr := NewProfileManager(q, fakeSource{}, func(nostr.Event) {}, func() []nostr.PubKey { return nil }, []string{"wss://x"}, nil, 50)
 
 	enqueueShareCommunities(mgr, share)
 
