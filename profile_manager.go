@@ -10,9 +10,18 @@ import (
 	"fiatjaf.com/nostr/sdk"
 )
 
-// profileDrainTimeout bounds a single drain's network fetch, matching the
-// AllowlistManager refresh timeout.
-const profileDrainTimeout = 30 * time.Second
+const (
+	// profileDrainTimeout bounds an entire drain pass. It is generous because the
+	// queue can hold many authors and each individual relay fetch is separately
+	// bounded by profileFetchTimeout — so a large backlog drains over several
+	// minutes rather than being truncated mid-queue.
+	profileDrainTimeout = 5 * time.Minute
+	// profileFetchTimeout bounds a single relay-set fetch. A replaceable fetch
+	// waits for EOSE from every relay (or the deadline), so without this one
+	// slow/unresponsive relay — common with public profile aggregators — would
+	// starve the rest of the drain by consuming the whole drain budget.
+	profileFetchTimeout = 15 * time.Second
+)
 
 // profileQueue is the durable candidate queue ProfileManager drains.
 // *ManagementStore satisfies it.
@@ -141,6 +150,10 @@ func (p *ProfileManager) drainOnce(ctx context.Context) {
 		fmt.Printf("profile: list queue: %v\n", err)
 		return
 	}
+	if len(queued) == 0 {
+		return
+	}
+	var viaPrimary, viaFallback int
 	for start := 0; start < len(queued); start += p.batchSize {
 		end := start + p.batchSize
 		if end > len(queued) {
@@ -159,18 +172,28 @@ func (p *ProfileManager) drainOnce(ctx context.Context) {
 			continue
 		}
 		remaining := p.fetchStore(ctx, p.relays, authors)
+		viaPrimary += len(authors) - len(remaining)
 		if len(remaining) > 0 && len(p.fallbackRelays) > 0 {
-			p.fetchStore(ctx, p.fallbackRelays, remaining)
+			stillMissing := p.fetchStore(ctx, p.fallbackRelays, remaining)
+			viaFallback += len(remaining) - len(stillMissing)
+		}
+		if ctx.Err() != nil {
+			break // drain budget exhausted; the rest stays queued for next pass
 		}
 	}
+	fmt.Printf("profile: drain resolved %d of %d queued (%d primary, %d fallback)\n",
+		viaPrimary+viaFallback, len(queued), viaPrimary, viaFallback)
 }
 
 // fetchStore fetches kind-0 for authors from relays; each successfully parsed
 // profile is stored and dequeued. It returns the authors that yielded no
-// stored profile, so the caller can escalate them to fallback relays.
+// stored profile, so the caller can escalate them to fallback relays. The fetch
+// is bounded by profileFetchTimeout so one slow relay cannot starve the drain.
 func (p *ProfileManager) fetchStore(ctx context.Context, relays []string, authors []nostr.PubKey) []nostr.PubKey {
+	fctx, cancel := context.WithTimeout(ctx, profileFetchTimeout)
+	defer cancel()
 	stored := make(map[nostr.PubKey]bool, len(authors))
-	for _, ev := range p.src.Fetch(ctx, relays, authors) {
+	for _, ev := range p.src.Fetch(fctx, relays, authors) {
 		if _, err := sdk.ParseMetadata(ev); err != nil {
 			continue // leave queued; don't store a malformed profile
 		}
