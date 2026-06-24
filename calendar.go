@@ -93,16 +93,25 @@ func storeCalendar(enabled bool, ts *typesense30142.TSBackend, event nostr.Event
 	storeStructured(enabled, ts, event, "calendar", nostrToCalendar)
 }
 
-// calendarFetch routes a calendar query: range/geo params over the event kinds
-// (31922/31923) go to the Bolt index (boltFetch); everything else — full-text
-// search, plain kind listing, 31924/31925 — goes to Typesense (tsFetch). When
-// both range params and a search term are present, the Bolt path wins and the
-// search term is ignored for that REQ (documented precedence; combined intent
-// is composed client-side by the future MCP server).
+// calendarFetch routes a calendar query between the Bolt index (boltFetch) and
+// Typesense (tsFetch) over the event kinds (31922/31923):
+//
+//   - range/geo params, no search term      -> Bolt (time/geohash-prefix index)
+//   - search term + time range, no geohash  -> Typesense (start/end are int64
+//     facets, so one query serves topic + window together)
+//   - search term + geohash                 -> Bolt (Typesense has geohash only
+//     as an exact facet, not a prefix, so geo forces the Bolt path)
+//   - everything else (plain listing, full-text search, 31924/31925) -> Typesense
+//
+// The only behaviour change versus a pure Bolt-wins-on-params rule is the
+// search+range (no geo) case, which previously dropped the search term.
 func calendarFetch(boltFetch, tsFetch fetchFunc) fetchFunc {
 	return func(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event] {
 		cf := calendar.ExtractCalendarFilter(filter)
-		if cf.HasCalendarParams() && calendar.HasCalendarKinds(filter) {
+		hasCalParams := cf.HasCalendarParams() && calendar.HasCalendarKinds(filter)
+		hasSearch := filter.Search != ""
+		hasGeo := len(cf.Geohashes) > 0
+		if hasCalParams && (!hasSearch || hasGeo) {
 			return boltFetch(filter, maxLimit)
 		}
 		return tsFetch(filter, maxLimit)

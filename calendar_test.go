@@ -239,4 +239,26 @@ func TestCalendarFetchRouter(t *testing.T) {
 	if len(ts.calls) != 3 {
 		t.Fatalf("plain query: ts=%d, want 3", len(ts.calls))
 	}
+
+	// search + range (no geo) -> Typesense: start/end are int64 facets, so one
+	// Typesense query serves the topic and the time window together.
+	collectEvents(fetch(nostr.Filter{
+		Kinds:  []nostr.Kind{31923},
+		Search: "yoga",
+		Tags:   nostr.TagMap{"start_after": []string{"1718600000"}},
+	}, 100))
+	if len(ts.calls) != 4 || len(bolt.calls) != 2 {
+		t.Fatalf("search+range query: bolt=%d ts=%d, want bolt=2 ts=4", len(bolt.calls), len(ts.calls))
+	}
+
+	// search + range + geohash -> Bolt: Typesense can't do geohash-prefix, so
+	// geo forces the Bolt path even when a search term is present.
+	collectEvents(fetch(nostr.Filter{
+		Kinds:  []nostr.Kind{31923},
+		Search: "yoga",
+		Tags:   nostr.TagMap{"start_after": []string{"1718600000"}, "g": []string{"u33d"}},
+	}, 100))
+	if len(bolt.calls) != 3 || len(ts.calls) != 4 {
+		t.Fatalf("search+range+geo query: bolt=%d ts=%d, want bolt=3 ts=4", len(bolt.calls), len(ts.calls))
+	}
 }
