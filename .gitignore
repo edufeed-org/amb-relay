@@ -10,3 +10,6 @@ amb-relay
 hydrate-bolt
 
 .claude/
+
+# git worktrees (local, ignored)
+.worktrees/
