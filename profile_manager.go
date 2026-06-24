@@ -69,6 +69,28 @@ func backfillAuthors(q eventQuerier, kinds []nostr.Kind, maxLimit int) []nostr.P
 	return out
 }
 
+// backfillProfileCandidates returns the de-duplicated union of content authors
+// and discovered community pubkeys, so the profile index covers communities
+// (named in share h/p tags, never as event authors) on the same Init+refresh
+// cadence as authors. Reuses backfillAuthors + backfillCommunities; adds no
+// fetch path.
+func backfillProfileCandidates(q eventQuerier, contentKinds, communityKinds []nostr.Kind, maxLimit int) []nostr.PubKey {
+	out := backfillAuthors(q, contentKinds, maxLimit)
+	seen := make(map[nostr.PubKey]bool, len(out))
+	for _, pk := range out {
+		seen[pk] = true
+	}
+	for _, hexpk := range backfillCommunities(q, communityKinds, maxLimit) {
+		pk, err := nostr.PubKeyFromHex(hexpk)
+		if err != nil || seen[pk] {
+			continue
+		}
+		seen[pk] = true
+		out = append(out, pk)
+	}
+	return out
+}
+
 // ProfileManager owns the kind-0 fetch loop: enqueue candidates, drain them by
 // fetching kind-0 from PROFILE_RELAYS, and periodically re-enqueue known
 // authors so renamed profiles stay fresh. Modeled on AllowlistManager.

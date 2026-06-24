@@ -474,6 +474,11 @@ func main() {
 		}
 	}
 
+	// Discovery scope for communities: share kinds + content kinds (content can
+	// carry its own h tag). Declared here so the profile backfill closure below
+	// can union communities in; reused by the community registry further down.
+	communityKinds := append([]nostr.Kind{16, 30222}, profileContentKinds...)
+
 	// Initialize embedding client if configured
 	var embedder *EmbeddingClient
 	if endpoint := os.Getenv("EMBED_ENDPOINT"); endpoint != "" {
@@ -575,7 +580,9 @@ func main() {
 			&mgmt,
 			poolSource{pool: nostr.NewPool()},
 			func(e nostr.Event) { storeProfile(profilesEnabled, profilesDB, e) },
-			func() []nostr.PubKey { return backfillAuthors(&boltDB, profileContentKinds, 1_000_000) },
+			func() []nostr.PubKey {
+				return backfillProfileCandidates(&boltDB, profileContentKinds, communityKinds, 1_000_000)
+			},
 			profileRelays,
 			50,
 		)
@@ -608,9 +615,6 @@ func main() {
 				fmt.Printf("community: bad COMMUNITY_REFRESH_INTERVAL %q, using %s\n", raw, communityRefresh)
 			}
 		}
-		// Discovery scope: share kinds + content kinds. profileContentKinds
-		// (main.go:470) already excludes kind 0 and is populated unconditionally.
-		communityKinds := append([]nostr.Kind{16, 30222}, profileContentKinds...)
 		communityReg = NewCommunityRegistry(
 			poolCommunitySource{pool: nostr.NewPool()},
 			func() []string { return backfillCommunities(&boltDB, communityKinds, 1_000_000) },

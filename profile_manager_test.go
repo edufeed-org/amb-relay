@@ -117,6 +117,46 @@ func TestEnqueueDelegatesToQueue(t *testing.T) {
 	}
 }
 
+func TestBackfillProfileCandidatesUnionsCommunities(t *testing.T) {
+	skAuthor, skCommunity := nostr.Generate(), nostr.Generate()
+	authorPk, communityPk := skAuthor.Public(), skCommunity.Public()
+
+	// A content event by authorPk, and a kind-16 share targeting communityPk via its h tag.
+	content := nostr.Event{Kind: 30142, PubKey: authorPk, CreatedAt: 1700000000}
+	share := nostr.Event{
+		Kind:      16,
+		PubKey:    nostr.Generate().Public(), // sharer, not a community
+		CreatedAt: 1700000001,
+		Tags:      nostr.Tags{{"h", communityPk.Hex()}, {"e", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}},
+	}
+	q := sliceQuerier{events: []nostr.Event{content, share}}
+
+	got := backfillProfileCandidates(q, []nostr.Kind{30142}, []nostr.Kind{16}, 1000)
+
+	has := func(target nostr.PubKey) bool {
+		for _, pk := range got {
+			if pk == target {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(authorPk) {
+		t.Errorf("union missing content author %s", authorPk.Hex())
+	}
+	if !has(communityPk) {
+		t.Errorf("union missing discovered community %s", communityPk.Hex())
+	}
+	// No duplicates.
+	seen := map[nostr.PubKey]bool{}
+	for _, pk := range got {
+		if seen[pk] {
+			t.Errorf("duplicate pubkey %s in union", pk.Hex())
+		}
+		seen[pk] = true
+	}
+}
+
 func TestBackfillAuthorsDistinct(t *testing.T) {
 	skA, skB := nostr.Generate(), nostr.Generate()
 	pkA, pkB := skA.Public(), skB.Public()
