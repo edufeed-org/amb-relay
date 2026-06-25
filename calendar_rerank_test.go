@@ -148,3 +148,40 @@ func TestWindowCalendarPassesNonCalendar(t *testing.T) {
 		t.Fatalf("want only the non-calendar 30142 event through, got %d", len(got))
 	}
 }
+
+// TestWindowCalendarLimitKeepsTrailingSnippet: when the limit is reached on
+// parentA, its trailing snippet is still emitted; parentB and its snippet are
+// not emitted.
+func TestWindowCalendarLimitKeepsTrailingSnippet(t *testing.T) {
+	// Use distinct start/end so the two events get distinct IDs.
+	parentA := calEvent(t, "1718600000", "1718603600")
+	parentB := calEvent(t, "1718600100", "1718603700")
+	snippetA := snippetFor(t, parentA.ID.Hex())
+	snippetB := snippetFor(t, parentB.ID.Hex())
+
+	// Both parents are in-window; limit=1 should stop after parentA+snippetA.
+	cf := calendar.CalendarFilter{StartAfter: 1718000000}
+
+	got := collectEvents(windowCalendar(seqOf(parentA, snippetA, parentB, snippetB), cf, 1))
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want 2 (parentA + snippetA)", len(got))
+	}
+	if got[0].ID != parentA.ID {
+		t.Errorf("got[0].ID = %s, want parentA.ID = %s", got[0].ID.Hex(), parentA.ID.Hex())
+	}
+	if got[1].Kind != semantic.KindSearchSnippet {
+		t.Errorf("got[1].Kind = %d, want snippet kind %d", got[1].Kind, semantic.KindSearchSnippet)
+	}
+}
+
+// TestWindowCalendarDropsOrphanLeadingSnippet: a snippet that arrives before
+// any kept parent (no preceding parent in the stream) is dropped.
+func TestWindowCalendarDropsOrphanLeadingSnippet(t *testing.T) {
+	orphan := snippetFor(t, "deadbeef")
+	cf := calendar.CalendarFilter{}
+
+	got := collectEvents(windowCalendar(seqOf(orphan), cf, 0))
+	if len(got) != 0 {
+		t.Fatalf("got %d events, want 0 (orphan snippet must be dropped)", len(got))
+	}
+}
