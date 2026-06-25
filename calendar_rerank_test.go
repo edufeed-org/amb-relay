@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"iter"
 	"testing"
 
@@ -9,9 +10,9 @@ import (
 	"fiatjaf.com/nostr/khatru/semantic"
 )
 
-func calEvent(t *testing.T, start, end string) nostr.Event {
+func calEventD(t *testing.T, d, start, end string) nostr.Event {
 	t.Helper()
-	tags := nostr.Tags{{"d", "e1"}, {"title", "T"}}
+	tags := nostr.Tags{{"d", d}, {"title", "T"}}
 	if start != "" {
 		tags = append(tags, nostr.Tag{"start", start})
 	}
@@ -21,6 +22,10 @@ func calEvent(t *testing.T, start, end string) nostr.Event {
 	e := nostr.Event{Kind: 31923, Tags: tags}
 	e.ID = e.GetID()
 	return e
+}
+
+func calEvent(t *testing.T, start, end string) nostr.Event {
+	return calEventD(t, "e1", start, end)
 }
 
 func TestInCalendarWindow(t *testing.T) {
@@ -183,5 +188,75 @@ func TestWindowCalendarDropsOrphanLeadingSnippet(t *testing.T) {
 	got := collectEvents(windowCalendar(seqOf(orphan), cf, 0))
 	if len(got) != 0 {
 		t.Fatalf("got %d events, want 0 (orphan snippet must be dropped)", len(got))
+	}
+}
+
+func TestCalendarRerankGeohashBypassesRerank(t *testing.T) {
+	searcher := &fakeChunkSearcher{}
+	store := &fakeStore{}
+	filter := nostr.Filter{
+		Kinds:  []nostr.Kind{31923},
+		Search: "lernen",
+		Tags:   nostr.TagMap{"g": []string{"u33d"}},
+	}
+	collectEvents(calendarRerankQuery(context.Background(), filter, searcher, store.fetch, 200, nostr.Generate()))
+	if searcher.called {
+		t.Error("geohash query must bypass rerank (searcher should be untouched)")
+	}
+	if len(store.calls) != 1 {
+		t.Errorf("fetch calls = %d, want 1 (direct fetch path)", len(store.calls))
+	}
+}
+
+func TestCalendarRerankTopicOnlyUsesPlainRerank(t *testing.T) {
+	searcher := &fakeChunkSearcher{}
+	store := &fakeStore{}
+	filter := nostr.Filter{Kinds: []nostr.Kind{31923}, Search: "lernen"}
+	collectEvents(calendarRerankQuery(context.Background(), filter, searcher, store.fetch, 200, nostr.Generate()))
+	if !searcher.called {
+		t.Error("topic-only calendar search must go through ChunkRerankQuery")
+	}
+}
+
+func TestCalendarRerankNonCalendarUsesPlainRerank(t *testing.T) {
+	searcher := &fakeChunkSearcher{}
+	store := &fakeStore{}
+	filter := nostr.Filter{Kinds: []nostr.Kind{30142}, Search: "lernen"}
+	collectEvents(calendarRerankQuery(context.Background(), filter, searcher, store.fetch, 200, nostr.Generate()))
+	if !searcher.called {
+		t.Error("non-calendar search must go through ChunkRerankQuery")
+	}
+}
+
+func TestCalendarRerankTopicTimeStripsAndWindows(t *testing.T) {
+	// in- and out-of-window calendar events both returned by the lexical fetch,
+	// both topic-matched by the searcher; only the in-window one should survive.
+	inEv := calEventD(t, "e1", "1718600000", "1718603600")
+	outEv := calEventD(t, "e2", "1710000000", "1710003600")
+	searcher := &fakeChunkSearcher{hits: []semantic.ChunkHit{
+		{EventID: inEv.ID.Hex(), EventCoord: coordFor(inEv), Score: 0.9, Snippet: "in"},
+		{EventID: outEv.ID.Hex(), EventCoord: coordFor(outEv), Score: 0.8, Snippet: "out"},
+	}}
+	store := &fakeStore{events: []nostr.Event{inEv, outEv}}
+	filter := nostr.Filter{
+		Kinds:  []nostr.Kind{31923},
+		Search: "lernen",
+		Tags: nostr.TagMap{
+			"start_after":  []string{"1718000000"},
+			"start_before": []string{"1719000000"},
+		},
+	}
+	got := collectEvents(calendarRerankQuery(context.Background(), filter, searcher, store.fetch, 200, nostr.Generate()))
+	ids := idsOf(got)
+	if len(ids) != 1 || ids[0] != inEv.ID.Hex() {
+		t.Fatalf("want only in-window event, got ids %v", ids)
+	}
+	// every filter handed to fetch must carry no synthetic range tags
+	for i, c := range store.calls {
+		for _, k := range []string{"start_after", "start_before", "end_after", "end_before"} {
+			if _, ok := c.Tags[k]; ok {
+				t.Errorf("fetch call %d still carries range tag %q", i, k)
+			}
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"iter"
 
 	"fiatjaf.com/nostr"
@@ -49,6 +50,36 @@ func windowCalendar(seq iter.Seq[nostr.Event], cf calendar.CalendarFilter, limit
 			}
 		}
 	}
+}
+
+// calendarRerankQuery wraps semantic.ChunkRerankQuery so a calendar topic+time
+// REQ is semantically reranked AND time-windowed. The shared rerank path
+// post-filters with filter.Matches, which rejects calendar events whenever the
+// synthetic range params (start_after/…) are present (they are query params,
+// not real event tags). So for a windowed calendar search we strip those four
+// keys before rerank, take the full reranked pool (Limit=0), and post-window
+// relay-side. Searches without a window — or non-calendar searches, or
+// geohash (Bolt-only) searches — are left to the plain paths.
+func calendarRerankQuery(ctx context.Context, filter nostr.Filter, searcher semantic.ChunkSearcher, fetch fetchFunc, maxLimit int, sk nostr.SecretKey) iter.Seq[nostr.Event] {
+	if !calendar.HasCalendarKinds(filter) {
+		return semantic.ChunkRerankQuery(ctx, filter, searcher, fetch, maxLimit, sk)
+	}
+	cf := calendar.ExtractCalendarFilter(filter)
+	if len(cf.Geohashes) > 0 {
+		// geohash-prefix is Bolt-only; rerank can't serve it.
+		return fetch(filter, maxLimit)
+	}
+	if cf.StartAfter == 0 && cf.StartBefore == 0 && cf.EndAfter == 0 && cf.EndBefore == 0 {
+		return semantic.ChunkRerankQuery(ctx, filter, searcher, fetch, maxLimit, sk)
+	}
+	limit := filter.Limit
+	if limit <= 0 || limit > maxLimit {
+		limit = maxLimit
+	}
+	stripped := calendar.RemoveCalendarTags(filter)
+	stripped.Limit = 0 // take the full reranked pool; windowCalendar re-caps.
+	ranked := semantic.ChunkRerankQuery(ctx, stripped, searcher, fetch, maxLimit, sk)
+	return windowCalendar(ranked, cf, limit)
 }
 
 // inCalendarWindow reports whether a calendar event satisfies every range
