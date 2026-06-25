@@ -122,9 +122,9 @@ func (r *registry) fetch(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event
 // targetsChunked reports whether a search over this filter could be served by
 // the chunk index. Kind-agnostic filters (empty Kinds) include chunked content,
 // so they qualify. Otherwise at least one targeted kind must belong to a chunked
-// content type. Calendar-only searches return false, so chunk-rerank leaves them
-// to plain full-text search — calendar events are never chunked and would
-// otherwise be dropped whenever the term also matched some chunk.
+// content type. Calendar is registered chunked:true, so calendar searches route
+// into calendarRerankQuery (which strips synthetic range params and re-windows
+// the reranked pool relay-side).
 func (r *registry) targetsChunked(filter nostr.Filter) bool {
 	if len(filter.Kinds) == 0 {
 		for _, ct := range r.types {
