@@ -425,8 +425,8 @@ func main() {
 	}
 	if calendarEnabled && tsDB4 != nil {
 		contentTypes = append(contentTypes, contentType{
-			kinds:   []nostr.Kind{31922, 31923, 31924, 31925},
-			chunked: true,
+			kinds:    []nostr.Kind{31922, 31923, 31924, 31925},
+			chunked:  true,
 			validate: validateCalendar,
 			store: func(e nostr.Event) {
 				if calendar.IsCalendarEventKind(e.Kind) {
