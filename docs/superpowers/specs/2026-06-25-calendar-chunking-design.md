@@ -1,7 +1,7 @@
 # Calendar Semantic Search (Chunk Embeddings) — Design
 
 **Date:** 2026-06-25
-**Status:** Approved (Approach B)
+**Status:** Approved (Approach B); revised after a DRY/KISS/YAGNI + nostrlib-reuse pass
 **Repos:** `amb-indexer` (chunk pipeline) + `amb-relay` (query/rerank). No `nostrlib` change.
 
 ## Problem
@@ -68,26 +68,36 @@ filter going in and windows the results coming out.
 
 ### amb-indexer changes
 
+The whole indexer side reduces to **one subscription plus one gate edit** — no
+new doc-builder, no license code. Calendar reuses the long-form content-direct
+path verbatim, exactly as wiki (30818) already does.
+
 1. **Subscribe to calendar kinds.** Add `31922, 31923` to the source `Kinds`
-   (`amb-indexer/main.go:165`). Omit 31924 (calendar collection — just a list of
-   refs) and 31925 (RSVP — status only, no meaningful free text).
-2. **Route calendar through the content-direct path.** Extend the gate at
-   `worker.go:72` so 31922/31923 take `processContentDirect` (no external
-   fetch/Tika/setcontent — the body is in the event), like 30023/30818.
-3. **Add `docFromCalendarEvent`.** A calendar-specific `ExtractedDoc` builder
-   (sibling to `docFromLongformEvent` in `fetch_nostr.go`) assembling the chunk
-   text from the calendar event's `title` tag + `summary` tag + `event.Content`
-   (the description) + `location` tag(s), joined with newlines. `Kind` label
-   `"nostr-calendar"`. **No ATX heading parsing** — calendar descriptions are
-   plain text, not markdown, so `Headings` is empty (chunks carry no heading
-   locator, same as wiki/Djot).
-4. **License gate.** Calendar event listings normally carry no `license` tag.
-   **Decision:** an absent license on a calendar kind (31922/31923) is treated
-   as indexable — calendar listings are public event announcements, not
-   licensed resources. Implement by short-circuiting the license gate in
-   `processContentDirect` for calendar kinds (a present, explicitly-restrictive
-   license is still honored if one ever appears).
-5. Chunk coord is produced automatically as `31922:<pk>:<d>` / `31923:<pk>:<d>`
+   (`amb-indexer/main.go:165`). Omit 31924 (calendar list — just refs) and 31925
+   (RSVP — status only, no free text).
+2. **Reuse the content-direct path.** Extend the gate at `worker.go:72` so
+   31922/31923 take `processContentDirect` alongside 30023/30818. That path
+   already calls `docFromLongformEvent` (`worker.go:313`), which chunks
+   `event.Content` (the calendar description — where the semantic signal lives)
+   plus the `title` tag. **No `docFromCalendarEvent` is written.** Wiki already
+   proves this reuse: 30818 runs the identical builder.
+   - *Trade-off (accepted):* the `summary` and `location` tags do not enter the
+     chunk text, the chunk `Kind` label reads `"nostr-long"`, and plain-text
+     descriptions are scanned for ATX headings (a stray `#` line becomes a
+     heading locator). None affects ranking of the motivating case — the
+     SCALE-UP match ("aktivierendes … Lernen") is in `event.Content`. Folding
+     summary/location into the text is a later, separately-motivated change
+     (see Out of scope), not a prerequisite.
+3. **No license handling.** Calendar listings carry no `license` tag, so
+   `permissive=false`. That does **not** hide them: `BuildChunkDocs`
+   (`schema.go:147-171`) always stores the embedding and the 200-rune snippet;
+   only the full chunk `text` field is elided. `/search_chunks` returns
+   non-permissive hits — it elides `text`, never the hit (`search.go:348`) — and
+   the relay's chunk searcher sends only `q`/`k`/`kinds`, never a
+   `license_permissive` filter (`searcher_http.go:47`). So calendar events rank
+   semantically with no license code at all; the original "short-circuit the
+   license gate" step is dropped (YAGNI).
+4. Chunk coord is produced automatically as `31922:<pk>:<d>` / `31923:<pk>:<d>`
    (`schema.go:143`) — no change.
 
 ### amb-relay changes
@@ -98,19 +108,27 @@ filter going in and windows the results coming out.
 2. **Calendar window-aware rerank branch.** In the `QueryStored` rerank path
    (`main.go:819-835`), for a calendar search that carries range params:
    - Pass `ChunkRerankQuery` a filter with the **synthetic range tags removed**
-     (kinds + search only), so `filter.Matches` (`rerank.go:229`) no longer
-     rejects calendar events.
-   - **Wrap the returned `iter.Seq`** to drop events outside the original
-     window, then apply the limit after windowing. Each bound applies to its
-     own field, mirroring `buildNostrFilterExpression`: `start_after`/
-     `start_before` gate the event's parsed `start`; `end_after`/`end_before`
-     gate its parsed `end`. Only the bounds present in the REQ are applied; an
-     event missing the gated field (e.g. no `end`) fails that bound. Reuse
-     `calendar.ExtractCalendarFilter` for the bounds and the same nip52 parse
-     the projector uses for the event's start/end. Bounds are inclusive,
-     matching the Bolt index and the Typesense numeric mapping.
-   - Searches *without* a range window need no wrapping — they flow through
-     `ChunkRerankQuery` unchanged.
+     (kinds + search only). Confirmed blocker: `filter.Matches` folds every
+     `Tags` key into a real event-tag lookup (`nostrlib/filter.go:61-65`), so a
+     `start_after` key makes it reject every calendar event (`rerank.go:229`).
+     Stripping the four range keys clears it.
+   - **Reuse `calendar.ExtractCalendarFilter(filter)`** (exported,
+     `khatru/calendar/filter.go`) to pull the four bounds, and the same
+     `nip52.ParseCalendarEvent` the projector uses for the event's start/end.
+   - **Wrap the returned `iter.Seq`** with a small inline predicate: keep an
+     event iff, for every bound present in the REQ, the gated field exists and
+     satisfies it inclusively — `start_after`/`start_before` gate `start`,
+     `end_after`/`end_before` gate `end`; a missing gated field fails its bound.
+     Apply the limit after windowing. Searches *without* a range window need no
+     wrapping — they flow through `ChunkRerankQuery` unchanged.
+   - *Do not reuse `khatru/calendar`'s unexported `matchesCalendarFilter`.* It
+     treats a missing upper-bounded field as **passing** (`0 > EndBefore` is
+     false), which diverges from the Typesense numeric path
+     (`buildNostrFilterExpression`) that the rerank-disabled branch must match —
+     there a doc missing `end` fails an `end:<=` clause. The ~8-line inline
+     predicate keeps both branches identical; the borrowed one would be a latent
+     parity bug. (`ExtractCalendarFilter` is genuinely shared and reused; only
+     the predicate is deliberately not.)
 3. **Parity when rerank is disabled.** When `CHUNK_RERANK_ENABLED` is off,
    `QueryStored` uses plain `reg.fetch` → `calendarFetch` → Typesense numeric
    window (today's shipped behavior). The new branch only engages when rerank is
@@ -139,18 +157,20 @@ corpus is ~3 k docs, so 200 topic candidates before windowing is ample.
 
 | Unit | Repo | Responsibility |
 |------|------|----------------|
-| `docFromCalendarEvent` | amb-indexer | Build chunk text from a calendar event's tags + content |
-| content-direct gate | amb-indexer | Route 31922/31923 to the content-direct chunk path |
-| subscribed kinds | amb-indexer | Ingest calendar events |
+| subscribed kinds | amb-indexer | Add 31922/31923 to source kinds |
+| content-direct gate | amb-indexer | Route 31922/31923 to the existing `docFromLongformEvent` path (no new builder) |
 | calendar `chunked:true` | amb-relay | Opt calendar into rerank |
-| calendar window-wrapper | amb-relay | Strip synthetic range tags in; post-window results out |
+| calendar window-wrapper | amb-relay | Strip synthetic range tags in; reuse `ExtractCalendarFilter` + nip52 parse; post-window results out |
 
 ## Testing
 
-- **amb-indexer unit:** `docFromCalendarEvent` pulls title+summary+content+
-  location into `Text`; coord is `31923:<pk>:<d>`; no headings.
-- **amb-indexer unit:** `worker.go:72` gate routes 31922/31923 to
-  `processContentDirect` (mirrors the existing 30023/30818 tests).
+- **amb-indexer unit:** the `worker.go:72` gate routes 31922/31923 to
+  `processContentDirect`, producing chunks whose coord is `31923:<pk>:<d>` and
+  whose embedding/snippet are present even with `permissive=false` (mirrors the
+  existing 30023/30818 gate tests).
+- **amb-relay unit:** the window predicate keeps in-window events and drops
+  out-of-window ones per present bound, and a missing gated field fails its
+  bound (the parity edge case vs. the Typesense numeric path).
 - **amb-relay:** windowless topic search → routed to rerank (semantic).
 - **amb-relay:** topic+time search → routed to rerank, results semantic **and**
   every returned event's start/end inside the window.
@@ -170,6 +190,12 @@ Production is a later, separately-authorized step.
 ## Out of scope (YAGNI)
 
 - Kinds 31924/31925 (no meaningful free text).
+- A dedicated `docFromCalendarEvent` and folding `summary`/`location` into the
+  chunk text — the reused long-form builder captures title + description, which
+  carries the semantic signal. Add a calendar-specific builder only if
+  summary/location prove to add unique recall.
+- Treating calendar kinds as license-permissive (full passage text in
+  snippets) — discovery already works without it; the 200-rune snippet suffices.
 - A `nostrlib` change to make `ChunkRerankQuery` range-aware (Approach C) — the
   relay-only wrapper achieves the same result at this corpus size without
   touching the shared library.
