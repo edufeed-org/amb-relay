@@ -6,7 +6,7 @@ EMBED_TOKEN env var; bad or missing tokens return 401.
 
 Wire contract (must match amb-indexer/embed.go):
   POST /embed
-    body:    {"texts": ["...", "..."]}
+    body:    {"texts": ["...", "..."], "input_type": "query"|"passage"}
     response:{"embeddings": [[float, ...], ...], "model": str, "dimensions": int}
 """
 
@@ -17,9 +17,14 @@ from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
 MODEL_NAME = os.environ.get(
-    "EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    "EMBED_MODEL", "intfloat/multilingual-e5-base"
 )
 EXPECTED_TOKEN = os.environ.get("EMBED_TOKEN", "")
+
+# e5 models are asymmetric: a query and the passage it should match get
+# different prefixes. This is the only place model-specific prefix knowledge
+# lives — a prefix-free model (e.g. bge-m3) would set both to "".
+E5_PREFIXES = {"query": "query: ", "passage": "passage: "}
 
 app = FastAPI()
 _model = SentenceTransformer(MODEL_NAME)
@@ -37,6 +42,7 @@ def verify_bearer(request: Request) -> None:
 
 class EmbedRequest(BaseModel):
     texts: list[str]
+    input_type: str = "passage"
 
 
 class EmbedResponse(BaseModel):
@@ -47,7 +53,9 @@ class EmbedResponse(BaseModel):
 
 @app.post("/embed", response_model=EmbedResponse, dependencies=[Depends(verify_bearer)])
 def embed(req: EmbedRequest) -> EmbedResponse:
-    vectors = _model.encode(req.texts, normalize_embeddings=True)
+    prefix = E5_PREFIXES.get(req.input_type, E5_PREFIXES["passage"])
+    prefixed = [prefix + t for t in req.texts]
+    vectors = _model.encode(prefixed, normalize_embeddings=True)
     return EmbedResponse(
         embeddings=vectors.tolist(),
         model=MODEL_NAME,

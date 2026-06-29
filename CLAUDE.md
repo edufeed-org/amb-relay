@@ -46,7 +46,7 @@ Nostr Client → Khatru Relay (:3334) ─┬→ Typesense (:8108)  [search index
 
 The relay itself does not fetch or embed resources — that is `amb-indexer`'s job (see [`../amb-indexer`](../amb-indexer)). The indexer subscribes to kind-30142 events, extracts text, chunks and embeds it, and calls the relay's NIP-86 `setcontent` to populate the `content` field on each event. Chunks go to a separate Typesense collection.
 
-Embedding runs in-stack as the `embed` service (`./embed`) — a small FastAPI container loading `paraphrase-multilingual-MiniLM-L12-v2` (384-dim). Both the relay (semantic write-path) and the indexer (chunk pipeline) point `EMBED_ENDPOINT` at `http://embed:8100/embed`, so there's no external dependency on `embed.edufeed.org` for the docker stack. Pytest suite for the service lives in `embed/tests/`.
+Embedding runs in-stack as the `embed` service (`./embed`) — a small FastAPI container loading `intfloat/multilingual-e5-base` (768-dim). The service prepends an `input_type` prefix (`query:` for searches, `passage:` for indexed text) as required by the e5-base instruction-tuned contract. Both the relay (semantic write-path) and the indexer (chunk pipeline) point `EMBED_ENDPOINT` at `http://embed:8100/embed`, so there's no external dependency on `embed.edufeed.org` for the docker stack. Pytest suite for the service lives in `embed/tests/`.
 
 **Main Entry Point:** `main.go` - Sets up khatru relay with dual-write to Typesense (search) and BoltDB (raw persistence), NIP-42 auth, NIP-86 management API, and Negentropy protocol.
 

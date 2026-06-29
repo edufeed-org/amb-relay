@@ -72,6 +72,7 @@ services:
     restart: unless-stopped
     environment:
       - EMBED_TOKEN=${EMBED_TOKEN}
+      - EMBED_MODEL=intfloat/multilingual-e5-base
     volumes:
       - embed_model_cache:/cache/huggingface
     healthcheck:
@@ -79,15 +80,13 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      # Model load on first boot pulls ~120 MB and takes time. Generous start_period
-      # avoids tripping unhealthy during cold start.
-      start_period: 120s
-    # Model + activations fit comfortably under 2 GiB; the 2026-06-11 runaway
-    # climbed to ~2.0 GB RSS before the host died, so this is a hard ceiling
-    # for a single uvicorn worker. Don't raise without also revisiting the
-    # retry-amplification fix in nostrlib (replace.go).
-    mem_limit: 2g
-    mem_reservation: 512m
+      # First boot pulls ~1.1 GB (e5-base) and loads it; allow a long cold start.
+      start_period: 300s
+    # e5-base is ~1.1 GB resident; activations add headroom. The 2026-06-11
+    # runaway (retry-amplification, since fixed in nostrlib replace.go) hit
+    # ~2.0 GB RSS, so keep a hard ceiling but above the model footprint.
+    mem_limit: 3g
+    mem_reservation: 1g
     # No port exposure to host by default; reachable only on the internal network.
     # Uncomment for host-side debugging:
     # ports:
