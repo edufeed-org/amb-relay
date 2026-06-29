@@ -32,7 +32,8 @@ type EmbeddingClient struct {
 var _ typesense30142.Embedder = (*EmbeddingClient)(nil)
 
 type embedRequest struct {
-	Texts []string `json:"texts"`
+	Texts     []string `json:"texts"`
+	InputType string   `json:"input_type"`
 }
 
 type embedResponse struct {
@@ -51,12 +52,12 @@ func NewEmbeddingClient(endpoint, token string) *EmbeddingClient {
 }
 
 // Embed computes embedding vectors for the given texts.
-func (c *EmbeddingClient) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+func (c *EmbeddingClient) Embed(ctx context.Context, texts []string, input typesense30142.EmbedInput) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
 
-	reqBody, err := json.Marshal(embedRequest{Texts: texts})
+	reqBody, err := json.Marshal(embedRequest{Texts: texts, InputType: string(input)})
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
