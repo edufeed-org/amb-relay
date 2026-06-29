@@ -70,7 +70,7 @@ The relay listens on `:3334`, Typesense on `:8108`. See **[Deployment](#deployme
 
 When configured with `SEMANTIC_SEARCH_ENABLED=true`, the relay performs hybrid search (keyword + vector similarity) automatically. Can also be enabled/disabled at runtime via NIP-86.
 
-**Model:** Uses MiniLM-L12-v2 (384 dimensions) for embeddings. See the [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md#semantic-search-hybrid-search) for technical details.
+**Model:** Uses `intfloat/multilingual-e5-base` (768 dimensions) for embeddings. See the [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md#semantic-search-hybrid-search) for technical details.
 
 ### Chunk Re-Ranking (Optional)
 
