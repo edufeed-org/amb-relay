@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir \
 COPY embed_service.py .
 
 # HuggingFace cache lives here; mount a volume to persist the model
-# (~120 MB for paraphrase-multilingual-MiniLM-L12-v2) across container restarts.
+# (~1.1 GB for intfloat/multilingual-e5-base) across container restarts.
 ENV HF_HOME=/cache/huggingface
 
 EXPOSE 8100
