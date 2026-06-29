@@ -426,6 +426,7 @@ func main() {
 	if calendarEnabled && tsDB4 != nil {
 		contentTypes = append(contentTypes, contentType{
 			kinds:    []nostr.Kind{31922, 31923, 31924, 31925},
+			chunked:  true,
 			validate: validateCalendar,
 			store: func(e nostr.Event) {
 				if calendar.IsCalendarEventKind(e.Kind) {
@@ -830,7 +831,7 @@ func main() {
 		// raw string to the chunk index and drop the field filter — those must
 		// take the plain field-filter path too.
 		if reg.targetsChunked(filter) && searchHasFreeText(filter.Search) {
-			return semantic.ChunkRerankQuery(ctx, filter, chunkSearcher, reg.fetch, maxLimit, relaySK)
+			return calendarRerankQuery(ctx, filter, chunkSearcher, reg.fetch, maxLimit, relaySK)
 		}
 		return reg.fetch(filter, maxLimit)
 	}
