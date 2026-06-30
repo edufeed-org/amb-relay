@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -94,6 +95,35 @@ func upsertStructuredDoc(ts *typesense30142.TSBackend, doc any) error {
 	return nil
 }
 
+// embeddable is implemented by every structured document that carries a dense
+// vector. EmbedText returns the text to embed; SetEmbedding stores the result.
+type embeddable interface {
+	EmbedText() string
+	SetEmbedding([]float32)
+}
+
+// embedAndAttach computes a passage embedding for doc and attaches it, when an
+// embedder is wired on ts and doc supports embedding. No-op (nil error)
+// otherwise, so collections with semantic disabled (or non-embeddable docs)
+// project exactly as before.
+func embedAndAttach(ts *typesense30142.TSBackend, doc any) error {
+	if ts.Embedder == nil {
+		return nil
+	}
+	emb, ok := doc.(embeddable)
+	if !ok {
+		return nil
+	}
+	vecs, err := ts.Embedder.Embed(context.Background(), []string{emb.EmbedText()}, typesense30142.EmbedPassage)
+	if err != nil {
+		return err
+	}
+	if len(vecs) > 0 {
+		emb.SetEmbedding(vecs[0])
+	}
+	return nil
+}
+
 // reprojectStructured projects an addressable event and synchronously upserts
 // it, returning any error. Unlike storeStructured (fire-and-forget for the live
 // write path), the error is propagated so the reindexer can count failures.
@@ -101,6 +131,11 @@ func reprojectStructured[T any](ts *typesense30142.TSBackend, event nostr.Event,
 	doc, err := project(&event)
 	if err != nil {
 		return fmt.Errorf("project: %w", err)
+	}
+	if err := embedAndAttach(ts, doc); err != nil {
+		// Log and continue: the doc still upserts (BM25-searchable) without a
+		// vector; the next reindex re-embeds.
+		fmt.Printf("embed structured %s: %v\n", event.ID.Hex(), err)
 	}
 	if err := upsertStructuredDoc(ts, doc); err != nil {
 		return fmt.Errorf("upsert: %w", err)
