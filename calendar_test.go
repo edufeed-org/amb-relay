@@ -262,3 +262,37 @@ func TestCalendarFetchRouter(t *testing.T) {
 		t.Fatalf("search+range+geo query: bolt=%d ts=%d, want bolt=3 ts=4", len(bolt.calls), len(ts.calls))
 	}
 }
+
+func TestCalendarEmbedText(t *testing.T) {
+	doc := &CalendarDocument{Title: "SCALE-UP", Summary: "aktivierung", Location: "Hochschule", Content: "kooperativ"}
+	if got := doc.EmbedText(); got != "SCALE-UP aktivierung Hochschule kooperativ" {
+		t.Errorf("EmbedText = %q", got)
+	}
+}
+
+func TestCalendarEmbedTextSkipsEmpty(t *testing.T) {
+	doc := &CalendarDocument{Title: "T", Content: "C"} // summary + location empty
+	if got := doc.EmbedText(); got != "T C" {
+		t.Errorf("EmbedText = %q", got)
+	}
+}
+
+func TestCalendarSetEmbedding(t *testing.T) {
+	doc := &CalendarDocument{}
+	doc.SetEmbedding([]float32{1, 2})
+	if len(doc.Embedding) != 2 || doc.Embedding[0] != 1 {
+		t.Errorf("Embedding = %v", doc.Embedding)
+	}
+}
+
+func TestCalendarSchemaHasEmbedding(t *testing.T) {
+	for _, f := range calendarSchema("calendar_31922").Fields {
+		if f.Name == "embedding" {
+			if f.Type != "float[]" || f.NumDim != 768 || f.VecDistMetric != "cosine" || !f.Optional {
+				t.Errorf("embedding field = %+v", f)
+			}
+			return
+		}
+	}
+	t.Fatal("calendar schema missing embedding field")
+}

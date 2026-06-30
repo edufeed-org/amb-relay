@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"iter"
+	"strings"
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/typesense30142"
@@ -17,16 +18,17 @@ import (
 // Unix seconds (date-based "YYYY-MM-DD" starts are parsed to start-of-day UTC);
 // geohash/status/location are present only on the kinds that carry them.
 type CalendarDocument struct {
-	ID       string `json:"id"`
-	D        string `json:"d"`
-	Title    string `json:"title,omitempty"`
-	Summary  string `json:"summary,omitempty"`
-	Content  string `json:"content,omitempty"`
-	Location string `json:"location,omitempty"`
-	Start    int64  `json:"start,omitempty"`
-	End      int64  `json:"end,omitempty"`
-	Geohash  string `json:"geohash,omitempty"`
-	Status   string `json:"status,omitempty"` // RSVP (31925): accepted/declined/tentative
+	ID        string    `json:"id"`
+	D         string    `json:"d"`
+	Title     string    `json:"title,omitempty"`
+	Summary   string    `json:"summary,omitempty"`
+	Content   string    `json:"content,omitempty"`
+	Location  string    `json:"location,omitempty"`
+	Start     int64     `json:"start,omitempty"`
+	End       int64     `json:"end,omitempty"`
+	Geohash   string    `json:"geohash,omitempty"`
+	Status    string    `json:"status,omitempty"` // RSVP (31925): accepted/declined/tentative
+	Embedding []float32 `json:"embedding,omitempty"`
 	structuredEnvelope
 }
 
@@ -87,6 +89,21 @@ func nostrToCalendar(event *nostr.Event) (*CalendarDocument, error) {
 	return doc, nil
 }
 
+// EmbedText returns the passage text for this calendar event: non-empty
+// title, summary, location, content joined by spaces.
+func (d *CalendarDocument) EmbedText() string {
+	parts := make([]string, 0, 4)
+	for _, s := range []string{d.Title, d.Summary, d.Location, d.Content} {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// SetEmbedding stores the computed dense vector.
+func (d *CalendarDocument) SetEmbedding(v []float32) { d.Embedding = v }
+
 // storeCalendar projects and upserts a NIP-52 event to the calendar Typesense
 // collection via the shared structured-collection helper.
 func storeCalendar(enabled bool, ts *typesense30142.TSBackend, event nostr.Event) {
@@ -137,6 +154,7 @@ func calendarSchema(name string) typesense30142.CollectionSchema {
 			{Name: "end", Type: "int64", Optional: true, Facet: true},
 			{Name: "geohash", Type: "string", Optional: true, Facet: true},
 			{Name: "status", Type: "string", Optional: true, Facet: true},
+			{Name: "embedding", Type: "float[]", NumDim: 768, VecDistMetric: "cosine", Optional: true},
 		}, structuredEnvelopeFields()...),
 	}
 }
