@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/typesense30142"
@@ -12,11 +13,12 @@ import (
 // envelope with LongformDocument; unlike long-form, title is optional (a wiki
 // article's display title defaults to its d identifier).
 type WikiDocument struct {
-	ID      string `json:"id"`
-	D       string `json:"d"`
-	Title   string `json:"title,omitempty"`
-	Summary string `json:"summary,omitempty"`
-	Content string `json:"content,omitempty"`
+	ID        string    `json:"id"`
+	D         string    `json:"d"`
+	Title     string    `json:"title,omitempty"`
+	Summary   string    `json:"summary,omitempty"`
+	Content   string    `json:"content,omitempty"`
+	Embedding []float32 `json:"embedding,omitempty"`
 	structuredEnvelope
 }
 
@@ -50,6 +52,20 @@ func nostrToWiki(event *nostr.Event) (*WikiDocument, error) {
 	return doc, nil
 }
 
+// EmbedText returns the passage text: non-empty title, summary, content.
+func (d *WikiDocument) EmbedText() string {
+	parts := make([]string, 0, 3)
+	for _, s := range []string{d.Title, d.Summary, d.Content} {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// SetEmbedding stores the computed dense vector.
+func (d *WikiDocument) SetEmbedding(v []float32) { d.Embedding = v }
+
 // storeWiki projects and upserts a kind-30818 event to the wiki collection.
 func storeWiki(enabled bool, ts *typesense30142.TSBackend, event nostr.Event) {
 	storeStructured(enabled, ts, event, "wiki", nostrToWiki)
@@ -68,6 +84,7 @@ func wikiSchema(name string) typesense30142.CollectionSchema {
 			{Name: "title", Type: "string", Optional: true},
 			{Name: "summary", Type: "string", Optional: true},
 			{Name: "content", Type: "string", Optional: true},
+			{Name: "embedding", Type: "float[]", NumDim: 768, VecDistMetric: "cosine", Optional: true},
 		}, structuredEnvelopeFields()...),
 	}
 }

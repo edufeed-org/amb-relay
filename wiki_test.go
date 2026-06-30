@@ -92,3 +92,37 @@ func TestWikiSchemaFields(t *testing.T) {
 		}
 	}
 }
+
+func TestWikiEmbedText(t *testing.T) {
+	doc := &WikiDocument{Title: "T", Summary: "S", Content: "C"}
+	if got := doc.EmbedText(); got != "T S C" {
+		t.Errorf("EmbedText = %q", got)
+	}
+}
+
+func TestWikiEmbedTextSkipsEmpty(t *testing.T) {
+	doc := &WikiDocument{Content: "C"} // title + summary empty
+	if got := doc.EmbedText(); got != "C" {
+		t.Errorf("EmbedText = %q", got)
+	}
+}
+
+func TestWikiSetEmbedding(t *testing.T) {
+	doc := &WikiDocument{}
+	doc.SetEmbedding([]float32{7})
+	if len(doc.Embedding) != 1 || doc.Embedding[0] != 7 {
+		t.Errorf("Embedding = %v", doc.Embedding)
+	}
+}
+
+func TestWikiSchemaHasEmbedding(t *testing.T) {
+	for _, f := range wikiSchema("wiki_30818").Fields {
+		if f.Name == "embedding" {
+			if f.Type != "float[]" || f.NumDim != 768 || f.VecDistMetric != "cosine" || !f.Optional {
+				t.Errorf("embedding field = %+v", f)
+			}
+			return
+		}
+	}
+	t.Fatal("wiki schema missing embedding field")
+}

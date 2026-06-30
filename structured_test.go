@@ -201,3 +201,25 @@ func TestEmbedAndAttach_NonEmbeddableNoop(t *testing.T) {
 		t.Errorf("embedder called for non-embeddable doc")
 	}
 }
+
+func TestReprojectStructured_EmbedsWhenEmbedderSet(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer srv.Close()
+	fe := &fakeEmbedder{vec: []float32{0.5, 0.6}}
+	ts := &typesense30142.TSBackend{Host: srv.URL, CollectionName: "c", ApiKey: "k", Embedder: fe}
+	evt := nostr.Event{Kind: 30818, Content: "body", Tags: nostr.Tags{{"d", "x"}, {"title", "T"}}}
+	if err := reprojectStructured(ts, evt, nostrToWiki); err != nil {
+		t.Fatalf("reprojectStructured: %v", err)
+	}
+	if !strings.Contains(string(gotBody), `"embedding":[0.5,0.6]`) {
+		t.Errorf("upserted body missing embedding vector: %s", gotBody)
+	}
+	if fe.gotInput != typesense30142.EmbedPassage {
+		t.Errorf("input role = %q, want passage", fe.gotInput)
+	}
+}
