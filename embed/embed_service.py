@@ -22,12 +22,45 @@ MODEL_NAME = os.environ.get(
 EXPECTED_TOKEN = os.environ.get("EMBED_TOKEN", "")
 
 # e5 models are asymmetric: a query and the passage it should match get
-# different prefixes. This is the only place model-specific prefix knowledge
-# lives — a prefix-free model (e.g. bge-m3) would set both to "".
+# different prefixes. Arctic v2.0 instead uses a built-in query prompt and
+# encodes passages bare. Model-family knowledge lives only in the helpers below.
 E5_PREFIXES = {"query": "query: ", "passage": "passage: "}
 
+
+def _is_arctic(name: str) -> bool:
+    return "arctic" in name.lower()
+
+
+def _load_model(name: str) -> SentenceTransformer:
+    # Arctic v2.0 needs the de-risk-proven xformers-free load (eager attention,
+    # no memory-efficient attention / input unpadding) so it runs on CPU without
+    # the optional xformers dependency.
+    if _is_arctic(name):
+        return SentenceTransformer(
+            name,
+            trust_remote_code=True,
+            model_kwargs={"attn_implementation": "eager"},
+            config_kwargs={
+                "use_memory_efficient_attention": False,
+                "unpad_inputs": False,
+            },
+        )
+    return SentenceTransformer(name)
+
+
+def encode_texts(model, model_name: str, texts: list[str], input_type: str):
+    # All paths normalize so cosine == dot. Arctic: query uses the model's
+    # built-in "query" prompt, passages encode bare. e5: prepend string prefix.
+    if _is_arctic(model_name):
+        if input_type == "query":
+            return model.encode(texts, prompt_name="query", normalize_embeddings=True)
+        return model.encode(texts, normalize_embeddings=True)
+    prefix = E5_PREFIXES.get(input_type, E5_PREFIXES["passage"])
+    return model.encode([prefix + t for t in texts], normalize_embeddings=True)
+
+
 app = FastAPI()
-_model = SentenceTransformer(MODEL_NAME)
+_model = _load_model(MODEL_NAME)
 _dim = _model.get_sentence_embedding_dimension()
 
 
@@ -53,9 +86,7 @@ class EmbedResponse(BaseModel):
 
 @app.post("/embed", response_model=EmbedResponse, dependencies=[Depends(verify_bearer)])
 def embed(req: EmbedRequest) -> EmbedResponse:
-    prefix = E5_PREFIXES.get(req.input_type, E5_PREFIXES["passage"])
-    prefixed = [prefix + t for t in req.texts]
-    vectors = _model.encode(prefixed, normalize_embeddings=True)
+    vectors = encode_texts(_model, MODEL_NAME, req.texts, req.input_type)
     return EmbedResponse(
         embeddings=vectors.tolist(),
         model=MODEL_NAME,

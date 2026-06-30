@@ -76,3 +76,81 @@ def test_embed_applies_query_prefix(client, monkeypatch):
     )
     assert r.status_code == 200
     assert captured["texts"] == ["query: hallo welt"]
+
+
+def test_is_arctic_detects_family():
+    import embed_service
+
+    assert embed_service._is_arctic("Snowflake/snowflake-arctic-embed-m-v2.0")
+    assert embed_service._is_arctic("snowflake-ARCTIC-embed")
+    assert not embed_service._is_arctic("intfloat/multilingual-e5-base")
+
+
+def test_arctic_query_uses_prompt_name():
+    import embed_service
+
+    captured = {}
+
+    class FakeModel:
+        def encode(self, texts, prompt_name=None, normalize_embeddings=True):
+            captured["texts"] = list(texts)
+            captured["prompt_name"] = prompt_name
+            captured["normalize"] = normalize_embeddings
+            return [[0.0]]
+
+    embed_service.encode_texts(
+        FakeModel(), "Snowflake/snowflake-arctic-embed-m-v2.0", ["hallo"], "query"
+    )
+    assert captured["texts"] == ["hallo"]
+    assert captured["prompt_name"] == "query"
+    assert captured["normalize"] is True
+
+
+def test_arctic_passage_encoded_bare():
+    import embed_service
+
+    captured = {}
+
+    class FakeModel:
+        def encode(self, texts, normalize_embeddings=True, **kw):
+            captured["texts"] = list(texts)
+            captured["kw"] = kw
+            return [[0.0]]
+
+    embed_service.encode_texts(
+        FakeModel(), "Snowflake/snowflake-arctic-embed-m-v2.0", ["hallo"], "passage"
+    )
+    assert captured["texts"] == ["hallo"]  # NO prefix
+    assert "prompt_name" not in captured["kw"]
+
+
+def test_e5_passage_still_prefixed():
+    import embed_service
+
+    captured = {}
+
+    class FakeModel:
+        def encode(self, texts, normalize_embeddings=True):
+            captured["texts"] = list(texts)
+            return [[0.0]]
+
+    embed_service.encode_texts(
+        FakeModel(), "intfloat/multilingual-e5-base", ["hallo"], "passage"
+    )
+    assert captured["texts"] == ["passage: hallo"]
+
+
+def test_e5_query_still_prefixed():
+    import embed_service
+
+    captured = {}
+
+    class FakeModel:
+        def encode(self, texts, normalize_embeddings=True):
+            captured["texts"] = list(texts)
+            return [[0.0]]
+
+    embed_service.encode_texts(
+        FakeModel(), "intfloat/multilingual-e5-base", ["hallo"], "query"
+    )
+    assert captured["texts"] == ["query: hallo"]
