@@ -216,8 +216,8 @@ func main() {
 		}
 		lfSchema := longformSchema(lfColl)
 		tsDB2 = &typesense30142.TSBackend{
-			ApiKey:         os.Getenv("TS_APIKEY"),
-			Host:           os.Getenv("TS_HOST"),
+			ApiKey:          os.Getenv("TS_APIKEY"),
+			Host:            os.Getenv("TS_HOST"),
 			CollectionName:  lfColl,
 			RawEventStore:   &boltDB,
 			Schema:          &lfSchema,
@@ -242,8 +242,8 @@ func main() {
 		}
 		wSchema := wikiSchema(wikiColl)
 		tsDB3 = &typesense30142.TSBackend{
-			ApiKey:         os.Getenv("TS_APIKEY"),
-			Host:           os.Getenv("TS_HOST"),
+			ApiKey:          os.Getenv("TS_APIKEY"),
+			Host:            os.Getenv("TS_HOST"),
 			CollectionName:  wikiColl,
 			RawEventStore:   &boltDB,
 			Schema:          &wSchema,
@@ -271,8 +271,8 @@ func main() {
 		}
 		calSchema := calendarSchema(calColl)
 		tsDB4 = &typesense30142.TSBackend{
-			ApiKey:         os.Getenv("TS_APIKEY"),
-			Host:           os.Getenv("TS_HOST"),
+			ApiKey:          os.Getenv("TS_APIKEY"),
+			Host:            os.Getenv("TS_HOST"),
 			CollectionName:  calColl,
 			RawEventStore:   &boltDB,
 			Schema:          &calSchema,
@@ -506,6 +506,19 @@ func main() {
 	if semanticCfg.Enabled && embedder != nil {
 		tsDB.Embedder = embedder
 		tsDB.EmbedFields = semanticCfg.EmbedFields
+		// Structured collections (long-form, wiki, calendar) reuse the same
+		// hybrid query path; setting Embedder activates BM25⊕vector RRF for
+		// them. They embed on write via EmbedText(), so no EmbedFields needed.
+		// Each backend is nil when its feature flag is off, hence the guards.
+		if tsDB2 != nil {
+			tsDB2.Embedder = embedder
+		}
+		if tsDB3 != nil {
+			tsDB3.Embedder = embedder
+		}
+		if tsDB4 != nil {
+			tsDB4.Embedder = embedder
+		}
 		fmt.Printf("Semantic search enabled with fields: %v\n", semanticCfg.EmbedFields)
 	} else {
 		fmt.Println("Semantic search disabled")

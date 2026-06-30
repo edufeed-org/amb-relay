@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/typesense30142"
@@ -13,14 +14,15 @@ import (
 // shared structuredEnvelope so the raw-event fields are promoted to top-level
 // JSON keys (byte-identical to the pre-extraction layout).
 type LongformDocument struct {
-	ID          string   `json:"id"`
-	D           string   `json:"d"`
-	Title       string   `json:"title"`
-	Summary     string   `json:"summary,omitempty"`
-	Content     string   `json:"content,omitempty"`
-	PublishedAt int64    `json:"published_at,omitempty"`
-	Topics      []string `json:"t,omitempty"`
-	Image       string   `json:"image,omitempty"`
+	ID          string    `json:"id"`
+	D           string    `json:"d"`
+	Title       string    `json:"title"`
+	Summary     string    `json:"summary,omitempty"`
+	Content     string    `json:"content,omitempty"`
+	PublishedAt int64     `json:"published_at,omitempty"`
+	Topics      []string  `json:"t,omitempty"`
+	Image       string    `json:"image,omitempty"`
+	Embedding   []float32 `json:"embedding,omitempty"`
 	structuredEnvelope
 }
 
@@ -65,6 +67,20 @@ func nostrToLongform(event *nostr.Event) (*LongformDocument, error) {
 	return doc, nil
 }
 
+// EmbedText returns the passage text: non-empty title, summary, content.
+func (d *LongformDocument) EmbedText() string {
+	parts := make([]string, 0, 3)
+	for _, s := range []string{d.Title, d.Summary, d.Content} {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// SetEmbedding stores the computed dense vector.
+func (d *LongformDocument) SetEmbedding(v []float32) { d.Embedding = v }
+
 // storeLongform projects and upserts a kind-30023 event to the long-form
 // Typesense collection via the shared structured-collection helper.
 func storeLongform(enabled bool, ts *typesense30142.TSBackend, event nostr.Event) {
@@ -87,6 +103,7 @@ func longformSchema(name string) typesense30142.CollectionSchema {
 			{Name: "published_at", Type: "int64", Optional: true, Facet: true},
 			{Name: "t", Type: "string[]", Optional: true, Facet: true},
 			{Name: "image", Type: "string", Optional: true},
+			{Name: "embedding", Type: "float[]", NumDim: 768, VecDistMetric: "cosine", Optional: true},
 		}, structuredEnvelopeFields()...),
 	}
 }

@@ -80,3 +80,37 @@ func TestLongformSchemaFields(t *testing.T) {
 		}
 	}
 }
+
+func TestLongformEmbedText(t *testing.T) {
+	doc := &LongformDocument{Title: "T", Summary: "S", Content: "C"}
+	if got := doc.EmbedText(); got != "T S C" {
+		t.Errorf("EmbedText = %q", got)
+	}
+}
+
+func TestLongformEmbedTextSkipsEmpty(t *testing.T) {
+	doc := &LongformDocument{Title: "T", Content: "C"} // summary empty
+	if got := doc.EmbedText(); got != "T C" {
+		t.Errorf("EmbedText = %q", got)
+	}
+}
+
+func TestLongformSetEmbedding(t *testing.T) {
+	doc := &LongformDocument{}
+	doc.SetEmbedding([]float32{9})
+	if len(doc.Embedding) != 1 || doc.Embedding[0] != 9 {
+		t.Errorf("Embedding = %v", doc.Embedding)
+	}
+}
+
+func TestLongformSchemaHasEmbedding(t *testing.T) {
+	for _, f := range longformSchema("longform_30023").Fields {
+		if f.Name == "embedding" {
+			if f.Type != "float[]" || f.NumDim != 768 || f.VecDistMetric != "cosine" || !f.Optional {
+				t.Errorf("embedding field = %+v", f)
+			}
+			return
+		}
+	}
+	t.Fatal("longform schema missing embedding field")
+}

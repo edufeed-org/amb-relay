@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -131,5 +132,94 @@ func TestLongformDocumentJSONStable(t *testing.T) {
 	want := `{"id":"p:d","d":"d","title":"T","summary":"S","content":"C","published_at":5,"t":["a"],"image":"img","eventID":"eid","eventKind":30023,"eventPubKey":"pk","eventCreatedAt":9,"eventRaw":"{}"}`
 	if string(b) != want {
 		t.Errorf("JSON drift:\n got=%s\nwant=%s", b, want)
+	}
+}
+
+// fakeEmbedder returns a fixed vector and records the input role.
+type fakeEmbedder struct {
+	vec      []float32
+	gotInput typesense30142.EmbedInput
+	gotTexts []string
+	err      error
+}
+
+func (f *fakeEmbedder) Embed(ctx context.Context, texts []string, input typesense30142.EmbedInput) ([][]float32, error) {
+	f.gotInput = input
+	f.gotTexts = texts
+	if f.err != nil {
+		return nil, f.err
+	}
+	return [][]float32{f.vec}, nil
+}
+
+// fakeDoc implements embeddable for helper tests.
+type fakeDoc struct {
+	text string
+	vec  []float32
+}
+
+func (d *fakeDoc) EmbedText() string        { return d.text }
+func (d *fakeDoc) SetEmbedding(v []float32) { d.vec = v }
+
+func TestEmbedAndAttach_SetsVector(t *testing.T) {
+	fe := &fakeEmbedder{vec: []float32{0.1, 0.2, 0.3}}
+	ts := &typesense30142.TSBackend{Embedder: fe}
+	doc := &fakeDoc{text: "title summary content"}
+	if err := embedAndAttach(ts, doc); err != nil {
+		t.Fatalf("embedAndAttach: %v", err)
+	}
+	if fe.gotInput != typesense30142.EmbedPassage {
+		t.Errorf("input role = %q, want passage", fe.gotInput)
+	}
+	if len(fe.gotTexts) != 1 || fe.gotTexts[0] != "title summary content" {
+		t.Errorf("embed texts = %v", fe.gotTexts)
+	}
+	if len(doc.vec) != 3 || doc.vec[0] != 0.1 {
+		t.Errorf("vector = %v", doc.vec)
+	}
+}
+
+func TestEmbedAndAttach_NilEmbedderNoop(t *testing.T) {
+	ts := &typesense30142.TSBackend{} // Embedder nil
+	doc := &fakeDoc{text: "x"}
+	if err := embedAndAttach(ts, doc); err != nil {
+		t.Fatalf("embedAndAttach: %v", err)
+	}
+	if doc.vec != nil {
+		t.Errorf("vector set despite nil embedder: %v", doc.vec)
+	}
+}
+
+func TestEmbedAndAttach_NonEmbeddableNoop(t *testing.T) {
+	fe := &fakeEmbedder{vec: []float32{1}}
+	ts := &typesense30142.TSBackend{Embedder: fe}
+	// a plain map does not implement embeddable
+	if err := embedAndAttach(ts, map[string]string{"id": "x"}); err != nil {
+		t.Fatalf("embedAndAttach: %v", err)
+	}
+	if fe.gotTexts != nil {
+		t.Errorf("embedder called for non-embeddable doc")
+	}
+}
+
+func TestReprojectStructured_EmbedsWhenEmbedderSet(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer srv.Close()
+	fe := &fakeEmbedder{vec: []float32{0.5, 0.6}}
+	ts := &typesense30142.TSBackend{Host: srv.URL, CollectionName: "c", ApiKey: "k", Embedder: fe}
+	evt := nostr.Event{Kind: 30818, Content: "body", Tags: nostr.Tags{{"d", "x"}, {"title", "T"}}}
+	if err := reprojectStructured(ts, evt, nostrToWiki); err != nil {
+		t.Fatalf("reprojectStructured: %v", err)
+	}
+	if !strings.Contains(string(gotBody), `"embedding":[0.5,0.6]`) {
+		t.Errorf("upserted body missing embedding vector: %s", gotBody)
+	}
+	if fe.gotInput != typesense30142.EmbedPassage {
+		t.Errorf("input role = %q, want passage", fe.gotInput)
 	}
 }
