@@ -65,6 +65,7 @@ func main() {
 	calendarEnabled := os.Getenv("CALENDAR_ENABLED") == "true"
 	profilesEnabled := os.Getenv("PROFILES_ENABLED") == "true"
 	sharesEnabled := os.Getenv("COMMUNITY_SHARES_ENABLED") == "true"
+	transferkioskEnabled := os.Getenv("TRANSFERKIOSK_ENABLED") == "true"
 
 	// NIP-11: Retention
 	retentionKinds := [][]int{{5}, {30142}}
@@ -79,6 +80,9 @@ func main() {
 	}
 	if sharesEnabled {
 		retentionKinds = append(retentionKinds, []int{16}, []int{30222})
+	}
+	if transferkioskEnabled {
+		retentionKinds = append(retentionKinds, []int{30143}, []int{30144}, []int{30145})
 	}
 	relay.Info.Retention = []*nip11.RelayRetentionDocument{
 		{Kinds: retentionKinds},
@@ -355,6 +359,33 @@ func main() {
 		fmt.Printf("Community shares (kinds 16, 30222) enabled — collection %s\n", shColl)
 	}
 
+	// Transferkiosk (NIP-DIDACTIC kinds 30143/30144/30145) backend — gated behind
+	// TRANSFERKIOSK_ENABLED. One shared collection for projekt/massnahme/
+	// publikation; nil when the flag is off so the registry omits the kinds.
+	var tsDB6 *typesense30142.TSBackend
+	if transferkioskEnabled {
+		tkColl := os.Getenv("TS_COLLECTION_TRANSFERKIOSK")
+		if tkColl == "" {
+			tkColl = "transferkiosk"
+		}
+		tkSchema := transferkioskSchema(tkColl)
+		tsDB6 = &typesense30142.TSBackend{
+			ApiKey:          os.Getenv("TS_APIKEY"),
+			Host:            os.Getenv("TS_HOST"),
+			CollectionName:  tkColl,
+			RawEventStore:   &boltDB,
+			Schema:          &tkSchema,
+			SearchFields:    "name,searchText,content",
+			StopwordsSet:    stopwordsSet,
+			StopwordsList:   stopwordsList,
+			StopwordsLocale: "de",
+		}
+		if err := tsDB6.Init(); err != nil {
+			panic(fmt.Sprintf("transferkiosk TSBackend init: %v", err))
+		}
+		fmt.Printf("Transferkiosk (kinds 30143/30144/30145) enabled — collection %s\n", tkColl)
+	}
+
 	// Optional: reconcile BoltDB ↔ Typesense at startup. Both stores are
 	// open and the listener hasn't started yet, so this runs single-threaded
 	// against the relay's own opened BoltDB — no lock juggling, unlike the
@@ -466,6 +497,17 @@ func main() {
 			chunked:  false,
 		})
 	}
+	if transferkioskEnabled && tsDB6 != nil {
+		contentTypes = append(contentTypes, contentType{
+			kinds:    []nostr.Kind{30143, 30144, 30145},
+			validate: validateTransferkiosk,
+			store:    func(e nostr.Event) { storeTransferkiosk(true, tsDB6, e) },
+			fetch:    tsDB6.QueryEvents,
+			count:    tsDB6.CountEvents,
+			deleteID: tsDB6.DeleteEvent,
+			chunked:  true,
+		})
+	}
 	reg := newRegistry(contentTypes...)
 
 	var profileContentKinds []nostr.Kind
@@ -519,6 +561,9 @@ func main() {
 		if tsDB4 != nil {
 			tsDB4.Embedder = embedder
 		}
+		if tsDB6 != nil {
+			tsDB6.Embedder = embedder
+		}
 		fmt.Printf("Semantic search enabled with fields: %v\n", semanticCfg.EmbedFields)
 	} else {
 		fmt.Println("Semantic search disabled")
@@ -565,6 +610,14 @@ func main() {
 			kinds:     []nostr.Kind{16, 30222},
 			recreate:  func() error { return tsDB5.RecreateCollection(tsDB5.Schema) },
 			reproject: func(e nostr.Event) error { return reprojectStructured(tsDB5, e, nostrToShare) },
+		})
+	}
+	if transferkioskEnabled && tsDB6 != nil {
+		structuredTargets = append(structuredTargets, structuredReindexTarget{
+			label:     "transferkiosk",
+			kinds:     []nostr.Kind{30143, 30144, 30145},
+			recreate:  func() error { return tsDB6.RecreateCollection(tsDB6.Schema) },
+			reproject: func(e nostr.Event) error { return reprojectStructured(tsDB6, e, nostrToTransferkiosk) },
 		})
 	}
 
@@ -664,6 +717,11 @@ func main() {
 		if calendarEnabled && tsDB4 != nil {
 			for _, k := range []nostr.Kind{31922, 31923, 31924, 31925} {
 				stampTargets[k] = tsDB4
+			}
+		}
+		if transferkioskEnabled && tsDB6 != nil {
+			for _, k := range []nostr.Kind{30143, 30144, 30145} {
+				stampTargets[k] = tsDB6
 			}
 		}
 
