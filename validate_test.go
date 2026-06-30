@@ -47,3 +47,18 @@ func TestValidateWiki(t *testing.T) {
 		t.Error("wiki event missing d tag accepted")
 	}
 }
+
+func TestValidateTransferkiosk(t *testing.T) {
+	ok := nostr.Event{Kind: 30143, Tags: nostr.Tags{{"d", "x"}, {"name", "y"}}}
+	if reject, _ := validateTransferkiosk(ok); reject {
+		t.Error("valid event rejected")
+	}
+	noD := nostr.Event{Kind: 30144, Tags: nostr.Tags{{"name", "y"}}}
+	if reject, _ := validateTransferkiosk(noD); !reject {
+		t.Error("missing d not rejected")
+	}
+	noName := nostr.Event{Kind: 30145, Tags: nostr.Tags{{"d", "x"}}}
+	if reject, _ := validateTransferkiosk(noName); !reject {
+		t.Error("missing name not rejected")
+	}
+}
