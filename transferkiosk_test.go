@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/eventstore/typesense30142"
 )
 
 func tkEvent(kind nostr.Kind, tags nostr.Tags, content string) *nostr.Event {
@@ -140,5 +141,28 @@ func TestNostrToTransferkioskMissingDRejected(t *testing.T) {
 	ev := tkEvent(30143, nostr.Tags{{"type", "Project"}, {"name", "x"}}, "")
 	if _, err := nostrToTransferkiosk(ev); err == nil {
 		t.Fatal("expected error for missing d tag")
+	}
+}
+
+func TestTransferkioskSchema(t *testing.T) {
+	s := transferkioskSchema("transferkiosk")
+	if s.Name != "transferkiosk" || s.DefaultSortingField != "eventCreatedAt" {
+		t.Fatalf("schema header wrong: %+v", s)
+	}
+	byName := map[string]typesense30142.Field{}
+	for _, f := range s.Fields {
+		byName[f.Name] = f
+	}
+	emb, ok := byName["embedding"]
+	if !ok || emb.Type != "float[]" || emb.NumDim != 768 || emb.VecDistMetric != "cosine" || !emb.Optional {
+		t.Errorf("embedding field wrong: %+v", emb)
+	}
+	for _, name := range []string{"id", "d", "type", "name", "searchText", "about", "audience", "status", "partOf", "eventKind"} {
+		if _, ok := byName[name]; !ok {
+			t.Errorf("missing field %q", name)
+		}
+	}
+	if !byName["about"].Facet || byName["about"].Type != "string[]" {
+		t.Errorf("about should be a faceted string[]: %+v", byName["about"])
 	}
 }

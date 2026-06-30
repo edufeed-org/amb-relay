@@ -66,3 +66,13 @@ func validateCalendar(event nostr.Event) (reject bool, msg string) {
 	}
 	return false, ""
 }
+
+func validateTransferkiosk(event nostr.Event) (reject bool, msg string) {
+	if event.Tags.GetD() == "" {
+		return true, "missing required 'd' tag"
+	}
+	if !event.Tags.Has("name") {
+		return true, "missing required 'name' tag"
+	}
+	return false, ""
+}

@@ -185,3 +185,56 @@ func (d *TransferkioskDocument) EmbedText() string {
 
 // SetEmbedding stores the computed dense vector.
 func (d *TransferkioskDocument) SetEmbedding(v []float32) { d.Embedding = v }
+
+// storeTransferkiosk projects and upserts a kind-30143/30144/30145 event to the
+// shared transferkiosk collection via the structured-collection helper.
+func storeTransferkiosk(enabled bool, ts *typesense30142.TSBackend, event nostr.Event) {
+	storeStructured(enabled, ts, event, "transferkiosk", nostrToTransferkiosk)
+}
+
+// transferkioskSchema returns the Typesense schema for the shared transferkiosk
+// collection. Concept facets are faceted string[]; scalar facets are faceted
+// strings; searchText/content are the searchable bodies. Envelope fields carry
+// eventKind so the three kinds are distinguishable in a query.
+func transferkioskSchema(name string) typesense30142.CollectionSchema {
+	str := func(n string, facet bool) typesense30142.Field {
+		return typesense30142.Field{Name: n, Type: "string", Facet: facet, Optional: true}
+	}
+	strArr := func(n string) typesense30142.Field {
+		return typesense30142.Field{Name: n, Type: "string[]", Facet: true, Optional: true}
+	}
+	return typesense30142.CollectionSchema{
+		Name:                name,
+		DefaultSortingField: "eventCreatedAt",
+		Fields: append([]typesense30142.Field{
+			{Name: "id", Type: "string"},
+			{Name: "d", Type: "string"},
+			{Name: "type", Type: "string", Facet: true},
+			{Name: "name", Type: "string"},
+			str("description", false),
+			str("searchText", false),
+			str("content", false),
+			str("partOf", true),
+			strArr("about"),
+			strArr("audience"),
+			strArr("activity"),
+			strArr("actionField"),
+			strArr("actionScope"),
+			strArr("studyModel"),
+			strArr("objective"),
+			strArr("transferability"),
+			strArr("publicationType"),
+			str("status", true),
+			str("funderName", true),
+			str("funderProgram", true),
+			str("hostName", true),
+			str("hostBundesland", true),
+			str("startDate", true),
+			str("endDate", true),
+			str("datePublished", true),
+			strArr("author"),
+			str("publisher", true),
+			{Name: "embedding", Type: "float[]", NumDim: 768, VecDistMetric: "cosine", Optional: true},
+		}, structuredEnvelopeFields()...),
+	}
+}
