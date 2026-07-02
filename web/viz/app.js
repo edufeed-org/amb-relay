@@ -99,4 +99,4 @@ async function main() {
 
   apply();
 }
-main().catch(e => { document.getElementById('graph').innerHTML = '<p style="padding:20px">' + e.message + '</p>'; });
+main().catch(e => { document.getElementById('graph').innerHTML = '<p style="padding:20px">' + esc(e.message) + '</p>'; });
