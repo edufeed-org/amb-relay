@@ -28,6 +28,10 @@ func tsSearchURL(host, collection string, extra url.Values) string {
 	q := url.Values{}
 	q.Set("q", "*")
 	q.Set("query_by", "name")
+	// q=* ignores query_by for matching; validate_field_names=false keeps the
+	// call from 400ing on collections that lack a `name` field (matches the
+	// eventstore's own query convention).
+	q.Set("validate_field_names", "false")
 	for k, vs := range extra {
 		for _, v := range vs {
 			q.Add(k, v)
