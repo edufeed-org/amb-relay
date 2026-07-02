@@ -44,8 +44,13 @@ type VizConfig struct {
 // facetable and switch to facet_by — see project memory.)
 const ambScanCap = 2000
 
-// tkScanCap bounds the transferkiosk pull (medium scale → a few hundred docs).
-const tkScanCap = 1000
+// tkScanCap is an upper safety bound on the transferkiosk pull; pagedSearch
+// stops at the first short page, so the real cost tracks the doc count, not
+// this number. It must exceed the total across all three kinds — projects
+// alone already run into four digits — otherwise the scan fills with projects
+// (returned first) and never reaches the measures/publications that carry the
+// part_of edges, leaving the graph with no connections.
+const tkScanCap = 20000
 
 // vizCache is a tiny TTL cache for the two expensive endpoints. A per-key build
 // lock collapses concurrent misses into a single build (no thundering herd);
