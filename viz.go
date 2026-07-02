@@ -145,13 +145,25 @@ func vizSetup(mux *http.ServeMux, cfg VizConfig) {
 	})
 
 	mux.HandleFunc("/viz/node/", func(w http.ResponseWriter, r *http.Request) {
-		rest := strings.TrimPrefix(r.URL.Path, "/viz/node/")
+		// Split on the escaped path so a %2F inside a segment (e.g. a
+		// publisher name containing "/") isn't mistaken for a separator.
+		rest := strings.TrimPrefix(r.URL.EscapedPath(), "/viz/node/")
 		parts := strings.SplitN(rest, "/", 2)
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			http.Error(w, "bad node ref", http.StatusBadRequest)
 			return
 		}
-		items, err := cfg.computeNode(r.Context(), parts[0], parts[1])
+		typ, err := url.PathUnescape(parts[0])
+		if err != nil {
+			http.Error(w, "bad node ref", http.StatusBadRequest)
+			return
+		}
+		ref, err := url.PathUnescape(parts[1])
+		if err != nil {
+			http.Error(w, "bad node ref", http.StatusBadRequest)
+			return
+		}
+		items, err := cfg.computeNode(r.Context(), typ, ref)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
