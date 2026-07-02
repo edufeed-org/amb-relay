@@ -1,6 +1,9 @@
 package main
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // Node is one entity in the relationship graph. Weight drives node size.
 type Node struct {
@@ -66,6 +69,21 @@ type GraphInput struct {
 	TopAuthors        int
 }
 
+// tkLinkKey drops the pubkey segment of a transferkiosk coord
+// ("<kind>:<pubkey>:<d>" -> "<kind>:<d>"). Transferkiosk content is mirrored
+// into the relay under an uploader pubkey, so a node's own coord (from its doc
+// id) carries the uploader pubkey — but its children cite the parent by the
+// ORIGINAL author pubkey. Linking on the stable d-identifier, not the full
+// coord, is what makes those parent/child edges (and project drill-down)
+// resolve instead of silently dropping.
+func tkLinkKey(coord string) string {
+	p := strings.SplitN(coord, ":", 3)
+	if len(p) < 3 {
+		return coord
+	}
+	return p[0] + ":" + p[2]
+}
+
 func tkNodeType(kind int) string {
 	switch kind {
 	case 30143:
@@ -116,20 +134,36 @@ func buildGraph(in GraphInput) Graph {
 		g.Edges = append(g.Edges, Edge{Source: src, Target: "community:" + ac.Community, Weight: ac.Weight, Kind: "author_community"})
 	}
 
-	// Transferkiosk nodes + edges.
+	// Transferkiosk nodes + edges. A node's own coord uses the uploader pubkey,
+	// but children cite their parent by its original coord; canonicalize each
+	// node to the coord its children reference (keyed by d-identifier) so edges
+	// and drill-down resolve. Childless nodes keep their own coord.
+	canonical := map[string]string{}
 	for _, t := range in.TK {
-		g.Nodes = append(g.Nodes, Node{ID: "tk:" + t.Coord, Type: tkNodeType(t.Kind), Label: t.Label, Weight: 1})
+		if t.ParentCoord != "" {
+			canonical[tkLinkKey(t.ParentCoord)] = t.ParentCoord
+		}
+	}
+	tkCoord := func(c string) string {
+		if ref, ok := canonical[tkLinkKey(c)]; ok {
+			return ref
+		}
+		return c
+	}
+
+	for _, t := range in.TK {
+		g.Nodes = append(g.Nodes, Node{ID: "tk:" + tkCoord(t.Coord), Type: tkNodeType(t.Kind), Label: t.Label, Weight: 1})
 	}
 	for _, t := range in.TK {
 		if t.ParentCoord != "" {
-			g.Edges = append(g.Edges, Edge{Source: "tk:" + t.Coord, Target: "tk:" + t.ParentCoord, Weight: 1, Kind: "part_of"})
+			g.Edges = append(g.Edges, Edge{Source: "tk:" + tkCoord(t.Coord), Target: "tk:" + t.ParentCoord, Weight: 1, Kind: "part_of"})
 		}
 		if t.Kind == 30143 {
 			if t.Author != "" && kept["author:"+t.Author] {
-				g.Edges = append(g.Edges, Edge{Source: "author:" + t.Author, Target: "tk:" + t.Coord, Weight: 1, Kind: "author_project"})
+				g.Edges = append(g.Edges, Edge{Source: "author:" + t.Author, Target: "tk:" + tkCoord(t.Coord), Weight: 1, Kind: "author_project"})
 			}
 			if t.Community != "" {
-				g.Edges = append(g.Edges, Edge{Source: "tk:" + t.Coord, Target: "community:" + t.Community, Weight: 1, Kind: "community_project"})
+				g.Edges = append(g.Edges, Edge{Source: "tk:" + tkCoord(t.Coord), Target: "community:" + t.Community, Weight: 1, Kind: "community_project"})
 			}
 		}
 	}

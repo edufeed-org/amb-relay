@@ -20,6 +20,38 @@ func hasEdge(g Graph, src, dst, kind string) bool {
 	return false
 }
 
+// Children reference their parent by a coord whose pubkey (the original author,
+// "orig") differs from the pubkey on the parent's own coord (the uploader,
+// "upl"). The part_of edge must still connect, and the parent node must adopt
+// the coord its children reference so drill-down (partOf:=<coord>) matches.
+func TestBuildGraph_PubkeyMismatchLinks(t *testing.T) {
+	in := GraphInput{
+		TopAuthors: 10,
+		TK: []TKItem{
+			{Coord: "30143:upl:proj", Kind: 30143, Label: "Proj"},
+			{Coord: "30144:upl:m1", Kind: 30144, Label: "M1", ParentCoord: "30143:orig:proj"},
+			{Coord: "30145:upl:pub", Kind: 30145, Label: "Pub", ParentCoord: "30143:orig:proj"},
+		},
+	}
+	g := buildGraph(in)
+
+	if _, ok := nodeByID(g, "tk:30143:orig:proj"); !ok {
+		t.Errorf("project node not canonicalized to child-referenced coord")
+	}
+	if _, ok := nodeByID(g, "tk:30143:upl:proj"); ok {
+		t.Errorf("project node should not keep its uploader coord")
+	}
+	if !hasEdge(g, "tk:30144:upl:m1", "tk:30143:orig:proj", "part_of") {
+		t.Errorf("measure->project part_of edge did not resolve across pubkey mismatch")
+	}
+	if !hasEdge(g, "tk:30145:upl:pub", "tk:30143:orig:proj", "part_of") {
+		t.Errorf("pub->project part_of edge did not resolve across pubkey mismatch")
+	}
+	if n, _ := nodeByID(g, "tk:30143:orig:proj"); n.Weight != 2 {
+		t.Errorf("project weight = %d, want 2", n.Weight)
+	}
+}
+
 func TestBuildGraph_TopAuthorFold(t *testing.T) {
 	in := GraphInput{
 		TopAuthors: 2,
