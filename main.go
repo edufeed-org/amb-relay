@@ -66,6 +66,7 @@ func main() {
 	profilesEnabled := os.Getenv("PROFILES_ENABLED") == "true"
 	sharesEnabled := os.Getenv("COMMUNITY_SHARES_ENABLED") == "true"
 	transferkioskEnabled := os.Getenv("TRANSFERKIOSK_ENABLED") == "true"
+	vizEnabled := os.Getenv("VIZ_ENABLED") == "true"
 
 	// NIP-11: Retention
 	retentionKinds := [][]int{{5}, {30142}}
@@ -1502,6 +1503,45 @@ func main() {
 	}
 
 	landing.Setup(relay)
+
+	// Read-only /viz dashboard — gated behind VIZ_ENABLED. Collection names come
+	// from the resolved backends (nil when a feature is off) so viz queries only
+	// collections that actually exist, with the same default names main.go uses.
+	if vizEnabled {
+		collName := func(b *typesense30142.TSBackend) string {
+			if b == nil {
+				return ""
+			}
+			return b.CollectionName
+		}
+		topAuthors := 40
+		if v := os.Getenv("VIZ_TOP_AUTHORS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				topAuthors = n
+			}
+		}
+		cacheTTL := 60 * time.Second
+		if v := os.Getenv("VIZ_CACHE_TTL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				cacheTTL = d
+			}
+		}
+		vizSetup(relay.Router(), VizConfig{
+			Host:   os.Getenv("TS_HOST"),
+			ApiKey: os.Getenv("TS_APIKEY"),
+			Collections: VizCollections{
+				AMB:           tsDB.CollectionName,
+				Longform:      collName(tsDB2),
+				Wiki:          collName(tsDB3),
+				Calendar:      collName(tsDB4),
+				Shares:        collName(tsDB5),
+				Transferkiosk: collName(tsDB6),
+			},
+			TopAuthors: topAuthors,
+			CacheTTL:   cacheTTL,
+		})
+		fmt.Println("viz dashboard enabled at /viz")
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
