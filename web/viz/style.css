@@ -1,0 +1,24 @@
+:root {
+  --bg:#0f1216; --fg:#e8eaed; --muted:#8a8f98; --line:#262b33;
+  --community:#5c7fdf; --author:#e39a5c; --project:#4cae7a; --measure:#5fc0b0; --publication:#b98cd8;
+}
+* { box-sizing:border-box; }
+html,body { margin:0; height:100%; background:var(--bg); color:var(--fg); font-family:system-ui,sans-serif; }
+body { display:flex; flex-direction:column; }
+.strip { display:flex; border-bottom:1px solid var(--line); }
+.strip .s { flex:1; text-align:center; padding:12px 6px; border-right:1px solid var(--line); }
+.strip .s:last-child { border-right:0; }
+.strip .big { font-size:1.4rem; font-weight:700; display:block; }
+.strip .lbl { font-size:.62rem; letter-spacing:.08em; color:var(--muted); }
+#graph { flex:1; position:relative; overflow:hidden; }
+.legend { position:absolute; left:14px; bottom:14px; font-size:.72rem; background:rgba(0,0,0,.5); padding:8px 10px; border-radius:8px; line-height:1.6; }
+.legend .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; }
+.toggles { position:absolute; right:14px; top:74px; font-size:.75rem; background:rgba(0,0,0,.5); padding:8px 10px; border-radius:8px; }
+.toggles label { display:block; margin:3px 0; cursor:pointer; }
+.panel { position:absolute; right:0; top:0; bottom:0; width:280px; background:#151a20; border-left:1px solid var(--line); padding:14px; overflow-y:auto; }
+.panel.hidden { display:none; }
+.panel h3 { margin:.2rem 0; }
+.panel .sub { color:var(--muted); font-size:.72rem; margin-bottom:10px; }
+.panel .res { border:1px solid var(--line); border-radius:6px; padding:6px 8px; margin-bottom:6px; font-size:.8rem; }
+.panel .res .m { color:var(--muted); font-size:.66rem; }
+.panel .close { float:right; cursor:pointer; color:var(--muted); }
