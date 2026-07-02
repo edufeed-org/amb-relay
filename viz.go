@@ -47,10 +47,13 @@ const ambScanCap = 2000
 // tkScanCap bounds the transferkiosk pull (medium scale → a few hundred docs).
 const tkScanCap = 1000
 
-// vizCache is a tiny TTL cache for the two expensive endpoints.
+// vizCache is a tiny TTL cache for the two expensive endpoints. A per-key build
+// lock collapses concurrent misses into a single build (no thundering herd);
+// errors are never cached.
 type vizCache struct {
 	mu      sync.Mutex
 	entries map[string]vizCacheEntry
+	locks   map[string]*sync.Mutex
 }
 
 type vizCacheEntry struct {
@@ -58,15 +61,39 @@ type vizCacheEntry struct {
 	expiry time.Time
 }
 
-func newVizCache() *vizCache { return &vizCache{entries: map[string]vizCacheEntry{}} }
+func newVizCache() *vizCache {
+	return &vizCache{entries: map[string]vizCacheEntry{}, locks: map[string]*sync.Mutex{}}
+}
+
+func (c *vizCache) fresh(key string) (any, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.entries[key]; ok && time.Now().Before(e.expiry) {
+		return e.val, true
+	}
+	return nil, false
+}
 
 func (c *vizCache) get(key string, ttl time.Duration, build func() (any, error)) (any, error) {
+	if v, ok := c.fresh(key); ok {
+		return v, nil
+	}
+
 	c.mu.Lock()
-	if e, ok := c.entries[key]; ok && time.Now().Before(e.expiry) {
-		c.mu.Unlock()
-		return e.val, nil
+	kl := c.locks[key]
+	if kl == nil {
+		kl = &sync.Mutex{}
+		c.locks[key] = kl
 	}
 	c.mu.Unlock()
+
+	// Serialize builds per key; the winner populates, the rest read the result.
+	kl.Lock()
+	defer kl.Unlock()
+	if v, ok := c.fresh(key); ok {
+		return v, nil
+	}
+
 	val, err := build()
 	if err != nil {
 		return nil, err
@@ -94,8 +121,9 @@ func vizSetup(mux *http.ServeMux, cfg VizConfig) {
 
 	// API routes first (longer, more specific patterns win in ServeMux).
 	mux.HandleFunc("/viz/stats", func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithoutCancel(r.Context())
 		v, err := cache.get("stats", cfg.CacheTTL, func() (any, error) {
-			return cfg.computeStats(r.Context())
+			return cfg.computeStats(ctx)
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
@@ -105,8 +133,9 @@ func vizSetup(mux *http.ServeMux, cfg VizConfig) {
 	})
 
 	mux.HandleFunc("/viz/graph", func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithoutCancel(r.Context())
 		v, err := cache.get("graph", cfg.CacheTTL, func() (any, error) {
-			return cfg.computeGraph(r.Context())
+			return cfg.computeGraph(ctx)
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
@@ -204,8 +233,8 @@ func (cfg VizConfig) communityAndProjectCounts(ctx context.Context) (int, int) {
 	}
 	projects := 0
 	if cfg.Collections.Transferkiosk != "" {
-		if docs, err := vizSearch(ctx, cfg.Host, cfg.ApiKey, cfg.Collections.Transferkiosk, "eventKind:=30143", "id", 250); err == nil {
-			projects = len(docs)
+		if n, err := cfg.filteredCount(ctx, cfg.Collections.Transferkiosk, "eventKind:=30143"); err == nil {
+			projects = n
 		}
 	}
 	return communities, projects
@@ -303,6 +332,27 @@ func (cfg VizConfig) scanAMBAggregate(ctx context.Context, maxDocs int) (authors
 		return acs[i].Community < acs[j].Community
 	})
 	return authors, subjects, acs
+}
+
+// filteredCount returns the total number of documents in a collection matching
+// filterBy, via a per_page=0 search reading `found` (not truncated at a page
+// size, unlike vizSearch).
+func (cfg VizConfig) filteredCount(ctx context.Context, collection, filterBy string) (int, error) {
+	u := tsSearchURL(cfg.Host, collection, url.Values{
+		"per_page":  {"0"},
+		"filter_by": {filterBy},
+	})
+	body, err := tsGet(ctx, u, cfg.ApiKey)
+	if err != nil {
+		return 0, err
+	}
+	var parsed struct {
+		Found int `json:"found"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return 0, err
+	}
+	return parsed.Found, nil
 }
 
 // pagedSearch pages a q=* search (per_page=250) up to maxDocs and returns the
