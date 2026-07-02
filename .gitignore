@@ -13,3 +13,6 @@ hydrate-bolt
 
 # git worktrees (local, ignored)
 .worktrees/
+
+# brainstorming visual-companion mockups (local, ignored)
+.superpowers/
