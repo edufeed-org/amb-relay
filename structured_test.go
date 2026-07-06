@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -179,6 +180,20 @@ func TestEmbedAndAttach_SetsVector(t *testing.T) {
 	}
 }
 
+// Structured passages are bounded like the AMB path: a huge title+summary+
+// content must not reach the mem-limited embed container untruncated.
+func TestEmbedAndAttach_TruncatesLongText(t *testing.T) {
+	fe := &fakeEmbedder{vec: []float32{1}}
+	ts := &typesense30142.TSBackend{Embedder: fe}
+	doc := &fakeDoc{text: strings.Repeat("a", EmbedMaxLength+5000)}
+	if err := embedAndAttach(ts, doc); err != nil {
+		t.Fatalf("embedAndAttach: %v", err)
+	}
+	if len(fe.gotTexts) != 1 || len(fe.gotTexts[0]) != EmbedMaxLength {
+		t.Errorf("embed text length = %d, want %d", len(fe.gotTexts[0]), EmbedMaxLength)
+	}
+}
+
 func TestEmbedAndAttach_NilEmbedderNoop(t *testing.T) {
 	ts := &typesense30142.TSBackend{} // Embedder nil
 	doc := &fakeDoc{text: "x"}
@@ -221,5 +236,23 @@ func TestReprojectStructured_EmbedsWhenEmbedderSet(t *testing.T) {
 	}
 	if fe.gotInput != typesense30142.EmbedPassage {
 		t.Errorf("input role = %q, want passage", fe.gotInput)
+	}
+}
+
+// docIDFor: kinds sharing one collection (calendar, transferkiosk) get the
+// kind folded into the doc id so same (pubkey,d) across kinds cannot collide;
+// single-kind collections keep the legacy {pubkey}:{d} id.
+func TestDocIDFor(t *testing.T) {
+	pub := "0000000000000000000000000000000000000000000000000000000000000004"
+	for _, kind := range []nostr.Kind{31922, 31923, 31924, 31925, 30143, 30144, 30145} {
+		want := fmt.Sprintf("%d:%s:slug", kind, pub)
+		if got := docIDFor(kind, pub, "slug"); got != want {
+			t.Errorf("docIDFor(%d) = %q, want %q", kind, got, want)
+		}
+	}
+	for _, kind := range []nostr.Kind{30142, 30023, 30818} {
+		if got := docIDFor(kind, pub, "slug"); got != pub+":slug" {
+			t.Errorf("docIDFor(%d) = %q, want legacy %q", kind, got, pub+":slug")
+		}
 	}
 }

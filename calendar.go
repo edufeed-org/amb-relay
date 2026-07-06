@@ -46,7 +46,7 @@ func nostrToCalendar(event *nostr.Event) (*CalendarDocument, error) {
 		return nil, err
 	}
 	doc := &CalendarDocument{
-		ID:                 typesense30142.GenerateDocumentID(event.PubKey.Hex(), dTag),
+		ID:                 docIDFor(event.Kind, event.PubKey.Hex(), dTag),
 		D:                  dTag,
 		Content:            event.Content,
 		structuredEnvelope: env,

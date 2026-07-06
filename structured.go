@@ -47,6 +47,19 @@ func newStructuredEnvelope(event *nostr.Event) (structuredEnvelope, error) {
 	}, nil
 }
 
+// docIDFor returns the Typesense document id for an addressable event.
+// Collections shared by multiple kinds (calendar 31922-31925, transferkiosk
+// 30143-30145) fold the kind into the id — the nostr coordinate shape
+// {kind}:{pubkey}:{d} — so the same (pubkey, d) under two kinds cannot
+// overwrite each other. Single-kind collections keep the legacy {pubkey}:{d}.
+func docIDFor(kind nostr.Kind, pubkey, dTag string) string {
+	switch kind {
+	case 30143, 30144, 30145, 31922, 31923, 31924, 31925:
+		return fmt.Sprintf("%d:%s", kind, typesense30142.GenerateDocumentID(pubkey, dTag))
+	}
+	return typesense30142.GenerateDocumentID(pubkey, dTag)
+}
+
 // structuredEnvelopeFields returns the Typesense field defs for the envelope,
 // shared by every simple structured collection's schema.
 func structuredEnvelopeFields() []typesense30142.Field {
@@ -114,7 +127,13 @@ func embedAndAttach(ts *typesense30142.TSBackend, doc any) error {
 	if !ok {
 		return nil
 	}
-	vecs, err := ts.Embedder.Embed(context.Background(), []string{emb.EmbedText()}, typesense30142.EmbedPassage)
+	// Bound the passage like the AMB path (embedding.go): the embed container
+	// is mem-limited and the model truncates to its token window anyway.
+	text := emb.EmbedText()
+	if len(text) > EmbedMaxLength {
+		text = text[:EmbedMaxLength]
+	}
+	vecs, err := ts.Embedder.Embed(context.Background(), []string{text}, typesense30142.EmbedPassage)
 	if err != nil {
 		return err
 	}

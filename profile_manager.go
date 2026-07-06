@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"sync"
 	"time"
 
 	"fiatjaf.com/nostr"
@@ -116,6 +117,7 @@ type ProfileManager struct {
 	fallbackRelays []string
 	batchSize      int
 	stopCh         chan struct{}
+	stopOnce       sync.Once
 }
 
 func NewProfileManager(q profileQueue, src profileSource, store func(nostr.Event), backfill func() []nostr.PubKey, relays, fallbackRelays []string, batchSize int) *ProfileManager {
@@ -250,7 +252,8 @@ func (p *ProfileManager) StartRefreshLoop(interval time.Duration) {
 	}()
 }
 
-func (p *ProfileManager) Stop() { close(p.stopCh) }
+// Stop is idempotent: a second call must not re-close the channel.
+func (p *ProfileManager) Stop() { p.stopOnce.Do(func() { close(p.stopCh) }) }
 
 // enqueueShareCommunities enqueues the kind-0 fetch for every community a share
 // (kind 16/30222) targets, so a brand-new community's name resolves on the next

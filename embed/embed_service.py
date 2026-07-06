@@ -2,7 +2,10 @@
 
 Loads a single sentence-transformers model at startup and exposes
 POST /embed and GET /health. Auth is a single bearer token from the
-EMBED_TOKEN env var; bad or missing tokens return 401.
+EMBED_TOKEN env var; bad or missing tokens return 401. When EMBED_TOKEN
+is unset/empty the service runs open — it is compose-internal (no host
+port), and rejecting everything would silently strip vectors from every
+write instead of failing loudly.
 
 Wire contract (must match amb-indexer/embed.go):
   POST /embed
@@ -13,13 +16,21 @@ Wire contract (must match amb-indexer/embed.go):
 import os
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 
 MODEL_NAME = os.environ.get(
     "EMBED_MODEL", "intfloat/multilingual-e5-base"
 )
 EXPECTED_TOKEN = os.environ.get("EMBED_TOKEN", "")
+
+# Resource bounds: the container runs with a hard mem_limit (see the
+# 2026-06-11 embed-runaway incident), so cap what a single request can
+# feed the encoder. Oversized batches are rejected (422); overlong texts
+# are truncated, matching the relay's EmbedMaxLength — the model truncates
+# to its token window anyway, so no signal is lost.
+MAX_BATCH = 256
+MAX_TEXT_CHARS = 8192
 
 # e5 models are asymmetric: a query and the passage it should match get
 # different prefixes. Arctic v2.0 instead uses a built-in query prompt and
@@ -65,16 +76,18 @@ _dim = _model.get_sentence_embedding_dimension()
 
 
 def verify_bearer(request: Request) -> None:
+    if not EXPECTED_TOKEN:
+        return
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     token = auth.removeprefix("Bearer ")
-    if not EXPECTED_TOKEN or token != EXPECTED_TOKEN:
+    if token != EXPECTED_TOKEN:
         raise HTTPException(status_code=401, detail="invalid token")
 
 
 class EmbedRequest(BaseModel):
-    texts: list[str]
+    texts: list[str] = Field(min_length=1, max_length=MAX_BATCH)
     input_type: str = "passage"
 
 
@@ -86,7 +99,8 @@ class EmbedResponse(BaseModel):
 
 @app.post("/embed", response_model=EmbedResponse, dependencies=[Depends(verify_bearer)])
 def embed(req: EmbedRequest) -> EmbedResponse:
-    vectors = encode_texts(_model, MODEL_NAME, req.texts, req.input_type)
+    texts = [t[:MAX_TEXT_CHARS] for t in req.texts]
+    vectors = encode_texts(_model, MODEL_NAME, texts, req.input_type)
     return EmbedResponse(
         embeddings=vectors.tolist(),
         model=MODEL_NAME,

@@ -88,8 +88,8 @@ func TestNostrToTransferkioskMassnahme(t *testing.T) {
 	if err != nil {
 		t.Fatalf("nostrToTransferkiosk: %v", err)
 	}
-	if doc.PartOf != "30143:abc:https://transferkiosk.net/p/101560" {
-		t.Errorf("PartOf = %q", doc.PartOf)
+	if len(doc.PartOf) != 1 || doc.PartOf[0] != "30143:abc:https://transferkiosk.net/p/101560" {
+		t.Errorf("PartOf = %v", doc.PartOf)
 	}
 	if len(doc.Audience) != 1 || doc.Audience[0] != "Studierende" {
 		t.Errorf("Audience = %v", doc.Audience)
@@ -123,8 +123,8 @@ func TestNostrToTransferkioskPublikation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("nostrToTransferkiosk: %v", err)
 	}
-	if doc.PartOf != "30143:abc:https://transferkiosk.net/p/101498" {
-		t.Errorf("PartOf = %q", doc.PartOf)
+	if len(doc.PartOf) != 1 || doc.PartOf[0] != "30143:abc:https://transferkiosk.net/p/101498" {
+		t.Errorf("PartOf = %v", doc.PartOf)
 	}
 	if doc.Publisher != "ZFHE" || len(doc.Author) != 1 || doc.Author[0] != "Benjamin Ditzel" {
 		t.Errorf("publisher/author wrong: %+v", doc)
@@ -164,5 +164,46 @@ func TestTransferkioskSchema(t *testing.T) {
 	}
 	if !byName["about"].Facet || byName["about"].Type != "string[]" {
 		t.Errorf("about should be a faceted string[]: %+v", byName["about"])
+	}
+	if !byName["partOf"].Facet || byName["partOf"].Type != "string[]" {
+		t.Errorf("partOf should be a faceted string[]: %+v", byName["partOf"])
+	}
+}
+
+// Multiple isPartOf/isOutputOf links must all survive projection — the earlier
+// scalar PartOf silently kept only the last one.
+func TestTransferkioskMultiplePartOfLinks(t *testing.T) {
+	doc, err := nostrToTransferkiosk(tkEvent(30145, nostr.Tags{
+		{"d", "pub-1"},
+		{"name", "Paper"},
+		{"a", "30143:abc:proj-1", "", "isOutputOf"},
+		{"a", "30143:abc:proj-2", "", "isOutputOf"},
+	}, ""))
+	if err != nil {
+		t.Fatalf("nostrToTransferkiosk: %v", err)
+	}
+	if len(doc.PartOf) != 2 || doc.PartOf[0] != "30143:abc:proj-1" || doc.PartOf[1] != "30143:abc:proj-2" {
+		t.Errorf("PartOf = %v", doc.PartOf)
+	}
+}
+
+// All three kinds share one collection, so the doc id must fold in the kind:
+// a Projekt and a Maßnahme with the same (pubkey, d) must not overwrite each other.
+func TestTransferkioskDocIDsDistinctAcrossKinds(t *testing.T) {
+	tags := nostr.Tags{{"d", "same-slug"}, {"name", "Same Name"}}
+	projekt, err := nostrToTransferkiosk(tkEvent(30143, tags, ""))
+	if err != nil {
+		t.Fatalf("projekt: %v", err)
+	}
+	massnahme, err := nostrToTransferkiosk(tkEvent(30144, tags, ""))
+	if err != nil {
+		t.Fatalf("massnahme: %v", err)
+	}
+	if projekt.ID == massnahme.ID {
+		t.Fatalf("doc ID collision across kinds: %q", projekt.ID)
+	}
+	want := "30143:" + projekt.EventPubKey + ":same-slug"
+	if projekt.ID != want {
+		t.Errorf("projekt ID = %q, want %q", projekt.ID, want)
 	}
 }

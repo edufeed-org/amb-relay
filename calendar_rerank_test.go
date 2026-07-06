@@ -74,6 +74,32 @@ func TestInCalendarWindowMissingFieldFailsBound(t *testing.T) {
 	}
 }
 
+// Date-based (kind 31922) events carry "YYYY-MM-DD" start/end; the window
+// predicate must compare their parsed Unix start-of-day like the Bolt index.
+func TestInCalendarWindowDateBased(t *testing.T) {
+	e := nostr.Event{Kind: 31922, Tags: nostr.Tags{
+		{"d", "d1"}, {"title", "T"}, {"start", "2026-06-17"},
+	}}
+	e.ID = e.GetID()
+
+	dayStart := int64(1781654400) // 2026-06-17T00:00:00Z
+	if !inCalendarWindow(e, calendar.CalendarFilter{StartAfter: dayStart - 1}) {
+		t.Error("start_after before the day: want true")
+	}
+	if !inCalendarWindow(e, calendar.CalendarFilter{StartAfter: dayStart}) {
+		t.Error("inclusive lower bound on the day start: want true")
+	}
+	if inCalendarWindow(e, calendar.CalendarFilter{StartAfter: dayStart + 1}) {
+		t.Error("start_after past the day start: want false")
+	}
+	if !inCalendarWindow(e, calendar.CalendarFilter{StartBefore: dayStart}) {
+		t.Error("inclusive upper bound on the day start: want true")
+	}
+	if inCalendarWindow(e, calendar.CalendarFilter{StartBefore: dayStart - 1}) {
+		t.Error("start_before earlier than the day: want false")
+	}
+}
+
 func seqOf(events ...nostr.Event) iter.Seq[nostr.Event] {
 	return func(yield func(nostr.Event) bool) {
 		for _, e := range events {

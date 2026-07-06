@@ -27,8 +27,9 @@ type TransferkioskDocument struct {
 	SearchText  string `json:"searchText,omitempty"`
 	Content     string `json:"content,omitempty"`
 
-	// Project↔measure/publication graph: parent project coord (30143:<pub>:<d>).
-	PartOf string `json:"partOf,omitempty"`
+	// Project↔measure/publication graph: parent project coords (30143:<pub>:<d>).
+	// Multi-valued: an event may carry several isPartOf/isOutputOf `a` tags.
+	PartOf []string `json:"partOf,omitempty"`
 
 	// High-coverage concept facets (prefLabel:de values, directly filterable).
 	About           []string `json:"about,omitempty"`
@@ -80,7 +81,7 @@ func nostrToTransferkiosk(event *nostr.Event) (*TransferkioskDocument, error) {
 		return nil, err
 	}
 	doc := &TransferkioskDocument{
-		ID:                 typesense30142.GenerateDocumentID(event.PubKey.Hex(), dTag),
+		ID:                 docIDFor(event.Kind, event.PubKey.Hex(), dTag),
 		D:                  dTag,
 		Content:            event.Content,
 		structuredEnvelope: env,
@@ -156,7 +157,7 @@ func nostrToTransferkiosk(event *nostr.Event) (*TransferkioskDocument, error) {
 		case "a":
 			// parent project link via isPartOf / isOutputOf marker (tag[3]).
 			if len(tag) >= 4 && (tag[3] == "isPartOf" || tag[3] == "isOutputOf") {
-				doc.PartOf = val
+				doc.PartOf = append(doc.PartOf, val)
 			}
 		}
 	}
@@ -214,7 +215,7 @@ func transferkioskSchema(name string) typesense30142.CollectionSchema {
 			str("description", false),
 			str("searchText", false),
 			str("content", false),
-			str("partOf", true),
+			strArr("partOf"),
 			strArr("about"),
 			strArr("audience"),
 			strArr("activity"),

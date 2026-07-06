@@ -13,15 +13,16 @@ import (
 type AllowlistManager struct {
 	mgmt *ManagementStore
 
-	mu   sync.RWMutex
+	mu           sync.RWMutex
 	config       AccessControlConfig
 	writeAllowed map[string]bool            // merged: direct + list-resolved
 	readAllowed  map[string]bool            // merged: direct + list-resolved
 	listPubkeys  map[string]map[string]bool // listRefKey → resolved pubkeys
 	listRefs     map[string]ListReference
 
-	pool   *nostr.Pool
-	stopCh chan struct{}
+	pool     *nostr.Pool
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 func NewAllowlistManager(mgmt *ManagementStore) *AllowlistManager {
@@ -80,8 +81,9 @@ func (a *AllowlistManager) StartRefreshLoop(interval time.Duration) {
 	}()
 }
 
+// Stop is idempotent: a second call must not re-close the channel.
 func (a *AllowlistManager) Stop() {
-	close(a.stopCh)
+	a.stopOnce.Do(func() { close(a.stopCh) })
 }
 
 // IsWriteRestricted returns whether write access is restricted.
