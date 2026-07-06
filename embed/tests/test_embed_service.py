@@ -38,6 +38,63 @@ def test_embed_rejects_bad_token(client):
     assert r.status_code == 401
 
 
+def test_embed_open_when_token_unset(client, monkeypatch):
+    # Unset EMBED_TOKEN must mean open (compose-internal service), not
+    # reject-everything: the old `not EXPECTED_TOKEN or ...` check 401'd every
+    # request, silently stripping vectors from all writes.
+    import numpy as np
+    import embed_service
+
+    def fake_encode(texts, normalize_embeddings=True):
+        return np.zeros((len(texts), embed_service._dim), dtype="float32")
+
+    monkeypatch.setattr(embed_service, "EXPECTED_TOKEN", "")
+    monkeypatch.setattr(embed_service._model, "encode", fake_encode)
+    r = client.post("/embed", json={"texts": ["x"]})
+    assert r.status_code == 200
+
+
+def test_embed_rejects_oversized_batch(client):
+    import embed_service
+
+    r = client.post(
+        "/embed",
+        headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+        json={"texts": ["x"] * (embed_service.MAX_BATCH + 1)},
+    )
+    assert r.status_code == 422
+
+
+def test_embed_rejects_empty_batch(client):
+    r = client.post(
+        "/embed",
+        headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+        json={"texts": []},
+    )
+    assert r.status_code == 422
+
+
+def test_embed_truncates_overlong_text(client, monkeypatch):
+    import numpy as np
+    import embed_service
+
+    captured = {}
+
+    def fake_encode(texts, normalize_embeddings=True):
+        captured["texts"] = list(texts)
+        return np.zeros((len(texts), embed_service._dim), dtype="float32")
+
+    monkeypatch.setattr(embed_service._model, "encode", fake_encode)
+    r = client.post(
+        "/embed",
+        headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+        json={"texts": ["a" * (embed_service.MAX_TEXT_CHARS + 5000)]},
+    )
+    assert r.status_code == 200
+    # "passage: " prefix + truncated body
+    assert len(captured["texts"][0]) == len("passage: ") + embed_service.MAX_TEXT_CHARS
+
+
 def test_embed_applies_passage_prefix_by_default(client, monkeypatch):
     import numpy as np
     import embed_service

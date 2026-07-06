@@ -158,6 +158,7 @@ type CommunityRegistry struct {
 	mu       sync.RWMutex
 	resolved map[string]communityMembership
 	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 func NewCommunityRegistry(src communitySource, backfill func() []string, relays []string) *CommunityRegistry {
@@ -227,7 +228,8 @@ func (r *CommunityRegistry) StartRefreshLoop(interval time.Duration) {
 	}()
 }
 
-func (r *CommunityRegistry) Stop() { close(r.stopCh) }
+// Stop is idempotent: a second call must not re-close the channel.
+func (r *CommunityRegistry) Stop() { r.stopOnce.Do(func() { close(r.stopCh) }) }
 
 // membersFromTags collects the p-tag pubkeys from a kind-30000 (or contact)
 // list event into a set.

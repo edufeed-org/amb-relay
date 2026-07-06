@@ -5,10 +5,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fiatjaf.com/nostr"
-	"fiatjaf.com/nostr/eventstore/typesense30142"
 )
 
 // shareRef is one share event resolved to the addressable content it targets.
@@ -110,7 +110,8 @@ type CommunityStamper struct {
 	// spawning for non-content kinds (kind-0, share kinds, etc.).
 	stampKinds map[nostr.Kind]bool
 
-	stopCh chan struct{}
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // isStampKind reports whether a kind is in the set of stampable content kinds.
@@ -170,7 +171,7 @@ func (s *CommunityStamper) reconcile(coord string, kind nostr.Kind, pubkey, dTag
 	}
 
 	final := unionSorted(contentOwnCommunities(ev), desired)
-	docID := typesense30142.GenerateDocumentID(pubkey, dTag)
+	docID := docIDFor(kind, pubkey, dTag)
 	if err := s.patch(kind, docID, final); err != nil {
 		fmt.Printf("community stamp: patch %s (%d): %v\n", coord, kind, err)
 	}
@@ -246,4 +247,5 @@ func (s *CommunityStamper) StartSweepLoop(interval time.Duration) {
 	}()
 }
 
-func (s *CommunityStamper) Stop() { close(s.stopCh) }
+// Stop is idempotent: a second call must not re-close the channel.
+func (s *CommunityStamper) Stop() { s.stopOnce.Do(func() { close(s.stopCh) }) }

@@ -29,7 +29,9 @@ func TestNostrToCalendarTimeBased(t *testing.T) {
 	if err != nil {
 		t.Fatalf("nostrToCalendar: %v", err)
 	}
-	if doc.ID != evt.PubKey.Hex()+":workshop-1" {
+	// Four calendar kinds share one collection: the kind is folded into the
+	// doc id so a 31922 and 31923 with the same (pubkey, d) cannot collide.
+	if doc.ID != "31923:"+evt.PubKey.Hex()+":workshop-1" {
 		t.Errorf("ID = %q", doc.ID)
 	}
 	if doc.D != "workshop-1" {
