@@ -57,8 +57,8 @@ Embedding runs in-stack as the `embed` service (`./embed`) — a small FastAPI c
 **Event Flow:**
 - Banned pubkeys are rejected on submission (checked before validation)
 - Accepts kind 30142 events (AMB educational metadata) and kind 5 deletion events (NIP-09)
-- Kind 30142 events are saved to both BoltDB (raw) and Typesense (indexed); kind 5 events are stored in BoltDB only
-- Deletion events remove the referenced event from both BoltDB and Typesense (author must match)
+- Kind 30142 events are saved to both BoltDB (raw) and Typesense (indexed); kind 5 events are stored in BoltDB only and served on REQ straight from BoltDB (filterable by `kinds`, `authors`, `ids`, `#e`, `#a`, `#k`) per NIP-09's "relays SHOULD continue to publish deletion requests"
+- Deletion events remove the referenced event from both BoltDB and Typesense (author must match); each deleted id is recorded in a `deleted_events` BoltDB bucket and re-publication of the exact deleted event is rejected. Kind-5 write policy: must carry an `e` tag, or an `a` tag referencing a kind the relay serves
 - Queries go through Typesense for full-text search capability
 - Queries support NIP-01 filter fields, tag filters, and NIP-50 search — see [eventstore README](https://git.edufeed.org/edufeed/nostrlib/src/branch/master/eventstore/typesense30142/README.md) for full query documentation
 - Tags using the `ext:<ns>:<facet>:<sub>` shape (NIP-AMB extension namespace) are folded into a separate `ext` object in Typesense and queryable via NIP-50 (`ext.<ns>.<facet>.id:val`) and tag filter (`#ext:<ns>:<facet>:id`).
