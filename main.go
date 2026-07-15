@@ -976,6 +976,9 @@ func main() {
 			}
 		}
 		boltDB.DeleteEvent(id)
+		if err := mgmt.MarkEventDeleted(id.Hex()); err != nil {
+			fmt.Printf("mark deleted %s: %v\n", id.Hex(), err)
+		}
 		_ = contentStore.Delete(id.Hex()) // idempotent; safe when no content row existed
 		// The id carries no kind, so try every collection (each delete is a
 		// no-op when the id lives elsewhere).
@@ -998,6 +1001,9 @@ func main() {
 		}
 		if mgmt.IsEventBanned(event.ID) {
 			return true, "event is banned"
+		}
+		if mgmt.IsEventDeleted(event.ID.Hex()) {
+			return true, "blocked: event was deleted by its author"
 		}
 		if acl.IsWriteRestricted() && !admins.IsAdmin(event.PubKey) && !acl.IsWriteAllowed(event.PubKey.Hex()) {
 			return true, "restricted: pubkey not on write allowlist"
