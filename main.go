@@ -508,11 +508,23 @@ func main() {
 			chunked:  true,
 		})
 	}
+	// NIP-09 (issue #1): serve stored kind-5 deletion requests. Always on —
+	// deletion *processing* has always been unconditional, so the deletion
+	// trail is too. Registered last so content types keep fan-out priority;
+	// servedKinds is snapshotted here so the write policy scopes 'a'-only
+	// deletions to kinds this relay actually serves.
+	servedKinds := make(map[nostr.Kind]bool)
+	for _, ct := range contentTypes {
+		for _, k := range ct.kinds {
+			servedKinds[k] = true
+		}
+	}
+	contentTypes = append(contentTypes, deletionContentType(&boltDB, servedKinds))
 	reg := newRegistry(contentTypes...)
 
 	var profileContentKinds []nostr.Kind
 	for _, k := range reg.kinds() {
-		if k != 0 {
+		if k != 0 && k != nostr.KindDeletion {
 			profileContentKinds = append(profileContentKinds, k)
 		}
 	}
@@ -989,9 +1001,6 @@ func main() {
 		}
 		if acl.IsWriteRestricted() && !admins.IsAdmin(event.PubKey) && !acl.IsWriteAllowed(event.PubKey.Hex()) {
 			return true, "restricted: pubkey not on write allowlist"
-		}
-		if event.Kind == nostr.KindDeletion {
-			return false, ""
 		}
 		return reg.validate(event)
 	}
