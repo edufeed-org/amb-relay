@@ -2,10 +2,12 @@
 package main
 
 import (
+	"iter"
 	"strconv"
 	"strings"
 
 	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/eventstore/boltdb"
 )
 
 // validateDeletion is the write policy for kind-5 deletion requests. The
@@ -41,5 +43,43 @@ func validateDeletion(served map[nostr.Kind]bool) func(nostr.Event) (reject bool
 			return true, "deletion references no kind served by this relay"
 		}
 		return false, ""
+	}
+}
+
+// deletionContentType serves stored kind-5 deletion requests from the raw
+// BoltDB store. Deletions are persisted by the normal StoreEvent path
+// (boltBuf); this type only adds the read path, so REQs over
+// kinds/authors/ids/#e/#a/#k return the deletion trail (NIP-09: relays
+// SHOULD continue to share deletion requests).
+//
+// BoltDB holds every kind, so fetch/count clamp the filter to kind 5 —
+// otherwise a kind-agnostic fan-out (Negentropy, chunk parent fetch) would
+// re-yield all content events from the raw store. Bolt id-lookups ignore
+// filter.Kinds entirely (queryByIds), hence the additional post-filter on
+// the yielded events.
+func deletionContentType(db *boltdb.BoltBackend, served map[nostr.Kind]bool) contentType {
+	clamp := func(f nostr.Filter) nostr.Filter {
+		f.Kinds = []nostr.Kind{nostr.KindDeletion}
+		return f
+	}
+	return contentType{
+		kinds:    []nostr.Kind{nostr.KindDeletion},
+		validate: validateDeletion(served),
+		store:    func(nostr.Event) {}, // persisted via boltBuf in relay.StoreEvent
+		fetch: func(f nostr.Filter, maxLimit int) iter.Seq[nostr.Event] {
+			return func(yield func(nostr.Event) bool) {
+				for ev := range db.QueryEvents(clamp(f), maxLimit) {
+					if ev.Kind != nostr.KindDeletion {
+						continue
+					}
+					if !yield(ev) {
+						return
+					}
+				}
+			}
+		},
+		count:    func(f nostr.Filter) (uint32, error) { return db.CountEvents(clamp(f)) },
+		deleteID: func(nostr.ID) error { return nil }, // no search collection to clean
+		chunked:  false,
 	}
 }
