@@ -992,6 +992,15 @@ func main() {
 		return err
 	}
 
+	// NIP-09: a deletion request must not delete another deletion request
+	// ("publishing a deletion request event against a deletion request has
+	// no effect"). Serving kind 5 made stored deletions findable by the
+	// target lookup, so guard here; other kinds keep the default
+	// same-author rule this hook replaces.
+	relay.AllowDeleting = func(ctx context.Context, target, deletion nostr.Event) bool {
+		return target.Kind != nostr.KindDeletion && target.PubKey == deletion.PubKey
+	}
+
 	relay.Negentropy = true
 
 	// Event validation + ban check

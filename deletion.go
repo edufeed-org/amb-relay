@@ -24,7 +24,9 @@ func validateDeletion(served map[nostr.Kind]bool) func(nostr.Event) (reject bool
 			}
 			switch tag[0] {
 			case "e":
-				hasE = true
+				if _, err := nostr.IDFromHex(tag[1]); err == nil {
+					hasE = true
+				}
 			case "a":
 				hasA = true
 				if spl := strings.SplitN(tag[1], ":", 2); len(spl) == 2 {

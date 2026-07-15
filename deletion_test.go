@@ -8,6 +8,8 @@ import (
 	"fiatjaf.com/nostr/eventstore/boltdb"
 )
 
+const validID = "74c5ae4092cc806041d09daeb526e40bad78628296db83e911f3b94d93a4ba67"
+
 func TestValidateDeletion(t *testing.T) {
 	served := map[nostr.Kind]bool{30142: true, 30023: true}
 	validate := validateDeletion(served)
@@ -18,15 +20,16 @@ func TestValidateDeletion(t *testing.T) {
 		reject bool
 		msg    string
 	}{
-		{"e tag only", nostr.Tags{{"e", "abc"}}, false, ""},
+		{"e tag only", nostr.Tags{{"e", validID}}, false, ""},
 		{"a tag served kind", nostr.Tags{{"a", "30142:pubkey:d-tag"}}, false, ""},
 		{"a tag foreign kind", nostr.Tags{{"a", "1:pubkey:d-tag"}}, true, "deletion references no kind served by this relay"},
-		{"a foreign but e present", nostr.Tags{{"a", "1:pubkey:d"}, {"e", "abc"}}, false, ""},
+		{"a foreign but e present", nostr.Tags{{"a", "1:pubkey:d"}, {"e", validID}}, false, ""},
 		{"a served among foreign", nostr.Tags{{"a", "1:p:d"}, {"a", "30023:p:d"}}, false, ""},
 		{"k tag only, no target", nostr.Tags{{"k", "30142"}}, true, "missing 'e' or 'a' tag referencing the event to delete"},
 		{"no tags", nostr.Tags{}, true, "missing 'e' or 'a' tag referencing the event to delete"},
 		{"malformed a coord", nostr.Tags{{"a", "notacoord"}}, true, "deletion references no kind served by this relay"},
 		{"empty tag value skipped", nostr.Tags{{"e", ""}}, true, "missing 'e' or 'a' tag referencing the event to delete"},
+		{"malformed e ignored", nostr.Tags{{"e", "abc"}}, true, "missing 'e' or 'a' tag referencing the event to delete"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
