@@ -105,38 +105,6 @@ func TestNostrToTransferkioskMassnahme(t *testing.T) {
 	}
 }
 
-func TestNostrToTransferkioskPublikation(t *testing.T) {
-	ev := tkEvent(30145, nostr.Tags{
-		{"d", "https://doi.org/10.21240/zfhe/18-03/04"},
-		{"type", "ScholarlyArticle"},
-		{"name", "Wissenschaftsgeleitete Wirkungsreflexion"},
-		{"a", "30143:abc:https://transferkiosk.net/p/101498", "wss://relay.edufeed.org", "isOutputOf"},
-		{"publisher:name", "ZFHE"},
-		{"author:name", "Benjamin Ditzel"},
-		{"author:type", "Person"},
-		{"publicationType:prefLabel:de", "Zeitschriftenartikel"},
-		{"publicationType:type", "Concept"},
-		{"datePublished", "2023-01-01"},
-	}, "")
-
-	doc, err := nostrToTransferkiosk(ev)
-	if err != nil {
-		t.Fatalf("nostrToTransferkiosk: %v", err)
-	}
-	if len(doc.PartOf) != 1 || doc.PartOf[0] != "30143:abc:https://transferkiosk.net/p/101498" {
-		t.Errorf("PartOf = %v", doc.PartOf)
-	}
-	if doc.Publisher != "ZFHE" || len(doc.Author) != 1 || doc.Author[0] != "Benjamin Ditzel" {
-		t.Errorf("publisher/author wrong: %+v", doc)
-	}
-	if len(doc.PublicationType) != 1 || doc.PublicationType[0] != "Zeitschriftenartikel" {
-		t.Errorf("PublicationType = %v", doc.PublicationType)
-	}
-	if doc.DatePublished != "2023-01-01" {
-		t.Errorf("DatePublished = %q", doc.DatePublished)
-	}
-}
-
 func TestNostrToTransferkioskMissingDRejected(t *testing.T) {
 	ev := tkEvent(30143, nostr.Tags{{"type", "Project"}, {"name", "x"}}, "")
 	if _, err := nostrToTransferkiosk(ev); err == nil {
@@ -173,11 +141,11 @@ func TestTransferkioskSchema(t *testing.T) {
 // Multiple isPartOf/isOutputOf links must all survive projection — the earlier
 // scalar PartOf silently kept only the last one.
 func TestTransferkioskMultiplePartOfLinks(t *testing.T) {
-	doc, err := nostrToTransferkiosk(tkEvent(30145, nostr.Tags{
-		{"d", "pub-1"},
-		{"name", "Paper"},
-		{"a", "30143:abc:proj-1", "", "isOutputOf"},
-		{"a", "30143:abc:proj-2", "", "isOutputOf"},
+	doc, err := nostrToTransferkiosk(tkEvent(30144, nostr.Tags{
+		{"d", "m-1"},
+		{"name", "Measure"},
+		{"a", "30143:abc:proj-1", "", "isPartOf"},
+		{"a", "30143:abc:proj-2", "", "isPartOf"},
 	}, ""))
 	if err != nil {
 		t.Fatalf("nostrToTransferkiosk: %v", err)

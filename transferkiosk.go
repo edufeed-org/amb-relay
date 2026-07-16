@@ -8,11 +8,12 @@ import (
 	"fiatjaf.com/nostr/eventstore/typesense30142"
 )
 
-// TransferkioskDocument is the Typesense shape for the three NIP-DIDACTIC
-// transferkiosk kinds — Projekt (30143), Maßnahme (30144), Publikation (30145).
-// All three share one collection, distinguished by EventKind (envelope) and the
-// schema.org Type tag. Kind-specific fields are optional, so each kind populates
-// only the subset it carries.
+// TransferkioskDocument is the Typesense shape for the two NIP-DIDACTIC
+// transferkiosk kinds — Projekt (30143), Maßnahme (30144). Publikationen
+// moved to NKBIP-01 kind 30040 (see publications.go); kind 30145 is retired.
+// Both kinds share one collection, distinguished by EventKind (envelope) and
+// the schema.org Type tag. Kind-specific fields are optional, so each kind
+// populates only the subset it carries.
 //
 // SearchText is the load-bearing field: it concatenates description, every
 // narrative tag, and every concept prefLabel:de so a topical NIP-50 search hits
@@ -27,7 +28,7 @@ type TransferkioskDocument struct {
 	SearchText  string `json:"searchText,omitempty"`
 	Content     string `json:"content,omitempty"`
 
-	// Project↔measure/publication graph: parent project coords (30143:<pub>:<d>).
+	// Project↔measure graph: parent project coords (30143:<pub>:<d>).
 	// Multi-valued: an event may carry several isPartOf/isOutputOf `a` tags.
 	PartOf []string `json:"partOf,omitempty"`
 
@@ -40,7 +41,6 @@ type TransferkioskDocument struct {
 	StudyModel      []string `json:"studyModel,omitempty"`
 	Objective       []string `json:"objective,omitempty"`
 	Transferability []string `json:"transferability,omitempty"`
-	PublicationType []string `json:"publicationType,omitempty"`
 
 	// Scalar facets.
 	Status         string `json:"status,omitempty"`
@@ -50,11 +50,6 @@ type TransferkioskDocument struct {
 	HostBundesland string `json:"hostBundesland,omitempty"`
 	StartDate      string `json:"startDate,omitempty"`
 	EndDate        string `json:"endDate,omitempty"`
-	DatePublished  string `json:"datePublished,omitempty"`
-
-	// Publikation people.
-	Author    []string `json:"author,omitempty"`
-	Publisher string   `json:"publisher,omitempty"`
 
 	Embedding []float32 `json:"embedding,omitempty"`
 	structuredEnvelope
@@ -67,7 +62,7 @@ var tkNarrativeTags = map[string]bool{
 	"recommendation": true, "tips": true,
 }
 
-// nostrToTransferkiosk projects a kind-30143/30144/30145 event into a
+// nostrToTransferkiosk projects a kind-30143/30144 event into a
 // TransferkioskDocument. Concept facets follow the AMB flat-triple shape: a
 // `<facet>:prefLabel:de` tag carries the human label. Every such label folds
 // into SearchText; the high-value facets additionally land in a named slice.
@@ -116,8 +111,6 @@ func nostrToTransferkiosk(event *nostr.Event) (*TransferkioskDocument, error) {
 				doc.Objective = append(doc.Objective, val)
 			case "transferability":
 				doc.Transferability = append(doc.Transferability, val)
-			case "publicationType":
-				doc.PublicationType = append(doc.PublicationType, val)
 			}
 			continue
 		}
@@ -148,12 +141,6 @@ func nostrToTransferkiosk(event *nostr.Event) (*TransferkioskDocument, error) {
 			doc.StartDate = val
 		case "endDate":
 			doc.EndDate = val
-		case "datePublished":
-			doc.DatePublished = val
-		case "publisher:name":
-			doc.Publisher = val
-		case "author:name":
-			doc.Author = append(doc.Author, val)
 		case "a":
 			// parent project link via isPartOf / isOutputOf marker (tag[3]).
 			if len(tag) >= 4 && (tag[3] == "isPartOf" || tag[3] == "isOutputOf") {
@@ -187,7 +174,7 @@ func (d *TransferkioskDocument) EmbedText() string {
 // SetEmbedding stores the computed dense vector.
 func (d *TransferkioskDocument) SetEmbedding(v []float32) { d.Embedding = v }
 
-// storeTransferkiosk projects and upserts a kind-30143/30144/30145 event to the
+// storeTransferkiosk projects and upserts a kind-30143/30144 event to the
 // shared transferkiosk collection via the structured-collection helper.
 func storeTransferkiosk(enabled bool, ts *typesense30142.TSBackend, event nostr.Event) {
 	storeStructured(enabled, ts, event, "transferkiosk", nostrToTransferkiosk)
@@ -196,7 +183,7 @@ func storeTransferkiosk(enabled bool, ts *typesense30142.TSBackend, event nostr.
 // transferkioskSchema returns the Typesense schema for the shared transferkiosk
 // collection. Concept facets are faceted string[]; scalar facets are faceted
 // strings; searchText/content are the searchable bodies. Envelope fields carry
-// eventKind so the three kinds are distinguishable in a query.
+// eventKind so the two kinds are distinguishable in a query.
 func transferkioskSchema(name string) typesense30142.CollectionSchema {
 	str := func(n string, facet bool) typesense30142.Field {
 		return typesense30142.Field{Name: n, Type: "string", Facet: facet, Optional: true}
@@ -224,7 +211,6 @@ func transferkioskSchema(name string) typesense30142.CollectionSchema {
 			strArr("studyModel"),
 			strArr("objective"),
 			strArr("transferability"),
-			strArr("publicationType"),
 			str("status", true),
 			str("funderName", true),
 			str("funderProgram", true),
@@ -232,9 +218,6 @@ func transferkioskSchema(name string) typesense30142.CollectionSchema {
 			str("hostBundesland", true),
 			str("startDate", true),
 			str("endDate", true),
-			str("datePublished", true),
-			strArr("author"),
-			str("publisher", true),
 			{Name: "embedding", Type: "float[]", NumDim: 768, VecDistMetric: "cosine", Optional: true},
 		}, structuredEnvelopeFields()...),
 	}
