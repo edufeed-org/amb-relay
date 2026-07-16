@@ -76,3 +76,17 @@ func validateTransferkiosk(event nostr.Event) (reject bool, msg string) {
 	}
 	return false, ""
 }
+
+func validatePublication(event nostr.Event) (reject bool, msg string) {
+	if event.Tags.GetD() == "" {
+		return true, "missing required 'd' tag"
+	}
+	if !event.Tags.Has("title") {
+		return true, "missing required 'title' tag"
+	}
+	// NKBIP-01: a publication index's content field MUST be empty.
+	if event.Kind == 30040 && event.Content != "" {
+		return true, "kind 30040 requires empty content (NKBIP-01)"
+	}
+	return false, ""
+}
