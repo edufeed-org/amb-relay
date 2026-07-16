@@ -1505,6 +1505,17 @@ func main() {
 				Status:    status,
 				SourceURL: sourceURL,
 			}
+			// Kind-routed content projection: 30040 patches the publications
+			// collection directly; everything else keeps the buffered AMB path.
+			if event.Kind == 30040 {
+				if !publicationsEnabled || tsDB7 == nil {
+					return nip86.Response{Error: "publications not enabled"}, nil
+				}
+				if err := setPublicationContent(tsDB7, contentStore, event, entry); err != nil {
+					return nip86.Response{Error: fmt.Sprintf("set publication content: %v", err)}, nil
+				}
+				return nip86.Response{Result: true}, nil
+			}
 			if err := contentStore.Put(eventIDHex, entry); err != nil {
 				return nip86.Response{Error: fmt.Sprintf("content store put: %v", err)}, nil
 			}
@@ -1535,6 +1546,18 @@ func main() {
 			}
 			if !found {
 				return nip86.Response{Error: "event not found"}, nil
+			}
+			if event.Kind == 30040 {
+				if !publicationsEnabled || tsDB7 == nil {
+					return nip86.Response{Error: "publications not enabled"}, nil
+				}
+				if err := clearPublicationContent(tsDB7, contentStore, event); err != nil {
+					return nip86.Response{Error: fmt.Sprintf("clear publication content: %v", err)}, nil
+				}
+				if err := mgmt.MarkNeedsRefetch(eventIDHex); err != nil {
+					fmt.Printf("refetchcontent: mark needs_refetch %s: %v\n", eventIDHex, err)
+				}
+				return nip86.Response{Result: true}, nil
 			}
 			if err := contentStore.Delete(eventIDHex); err != nil {
 				return nip86.Response{Error: fmt.Sprintf("content store delete: %v", err)}, nil

@@ -1,10 +1,16 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
 	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/eventstore/typesense30142"
 )
 
 func pubEvent(kind nostr.Kind, tags nostr.Tags, content string) *nostr.Event {
@@ -179,5 +185,43 @@ func TestPublicationsSchemaFields(t *testing.T) {
 		if !fields[name] {
 			t.Errorf("schema missing field %q", name)
 		}
+	}
+}
+
+func TestSetPublicationContentPatchesPublicationsDoc(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			gotPath = r.URL.Path
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		}
+		w.WriteHeader(200)
+		fmt.Fprint(w, `{}`)
+	}))
+	defer srv.Close()
+
+	db := openTestDB(t)
+	cs := &ContentStore{DB: db}
+
+	ev := *pubEvent(30040, nostr.Tags{{"d", "a1b2c3d4"}, {"title", "T"}}, "")
+	entry := ContentEntry{Text: "extracted pdf text", FetchedAt: 1700000000, Status: "fetched"}
+
+	ts := &typesense30142.TSBackend{Host: srv.URL, ApiKey: "k", CollectionName: "publications"}
+	if err := setPublicationContent(ts, cs, ev, entry); err != nil {
+		t.Fatalf("setPublicationContent: %v", err)
+	}
+
+	// PATCH must target the kind-folded doc id, path-escaped.
+	wantDocID := docIDFor(30040, ev.PubKey.Hex(), "a1b2c3d4")
+	if !strings.Contains(gotPath, url.PathEscape(wantDocID)) {
+		t.Errorf("patch path %q missing doc id %q", gotPath, wantDocID)
+	}
+	if gotBody["content"] != "extracted pdf text" || gotBody["content_status"] != "fetched" {
+		t.Errorf("patch body = %v", gotBody)
+	}
+	// ContentStore row persisted for reindex replay.
+	if got, ok, _ := cs.Get(ev.ID.Hex()); !ok || got.Text != "extracted pdf text" {
+		t.Errorf("content store row = %+v ok=%v", got, ok)
 	}
 }

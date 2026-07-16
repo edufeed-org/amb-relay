@@ -194,3 +194,25 @@ func publicationsSchema(name string) typesense30142.CollectionSchema {
 		}, structuredEnvelopeFields()...),
 	}
 }
+
+// setPublicationContent persists indexer-extracted fulltext for a kind-30040
+// event and patches the publications doc directly. Direct PATCH is safe here
+// (unlike the AMB path's buffered QueueContent): structured docs are upserted
+// synchronously on write, so the doc exists before any setcontent arrives.
+func setPublicationContent(ts *typesense30142.TSBackend, cs *ContentStore, event nostr.Event, entry ContentEntry) error {
+	if err := cs.Put(event.ID.Hex(), entry); err != nil {
+		return fmt.Errorf("content store put: %w", err)
+	}
+	docID := docIDFor(event.Kind, event.PubKey.Hex(), event.Tags.GetD())
+	return PatchContent(ts.Host, ts.ApiKey, ts.CollectionName, docID, entry)
+}
+
+// clearPublicationContent removes stored fulltext for a kind-30040 event and
+// clears the doc's content triple (refetchcontent path).
+func clearPublicationContent(ts *typesense30142.TSBackend, cs *ContentStore, event nostr.Event) error {
+	if err := cs.Delete(event.ID.Hex()); err != nil {
+		return fmt.Errorf("content store delete: %w", err)
+	}
+	docID := docIDFor(event.Kind, event.PubKey.Hex(), event.Tags.GetD())
+	return ClearContent(ts.Host, ts.ApiKey, ts.CollectionName, docID)
+}
