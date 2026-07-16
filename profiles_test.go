@@ -68,3 +68,34 @@ func TestProfileSchemaHasSearchableAndEnvelopeFields(t *testing.T) {
 		}
 	}
 }
+
+func TestProfileProjectorSetsNIP05Verified(t *testing.T) {
+	ev := mkKind0(t, `{"name":"anna","nip05":"anna@uni-koeln.de"}`) // mkKind0 is this file's existing fixture
+	doc, err := profileProjector(true)(&ev)
+	if err != nil {
+		t.Fatalf("profileProjector: %v", err)
+	}
+	if !doc.NIP05Verified {
+		t.Fatal("NIP05Verified = false, want true")
+	}
+	unverified, err := profileProjector(false)(&ev)
+	if err != nil {
+		t.Fatalf("profileProjector: %v", err)
+	}
+	if unverified.NIP05Verified {
+		t.Fatal("NIP05Verified = true, want false")
+	}
+}
+
+func TestProfileSchemaHasNIP05VerifiedBool(t *testing.T) {
+	s := profileSchema("profiles_0")
+	for _, f := range s.Fields {
+		if f.Name == "nip05_verified" {
+			if f.Type != "bool" {
+				t.Fatalf("nip05_verified type = %q, want bool", f.Type)
+			}
+			return
+		}
+	}
+	t.Fatal("schema missing nip05_verified field")
+}

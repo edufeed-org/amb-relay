@@ -19,6 +19,11 @@ type ProfileDocument struct {
 	DisplayName string `json:"display_name,omitempty"`
 	About       string `json:"about,omitempty"`
 	NIP05       string `json:"nip05,omitempty"`
+	// NIP05Verified is relay-computed at fetch time (ProfileManager resolves
+	// the claimed identifier's .well-known/nostr.json): it never comes from
+	// the event itself, so nostrToProfile leaves it false. No omitempty —
+	// an explicit false must reach Typesense so refreshes can revoke it.
+	NIP05Verified bool `json:"nip05_verified"`
 	structuredEnvelope
 }
 
@@ -43,9 +48,23 @@ func nostrToProfile(event *nostr.Event) (*ProfileDocument, error) {
 	}, nil
 }
 
+// profileProjector wraps the pure nostrToProfile projection with the
+// caller-computed verification result; verification is a network side effect
+// owned by ProfileManager, never by the projection.
+func profileProjector(nip05Verified bool) func(*nostr.Event) (*ProfileDocument, error) {
+	return func(e *nostr.Event) (*ProfileDocument, error) {
+		doc, err := nostrToProfile(e)
+		if err != nil {
+			return nil, err
+		}
+		doc.NIP05Verified = nip05Verified
+		return doc, nil
+	}
+}
+
 // storeProfile projects and upserts a kind-0 event to the profiles collection.
-func storeProfile(enabled bool, ts *typesense30142.TSBackend, event nostr.Event) {
-	storeStructured(enabled, ts, event, "profile", nostrToProfile)
+func storeProfile(enabled bool, ts *typesense30142.TSBackend, event nostr.Event, nip05Verified bool) {
+	storeStructured(enabled, ts, event, "profile", profileProjector(nip05Verified))
 }
 
 // profileSchema returns the Typesense collection schema for kind-0 profiles.
@@ -61,6 +80,7 @@ func profileSchema(name string) typesense30142.CollectionSchema {
 			{Name: "display_name", Type: "string", Optional: true},
 			{Name: "about", Type: "string", Optional: true},
 			{Name: "nip05", Type: "string", Optional: true},
+			{Name: "nip05_verified", Type: "bool", Optional: true},
 		}, structuredEnvelopeFields()...),
 	}
 }
