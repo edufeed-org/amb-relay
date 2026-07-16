@@ -315,11 +315,11 @@ func main() {
 		}
 		pSchema := profileSchema(pColl)
 		profilesDB = &typesense30142.TSBackend{
-			ApiKey:          os.Getenv("TS_APIKEY"),
-			Host:            os.Getenv("TS_HOST"),
-			CollectionName:  pColl,
-			Schema:          &pSchema,
-			SearchFields:    "name,display_name,about,nip05",
+			ApiKey:         os.Getenv("TS_APIKEY"),
+			Host:           os.Getenv("TS_HOST"),
+			CollectionName: pColl,
+			Schema:         &pSchema,
+			SearchFields:   "name,display_name,about,nip05",
 			// Verified-first ranking: at equal text relevance a nip05-verified
 			// profile outranks an unverified one; explicit client sort: wins.
 			SearchSortBy:    "_text_match:desc,nip05_verified:desc,eventCreatedAt:desc",
