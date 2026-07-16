@@ -376,7 +376,6 @@ func TestEnqueueKicksDebouncedDrain(t *testing.T) {
 	var mu sync.Mutex
 	var stored []nostr.Event
 	store := func(e nostr.Event, _ bool) { mu.Lock(); stored = append(stored, e); mu.Unlock() }
-	noVerify := func(context.Context, string, nostr.PubKey) bool { return false }
 	pm := NewProfileManager(q, src, store, func() []nostr.PubKey { return nil }, noVerify, []string{"wss://p"}, nil, 10)
 	pm.debounce = 5 * time.Millisecond
 	pm.retryDelay = time.Hour // irrelevant here; must not fire during the test
@@ -393,7 +392,6 @@ func TestUnresolvedDrainRetriesExactlyOnce(t *testing.T) {
 	pk := nostr.Generate().Public() // no kind-0 anywhere: stays unresolved forever
 	q := newFakeQueue()
 	store := func(nostr.Event, bool) {}
-	noVerify := func(context.Context, string, nostr.PubKey) bool { return false }
 	pm := NewProfileManager(q, fakeSource{}, store, func() []nostr.PubKey { return nil }, noVerify, []string{"wss://p"}, nil, 10)
 	pm.debounce = 2 * time.Millisecond
 	pm.retryDelay = 20 * time.Millisecond
