@@ -21,6 +21,7 @@ var (
 	bucketFetchedContent  = []byte("fetched_content") // resource fulltext keyed by event_id
 	bucketNeedsRefetch    = []byte("needs_refetch")   // event_ids flagged for re-ingestion
 	bucketProfileQueue    = []byte("profile_queue")   // author pubkeys awaiting kind-0 fetch
+	bucketDeletedEvents   = []byte("deleted_events")  // NIP-09-deleted event ids; exact re-publication is rejected
 )
 
 const schemaKey = "current"
@@ -52,7 +53,7 @@ func (m *ManagementStore) Init(db *bbolt.DB) error {
 	}
 	m.Store = store
 	return db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range [][]byte{bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketFetchedContent, bucketNeedsRefetch, bucketProfileQueue} {
+		for _, bucket := range [][]byte{bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketFetchedContent, bucketNeedsRefetch, bucketProfileQueue, bucketDeletedEvents} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
@@ -294,6 +295,24 @@ func (m *ManagementStore) ListNeedsRefetch() ([]string, error) {
 		})
 	})
 	return result, err
+}
+
+// MarkEventDeleted records an event id removed via a NIP-09 deletion request
+// so re-publication of the exact deleted event is rejected. Idempotent.
+func (m *ManagementStore) MarkEventDeleted(eventID string) error {
+	return m.DB.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketDeletedEvents).Put([]byte(eventID), []byte{})
+	})
+}
+
+// IsEventDeleted reports whether an event id was deleted via NIP-09.
+func (m *ManagementStore) IsEventDeleted(eventID string) bool {
+	var deleted bool
+	m.DB.View(func(tx *bbolt.Tx) error {
+		deleted = tx.Bucket(bucketDeletedEvents).Get([]byte(eventID)) != nil
+		return nil
+	})
+	return deleted
 }
 
 // EnqueueProfileCandidate queues an author pubkey (hex) for kind-0 fetch.

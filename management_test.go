@@ -128,3 +128,25 @@ func equalStringSlices(a, b []string) bool {
 	}
 	return true
 }
+
+func TestDeletedEvents_MarkAndCheck(t *testing.T) {
+	mgmt := openTestMgmt(t)
+	id := "5f2ad0c3aa0000000000000000000000000000000000000000000000000000ab"
+
+	if mgmt.IsEventDeleted(id) {
+		t.Fatal("unmarked id reported deleted")
+	}
+	if err := mgmt.MarkEventDeleted(id); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	if !mgmt.IsEventDeleted(id) {
+		t.Fatal("marked id not reported deleted")
+	}
+	// Idempotent: re-marking is a no-op, not an error.
+	if err := mgmt.MarkEventDeleted(id); err != nil {
+		t.Fatalf("re-mark: %v", err)
+	}
+	if mgmt.IsEventDeleted("0000000000000000000000000000000000000000000000000000000000000000") {
+		t.Fatal("different id reported deleted")
+	}
+}

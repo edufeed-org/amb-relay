@@ -508,11 +508,23 @@ func main() {
 			chunked:  true,
 		})
 	}
+	// NIP-09 (issue #1): serve stored kind-5 deletion requests. Always on —
+	// deletion *processing* has always been unconditional, so the deletion
+	// trail is too. Registered last so content types keep fan-out priority;
+	// servedKinds is snapshotted here so the write policy scopes 'a'-only
+	// deletions to kinds this relay actually serves.
+	servedKinds := make(map[nostr.Kind]bool)
+	for _, ct := range contentTypes {
+		for _, k := range ct.kinds {
+			servedKinds[k] = true
+		}
+	}
+	contentTypes = append(contentTypes, deletionContentType(&boltDB, servedKinds))
 	reg := newRegistry(contentTypes...)
 
 	var profileContentKinds []nostr.Kind
 	for _, k := range reg.kinds() {
-		if k != 0 {
+		if k != 0 && k != nostr.KindDeletion {
 			profileContentKinds = append(profileContentKinds, k)
 		}
 	}
@@ -964,6 +976,9 @@ func main() {
 			}
 		}
 		boltDB.DeleteEvent(id)
+		if err := mgmt.MarkEventDeleted(id.Hex()); err != nil {
+			fmt.Printf("mark deleted %s: %v\n", id.Hex(), err)
+		}
 		_ = contentStore.Delete(id.Hex()) // idempotent; safe when no content row existed
 		// The id carries no kind, so try every collection (each delete is a
 		// no-op when the id lives elsewhere).
@@ -977,6 +992,15 @@ func main() {
 		return err
 	}
 
+	// NIP-09: a deletion request must not delete another deletion request
+	// ("publishing a deletion request event against a deletion request has
+	// no effect"). Serving kind 5 made stored deletions findable by the
+	// target lookup, so guard here; other kinds keep the default
+	// same-author rule this hook replaces.
+	relay.AllowDeleting = func(ctx context.Context, target, deletion nostr.Event) bool {
+		return target.Kind != nostr.KindDeletion && target.PubKey == deletion.PubKey
+	}
+
 	relay.Negentropy = true
 
 	// Event validation + ban check
@@ -987,11 +1011,11 @@ func main() {
 		if mgmt.IsEventBanned(event.ID) {
 			return true, "event is banned"
 		}
+		if mgmt.IsEventDeleted(event.ID.Hex()) {
+			return true, "blocked: event was deleted by its author"
+		}
 		if acl.IsWriteRestricted() && !admins.IsAdmin(event.PubKey) && !acl.IsWriteAllowed(event.PubKey.Hex()) {
 			return true, "restricted: pubkey not on write allowlist"
-		}
-		if event.Kind == nostr.KindDeletion {
-			return false, ""
 		}
 		return reg.validate(event)
 	}
