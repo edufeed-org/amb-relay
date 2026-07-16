@@ -402,11 +402,17 @@ func TestUnresolvedDrainRetriesExactlyOnce(t *testing.T) {
 	}
 	defer pm.Stop()
 	pm.Enqueue(pk)
-	// kick drain + one retry drain
-	waitForMsg(t, 2*time.Second, func() bool { return q.drains() == 2 }, "expected kick drain plus one retry drain")
-	// the retry must NOT re-arm: give it 5 more retry windows and expect silence
-	time.Sleep(5 * pm.retryDelay)
-	if got := q.drains(); got != 2 {
-		t.Fatalf("drains = %d after settling, want 2 (retry re-armed itself)", got)
+	// kick drain plus at least one retry; whether Init's seed-kick coalesces
+	// with the Enqueue kick decides 2 vs 3 total, so assert the invariant
+	// (retries happen, then stop) rather than the exact interleaving.
+	waitForMsg(t, 2*time.Second, func() bool { return q.drains() >= 2 }, "expected kick drain plus retry drain")
+	time.Sleep(5 * pm.retryDelay) // let any armed retry fire
+	settled := q.drains()
+	if settled > 3 {
+		t.Fatalf("drains = %d after settling, want at most 3 (kick, possible split kick, one retry)", settled)
+	}
+	time.Sleep(5 * pm.retryDelay) // the retry must NOT re-arm: require silence
+	if got := q.drains(); got != settled {
+		t.Fatalf("drains grew from %d to %d after settling (retry re-armed itself)", settled, got)
 	}
 }
