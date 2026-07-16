@@ -180,10 +180,64 @@ func TestPublicationsSchemaFields(t *testing.T) {
 	// ClearContent (setcontent kind-routing, Task 4).
 	for _, name := range []string{"id", "d", "type", "title", "summary", "searchText", "content",
 		"author", "creatorName", "doi", "source", "published_on", "published_by",
-		"keywords", "about", "inLanguage", "license", "sections", "embedding",
+		"keywords", "about", "inLanguage", "license", "sections", "partOf", "embedding",
 		"content_fetched_at", "content_status", "eventKind", "community"} {
 		if !fields[name] {
 			t.Errorf("schema missing field %q", name)
+		}
+	}
+}
+
+// TestPublicationATagRouting: the 4th a-tag element is ambiguous across
+// specs — NKBIP-01 uses it for an OPTIONAL EVENT ID (64-hex), NIP-DIDACTIC
+// for word markers. isPartOf/isOutputOf → partOf; bare or event-id-hinted →
+// sections; any other word marker (vocab refs, `documents`) → neither.
+func TestPublicationATagRouting(t *testing.T) {
+	evID := strings.Repeat("ab", 32)
+	ev := pubEvent(30040, nostr.Tags{
+		{"d", "tk-p101-pub7"},
+		{"title", "Paper"},
+		{"a", "30143:pk:proj-1", "wss://r", "isOutputOf"},
+		{"a", "30144:pk:m-1", "wss://r", "isPartOf"},
+		{"a", "30041:pk:sec-1", "wss://r"},
+		{"a", "30041:pk:sec-2", "wss://r", evID},
+		{"a", "39738:pk:tk-publikationsart/5", "wss://r", "publicationType"},
+	}, "")
+	doc, err := nostrToPublication(ev)
+	if err != nil {
+		t.Fatalf("nostrToPublication: %v", err)
+	}
+	if len(doc.PartOf) != 2 || doc.PartOf[0] != "30143:pk:proj-1" || doc.PartOf[1] != "30144:pk:m-1" {
+		t.Errorf("PartOf = %v", doc.PartOf)
+	}
+	if len(doc.Sections) != 2 || doc.Sections[0] != "30041:pk:sec-1" || doc.Sections[1] != "30041:pk:sec-2" {
+		t.Errorf("Sections = %v (must keep bare and event-id-hinted a-tags only)", doc.Sections)
+	}
+}
+
+func TestPublicationEditorInSearchText(t *testing.T) {
+	ev := pubEvent(30040, nostr.Tags{
+		{"d", "tk-p101-pub8"},
+		{"title", "Paper"},
+		{"editor:name", "Eckhard Liebscher"},
+		{"editor:type", "Person"},
+	}, "")
+	doc, err := nostrToPublication(ev)
+	if err != nil {
+		t.Fatalf("nostrToPublication: %v", err)
+	}
+	if !strings.Contains(doc.SearchText, "Eckhard Liebscher") {
+		t.Errorf("SearchText missing editor name: %q", doc.SearchText)
+	}
+}
+
+func TestIsHex64(t *testing.T) {
+	if !isHex64(strings.Repeat("ab", 32)) {
+		t.Error("64-hex must pass")
+	}
+	for _, s := range []string{"isOutputOf", "publicationType", "", strings.Repeat("ab", 31), strings.Repeat("zz", 32)} {
+		if isHex64(s) {
+			t.Errorf("isHex64(%q) = true", s)
 		}
 	}
 }
