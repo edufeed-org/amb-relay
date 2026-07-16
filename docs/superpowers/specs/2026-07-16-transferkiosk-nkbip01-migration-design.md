@@ -32,7 +32,9 @@ amb-mcp publications work (follow-up project, out of scope here).
 
 ## Repos touched
 
-1. `edufeed-data/transferkiosk` — converter + deletion script (the root fix)
+1. `edufeed-data/transferkiosk` — converter + deletion script (the root
+   fix). NOTE: edufeed-data is NOT a git repository — plain file edits, no
+   worktree/branch mechanics (worth a `git init` some day, out of scope).
 2. `amb-relay` — publications projection gains `partOf`; transferkiosk type drops 30145
 3. `amb-indexer` — drop 30145 from subscription/dispatch
 4. `nips` — DIDACTIC.md rewrite of the publication section
@@ -78,13 +80,22 @@ replacements are a different kind and d.)
 
 **publications.go — `partOf` support (fixes a latent bug):** the projection
 currently folds ALL `a` tags into `sections`; a converted publication's
-`isOutputOf` project link would pollute the section list. Change: an `a` tag
-whose marker (`tag[3]`) is `isPartOf` or `isOutputOf` goes to a new
-`partOf` string[] facet (same convention as transferkiosk) and is EXCLUDED
-from `sections`; unmarked `a` tags remain sections. Additionally fold
-`editor:name` values into `searchText` (people search reaches editors).
-Schema gains `partOf` (faceted string[]). `additionalType`,
-`publicationLocation`, `pageRange` stay eventRaw-only (no query need).
+`isOutputOf` project link and its `concept_triple` vocab refs (`a` →
+`39738:<pub>:<scheme>/<id>` with the facet name in position 3) would pollute
+the section list. The 4th `a`-tag element is ambiguous across specs —
+NKBIP-01 defines it as an OPTIONAL EVENT ID (64-hex) for version tracking,
+NIP-DIDACTIC uses it for word markers — so the rule is:
+
+- `tag[3]` ∈ {`isPartOf`, `isOutputOf`} → new `partOf` string[] facet
+  (transferkiosk convention), excluded from `sections`;
+- `tag[3]` absent, empty, or 64-hex (an NKBIP event-id hint) → `sections`;
+- any other word marker (vocab facet names like `publicationType`,
+  `documents`) → neither facet; preserved in eventRaw only.
+
+Additionally fold `editor:name` values into `searchText` (people search
+reaches editors). Schema gains `partOf` (faceted string[]).
+`additionalType`, `publicationLocation`, `pageRange` stay eventRaw-only (no
+query need).
 
 **transferkiosk retirement of 30145:** remove 30145 from the contentType
 kinds, retention list, reindex target, stamp targets, and the docs; remove
