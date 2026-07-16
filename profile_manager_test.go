@@ -6,24 +6,47 @@ import (
 	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"fiatjaf.com/nostr"
 )
 
 // --- fakes ---
 
-type fakeQueue struct{ items map[string]bool }
+type fakeQueue struct {
+	mu        sync.Mutex
+	items     map[string]bool
+	listCalls int
+}
 
-func newFakeQueue() *fakeQueue                               { return &fakeQueue{items: map[string]bool{}} }
-func (q *fakeQueue) EnqueueProfileCandidate(pk string) error { q.items[pk] = true; return nil }
-func (q *fakeQueue) RemoveProfileCandidate(pk string) error  { delete(q.items, pk); return nil }
+func newFakeQueue() *fakeQueue { return &fakeQueue{items: map[string]bool{}} }
+func (q *fakeQueue) EnqueueProfileCandidate(pk string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.items[pk] = true
+	return nil
+}
+func (q *fakeQueue) RemoveProfileCandidate(pk string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.items, pk)
+	return nil
+}
 func (q *fakeQueue) ListProfileQueue() ([]string, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.listCalls++
 	out := make([]string, 0, len(q.items))
 	for k := range q.items {
 		out = append(out, k)
 	}
 	sort.Strings(out)
 	return out, nil
+}
+func (q *fakeQueue) drains() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.listCalls
 }
 
 type fakeSource struct {
@@ -110,7 +133,10 @@ func TestDrainStoresFoundLeavesMissingQueued(t *testing.T) {
 	store := func(e nostr.Event, _ bool) { stored = append(stored, e) }
 	mgr := NewProfileManager(q, src, store, func() []nostr.PubKey { return nil }, noVerify, []string{"wss://x"}, nil, 50)
 
-	mgr.drainOnce(context.Background())
+	unresolved := mgr.drainOnce(context.Background())
+	if unresolved != 1 {
+		t.Fatalf("drainOnce unresolved = %d, want 1", unresolved)
+	}
 
 	if len(stored) != 1 || stored[0].PubKey != pkA {
 		t.Fatalf("stored = %v, want [A]", stored)
@@ -324,5 +350,63 @@ func TestVerifyNIP05RejectsInvalidIdentifierWithoutHTTP(t *testing.T) {
 	}
 	if verifyNIP05(ctx, "not an identifier", pk) {
 		t.Error("garbage identifier verified")
+	}
+}
+
+// waitForMsg polls cond every millisecond until it holds or the deadline
+// passes, failing with msg on timeout. Named distinctly from the
+// no-message waitFor in buffer_test.go (same package, different signature).
+func waitForMsg(t *testing.T, d time.Duration, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal(msg)
+}
+
+func TestEnqueueKicksDebouncedDrain(t *testing.T) {
+	sk := nostr.Generate()
+	pk := sk.Public()
+	src := fakeSource{byPubkey: map[nostr.PubKey]nostr.Event{pk: mkKind0For(t, sk, "anna")}}
+	q := newFakeQueue()
+	var mu sync.Mutex
+	var stored []nostr.Event
+	store := func(e nostr.Event, _ bool) { mu.Lock(); stored = append(stored, e); mu.Unlock() }
+	noVerify := func(context.Context, string, nostr.PubKey) bool { return false }
+	pm := NewProfileManager(q, src, store, func() []nostr.PubKey { return nil }, noVerify, []string{"wss://p"}, nil, 10)
+	pm.debounce = 5 * time.Millisecond
+	pm.retryDelay = time.Hour // irrelevant here; must not fire during the test
+	if err := pm.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer pm.Stop()
+	pm.Enqueue(pk)
+	waitForMsg(t, 2*time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return len(stored) == 1 },
+		"profile not stored after write-triggered drain")
+}
+
+func TestUnresolvedDrainRetriesExactlyOnce(t *testing.T) {
+	pk := nostr.Generate().Public() // no kind-0 anywhere: stays unresolved forever
+	q := newFakeQueue()
+	store := func(nostr.Event, bool) {}
+	noVerify := func(context.Context, string, nostr.PubKey) bool { return false }
+	pm := NewProfileManager(q, fakeSource{}, store, func() []nostr.PubKey { return nil }, noVerify, []string{"wss://p"}, nil, 10)
+	pm.debounce = 2 * time.Millisecond
+	pm.retryDelay = 20 * time.Millisecond
+	if err := pm.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer pm.Stop()
+	pm.Enqueue(pk)
+	// kick drain + one retry drain
+	waitForMsg(t, 2*time.Second, func() bool { return q.drains() == 2 }, "expected kick drain plus one retry drain")
+	// the retry must NOT re-arm: give it 5 more retry windows and expect silence
+	time.Sleep(5 * pm.retryDelay)
+	if got := q.drains(); got != 2 {
+		t.Fatalf("drains = %d after settling, want 2 (retry re-armed itself)", got)
 	}
 }

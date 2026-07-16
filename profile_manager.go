@@ -34,6 +34,17 @@ const (
 	// lookups are independent HTTP fetches to third-party domains, and a batch
 	// of slow domains must not be paid for serially inside the drain budget.
 	nip05VerifyConcurrency = 8
+	// profileKickDebounce coalesces a burst of content writes into one drain:
+	// a drain re-fetches the whole queue, so draining per-event would thrash
+	// PROFILE_RELAYS during aggregator imports.
+	profileKickDebounce = 10 * time.Second
+	// profileRetryDelay schedules ONE follow-up drain when a kick-triggered
+	// drain left candidates unresolved — typically a brand-new author whose
+	// kind-0 hasn't propagated to PROFILE_RELAYS yet. The retry never re-arms
+	// itself, so permanently-unresolvable candidates (e.g. community pubkeys
+	// without profiles) cannot cause a poll loop; they wait for the next kick
+	// or the periodic refresh.
+	profileRetryDelay = 15 * time.Minute
 )
 
 // profileQueue is the durable candidate queue ProfileManager drains.
@@ -146,6 +157,9 @@ type ProfileManager struct {
 	relays         []string
 	fallbackRelays []string
 	batchSize      int
+	kickCh         chan struct{}
+	debounce       time.Duration
+	retryDelay     time.Duration
 	stopCh         chan struct{}
 	stopOnce       sync.Once
 }
@@ -163,16 +177,31 @@ func NewProfileManager(q profileQueue, src profileSource, store func(nostr.Event
 		relays:         relays,
 		fallbackRelays: fallbackRelays,
 		batchSize:      batchSize,
+		kickCh:         make(chan struct{}, 1),
+		debounce:       profileKickDebounce,
+		retryDelay:     profileRetryDelay,
 		stopCh:         make(chan struct{}),
 	}
 }
 
-// Enqueue queues an author pubkey for kind-0 fetch. Fire-and-forget: a queue
-// error is logged but never propagated to the content write path.
+// kick signals the drain worker; non-blocking because the buffered channel
+// carries only "work exists", never a count.
+func (p *ProfileManager) kick() {
+	select {
+	case p.kickCh <- struct{}{}:
+	default:
+	}
+}
+
+// Enqueue queues an author pubkey for kind-0 fetch and kicks the drain worker
+// so a brand-new author is searchable within the debounce window, not at the
+// next refresh. Fire-and-forget: a queue error is logged but never propagated
+// to the content write path.
 func (p *ProfileManager) Enqueue(pk nostr.PubKey) {
 	if err := p.queue.EnqueueProfileCandidate(pk.Hex()); err != nil {
 		fmt.Printf("profile: enqueue %s: %v\n", pk.Hex(), err)
 	}
+	p.kick()
 }
 
 // drainOnce fetches kind-0 for every queued pubkey in batches. A pubkey whose
@@ -181,16 +210,16 @@ func (p *ProfileManager) Enqueue(pk nostr.PubKey) {
 // unresolved after PROFILE_RELAYS are retried against PROFILE_FALLBACK_RELAYS,
 // so a profile that lives only on a non-standard relay (e.g. relay.damus.io)
 // is still indexed.
-func (p *ProfileManager) drainOnce(ctx context.Context) {
+func (p *ProfileManager) drainOnce(ctx context.Context) int {
 	queued, err := p.queue.ListProfileQueue()
 	if err != nil {
 		fmt.Printf("profile: list queue: %v\n", err)
-		return
+		return 0
 	}
 	if len(queued) == 0 {
-		return
+		return 0
 	}
-	var viaPrimary, viaFallback int
+	var viaPrimary, viaFallback, dropped int
 	for start := 0; start < len(queued); start += p.batchSize {
 		end := start + p.batchSize
 		if end > len(queued) {
@@ -201,6 +230,7 @@ func (p *ProfileManager) drainOnce(ctx context.Context) {
 			pk, err := nostr.PubKeyFromHex(hexpk)
 			if err != nil {
 				_ = p.queue.RemoveProfileCandidate(hexpk) // drop garbage
+				dropped++
 				continue
 			}
 			authors = append(authors, pk)
@@ -218,8 +248,10 @@ func (p *ProfileManager) drainOnce(ctx context.Context) {
 			break // drain budget exhausted; the rest stays queued for next pass
 		}
 	}
+	unresolved := len(queued) - viaPrimary - viaFallback - dropped
 	fmt.Printf("profile: drain resolved %d of %d queued (%d primary, %d fallback)\n",
 		viaPrimary+viaFallback, len(queued), viaPrimary, viaFallback)
+	return unresolved
 }
 
 // fetchStore fetches kind-0 for authors from relays; each successfully parsed
@@ -278,22 +310,53 @@ func (p *ProfileManager) fetchStore(ctx context.Context, relays []string, author
 	return remaining
 }
 
-// Init seeds the queue from a backfill scan, then drains in the background so
-// relay startup is never blocked on the network fetch.
+// drainWorker serializes ALL drains — startup, write-triggered, refresh —
+// through one goroutine, so two drains never walk the queue concurrently. A
+// kick is debounced to coalesce write bursts; a drain that leaves candidates
+// unresolved arms exactly one delayed retry (see profileRetryDelay).
+func (p *ProfileManager) drainWorker() {
+	var retryCh <-chan time.Time
+	for {
+		isRetry := false
+		select {
+		case <-p.stopCh:
+			return
+		case <-p.kickCh:
+			t := time.NewTimer(p.debounce)
+			select {
+			case <-t.C:
+			case <-p.stopCh:
+				t.Stop()
+				return
+			}
+		case <-retryCh:
+			isRetry = true
+		}
+		retryCh = nil
+		ctx, cancel := context.WithTimeout(context.Background(), profileDrainTimeout)
+		unresolved := p.drainOnce(ctx)
+		cancel()
+		if unresolved > 0 && !isRetry {
+			retryCh = time.After(p.retryDelay)
+		}
+	}
+}
+
+// Init seeds the queue from a backfill scan and starts the drain worker; the
+// seeding kick drains in the background so relay startup never blocks on the
+// network fetch.
 func (p *ProfileManager) Init() error {
+	go p.drainWorker()
 	for _, pk := range p.backfill() {
 		p.Enqueue(pk)
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), profileDrainTimeout)
-		defer cancel()
-		p.drainOnce(ctx)
-	}()
+	p.kick()
 	return nil
 }
 
-// StartRefreshLoop periodically re-enqueues known content authors and drains,
-// catching renamed/updated profiles.
+// StartRefreshLoop periodically re-enqueues known content authors and kicks
+// the drain worker, catching renamed/updated profiles and re-verifying nip05
+// claims (a revoked .well-known entry clears the verified flag here).
 func (p *ProfileManager) StartRefreshLoop(interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -304,9 +367,7 @@ func (p *ProfileManager) StartRefreshLoop(interval time.Duration) {
 				for _, pk := range p.backfill() {
 					p.Enqueue(pk)
 				}
-				ctx, cancel := context.WithTimeout(context.Background(), profileDrainTimeout)
-				p.drainOnce(ctx)
-				cancel()
+				p.kick()
 			case <-p.stopCh:
 				return
 			}
