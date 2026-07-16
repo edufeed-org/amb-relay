@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/nip05"
 	"fiatjaf.com/nostr/sdk"
 )
 
@@ -26,6 +27,13 @@ const (
 	// slow/unresponsive relay — common with public profile aggregators — would
 	// starve the rest of the drain by consuming the whole drain budget.
 	profileFetchTimeout = 15 * time.Second
+	// nip05VerifyTimeout bounds one .well-known/nostr.json lookup so a single
+	// dead domain cannot stall the drain.
+	nip05VerifyTimeout = 5 * time.Second
+	// nip05VerifyConcurrency bounds parallel lookups within one fetched batch:
+	// lookups are independent HTTP fetches to third-party domains, and a batch
+	// of slow domains must not be paid for serially inside the drain budget.
+	nip05VerifyConcurrency = 8
 )
 
 // profileQueue is the durable candidate queue ProfileManager drains.
@@ -39,6 +47,27 @@ type profileQueue interface {
 // profileSource fetches the latest kind-0 event for each requested pubkey.
 type profileSource interface {
 	Fetch(ctx context.Context, relays []string, pubkeys []nostr.PubKey) []nostr.Event
+}
+
+// nip05Verifier reports whether a profile's claimed nip05 identifier resolves
+// back to the given pubkey. Injected so tests never do real HTTP.
+type nip05Verifier func(ctx context.Context, identifier string, pk nostr.PubKey) bool
+
+// verifyNIP05 resolves the identifier's .well-known/nostr.json and checks the
+// mapped pubkey. Any failure — invalid identifier, unreachable domain, name
+// missing from the response, pubkey mismatch — counts as unverified; transient
+// network failures self-heal on the next refresh drain, which re-verifies.
+func verifyNIP05(ctx context.Context, identifier string, pk nostr.PubKey) bool {
+	if identifier == "" || !nip05.IsValidIdentifier(identifier) {
+		return false
+	}
+	vctx, cancel := context.WithTimeout(ctx, nip05VerifyTimeout)
+	defer cancel()
+	ptr, err := nip05.QueryIdentifier(vctx, identifier)
+	if err != nil {
+		return false
+	}
+	return ptr.PublicKey == pk
 }
 
 // eventQuerier is the read surface ProfileManager needs for startup backfill.
@@ -111,8 +140,9 @@ func backfillProfileCandidates(q eventQuerier, contentKinds, communityKinds []no
 type ProfileManager struct {
 	queue          profileQueue
 	src            profileSource
-	store          func(nostr.Event)
+	store          func(nostr.Event, bool)
 	backfill       func() []nostr.PubKey
+	verify         nip05Verifier
 	relays         []string
 	fallbackRelays []string
 	batchSize      int
@@ -120,7 +150,7 @@ type ProfileManager struct {
 	stopOnce       sync.Once
 }
 
-func NewProfileManager(q profileQueue, src profileSource, store func(nostr.Event), backfill func() []nostr.PubKey, relays, fallbackRelays []string, batchSize int) *ProfileManager {
+func NewProfileManager(q profileQueue, src profileSource, store func(nostr.Event, bool), backfill func() []nostr.PubKey, verify nip05Verifier, relays, fallbackRelays []string, batchSize int) *ProfileManager {
 	if batchSize <= 0 {
 		batchSize = 50
 	}
@@ -129,6 +159,7 @@ func NewProfileManager(q profileQueue, src profileSource, store func(nostr.Event
 		src:            src,
 		store:          store,
 		backfill:       backfill,
+		verify:         verify,
 		relays:         relays,
 		fallbackRelays: fallbackRelays,
 		batchSize:      batchSize,
@@ -192,20 +223,51 @@ func (p *ProfileManager) drainOnce(ctx context.Context) {
 }
 
 // fetchStore fetches kind-0 for authors from relays; each successfully parsed
-// profile is stored and dequeued. It returns the authors that yielded no
-// stored profile, so the caller can escalate them to fallback relays. The fetch
-// is bounded by profileFetchTimeout so one slow relay cannot starve the drain.
+// profile has its claimed nip05 verified (bounded parallelism) and is then
+// stored and dequeued. It returns the authors that yielded no stored profile,
+// so the caller can escalate them to fallback relays. The fetch is bounded by
+// profileFetchTimeout so one slow relay cannot starve the drain; each
+// verification is separately bounded by nip05VerifyTimeout.
 func (p *ProfileManager) fetchStore(ctx context.Context, relays []string, authors []nostr.PubKey) []nostr.PubKey {
 	fctx, cancel := context.WithTimeout(ctx, profileFetchTimeout)
-	defer cancel()
-	stored := make(map[nostr.PubKey]bool, len(authors))
-	for _, ev := range p.src.Fetch(fctx, relays, authors) {
-		if _, err := sdk.ParseMetadata(ev); err != nil {
+	events := p.src.Fetch(fctx, relays, authors)
+	cancel()
+
+	type fetched struct {
+		ev       nostr.Event
+		nip05    string
+		verified bool
+	}
+	var batch []*fetched
+	for _, ev := range events {
+		meta, err := sdk.ParseMetadata(ev)
+		if err != nil {
 			continue // leave queued; don't store a malformed profile
 		}
-		p.store(ev)
-		_ = p.queue.RemoveProfileCandidate(ev.PubKey.Hex())
-		stored[ev.PubKey] = true
+		batch = append(batch, &fetched{ev: ev, nip05: meta.NIP05})
+	}
+
+	sem := make(chan struct{}, nip05VerifyConcurrency)
+	var wg sync.WaitGroup
+	for _, f := range batch {
+		if f.nip05 == "" {
+			continue // nothing claimed, nothing to verify
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(f *fetched) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			f.verified = p.verify(ctx, f.nip05, f.ev.PubKey)
+		}(f)
+	}
+	wg.Wait()
+
+	stored := make(map[nostr.PubKey]bool, len(batch))
+	for _, f := range batch {
+		p.store(f.ev, f.verified)
+		_ = p.queue.RemoveProfileCandidate(f.ev.PubKey.Hex())
+		stored[f.ev.PubKey] = true
 	}
 	var remaining []nostr.PubKey
 	for _, pk := range authors {

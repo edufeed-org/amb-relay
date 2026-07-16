@@ -4,6 +4,7 @@ import (
 	"context"
 	"iter"
 	"sort"
+	"sync"
 	"testing"
 
 	"fiatjaf.com/nostr"
@@ -13,7 +14,7 @@ import (
 
 type fakeQueue struct{ items map[string]bool }
 
-func newFakeQueue() *fakeQueue { return &fakeQueue{items: map[string]bool{}} }
+func newFakeQueue() *fakeQueue                               { return &fakeQueue{items: map[string]bool{}} }
 func (q *fakeQueue) EnqueueProfileCandidate(pk string) error { q.items[pk] = true; return nil }
 func (q *fakeQueue) RemoveProfileCandidate(pk string) error  { delete(q.items, pk); return nil }
 func (q *fakeQueue) ListProfileQueue() ([]string, error) {
@@ -81,6 +82,18 @@ func mkKind0For(t *testing.T, sk nostr.SecretKey, name string) nostr.Event {
 	return ev
 }
 
+// mkKind0JSON signs a kind-0 with explicit content JSON, for profiles that
+// need more than a name (nip05 claims).
+func mkKind0JSON(t *testing.T, sk nostr.SecretKey, content string) nostr.Event {
+	t.Helper()
+	ev := nostr.Event{Kind: 0, Content: content, CreatedAt: 1700000000}
+	ev.Sign(sk)
+	return ev
+}
+
+// noVerify is a stub verifier for tests that don't exercise NIP-05 verification.
+func noVerify(context.Context, string, nostr.PubKey) bool { return false }
+
 // --- tests ---
 
 func TestDrainStoresFoundLeavesMissingQueued(t *testing.T) {
@@ -94,7 +107,8 @@ func TestDrainStoresFoundLeavesMissingQueued(t *testing.T) {
 
 	var stored []nostr.Event
 	src := fakeSource{byPubkey: map[nostr.PubKey]nostr.Event{pkA: evA}} // B absent
-	mgr := NewProfileManager(q, src, func(e nostr.Event) { stored = append(stored, e) }, func() []nostr.PubKey { return nil }, []string{"wss://x"}, nil, 50)
+	store := func(e nostr.Event, _ bool) { stored = append(stored, e) }
+	mgr := NewProfileManager(q, src, store, func() []nostr.PubKey { return nil }, noVerify, []string{"wss://x"}, nil, 50)
 
 	mgr.drainOnce(context.Background())
 
@@ -122,7 +136,8 @@ func TestDrainFallbackResolvesMissing(t *testing.T) {
 		"wss://fallback": {pkB: evB},
 	}}
 	var stored []nostr.Event
-	mgr := NewProfileManager(q, src, func(e nostr.Event) { stored = append(stored, e) }, func() []nostr.PubKey { return nil }, []string{"wss://primary"}, []string{"wss://fallback"}, 50)
+	store := func(e nostr.Event, _ bool) { stored = append(stored, e) }
+	mgr := NewProfileManager(q, src, store, func() []nostr.PubKey { return nil }, noVerify, []string{"wss://primary"}, []string{"wss://fallback"}, 50)
 
 	mgr.drainOnce(context.Background())
 
@@ -147,7 +162,8 @@ func TestDrainDropsInvalidPubkey(t *testing.T) {
 
 	var stored []nostr.Event
 	src := fakeSource{byPubkey: map[nostr.PubKey]nostr.Event{}}
-	mgr := NewProfileManager(q, src, func(e nostr.Event) { stored = append(stored, e) }, func() []nostr.PubKey { return nil }, nil, nil, 50)
+	store := func(e nostr.Event, _ bool) { stored = append(stored, e) }
+	mgr := NewProfileManager(q, src, store, func() []nostr.PubKey { return nil }, noVerify, nil, nil, 50)
 
 	mgr.drainOnce(context.Background())
 
@@ -161,7 +177,7 @@ func TestDrainDropsInvalidPubkey(t *testing.T) {
 
 func TestEnqueueDelegatesToQueue(t *testing.T) {
 	q := newFakeQueue()
-	mgr := NewProfileManager(q, fakeSource{}, func(nostr.Event) {}, func() []nostr.PubKey { return nil }, nil, nil, 50)
+	mgr := NewProfileManager(q, fakeSource{}, func(nostr.Event, bool) {}, func() []nostr.PubKey { return nil }, noVerify, nil, nil, 50)
 	pk := nostr.Generate().Public()
 	mgr.Enqueue(pk)
 	mgr.Enqueue(pk) // dedup
@@ -220,7 +236,7 @@ func TestEnqueueShareCommunities(t *testing.T) {
 	}
 
 	q := newFakeQueue()
-	mgr := NewProfileManager(q, fakeSource{}, func(nostr.Event) {}, func() []nostr.PubKey { return nil }, []string{"wss://x"}, nil, 50)
+	mgr := NewProfileManager(q, fakeSource{}, func(nostr.Event, bool) {}, func() []nostr.PubKey { return nil }, noVerify, []string{"wss://x"}, nil, 50)
 
 	enqueueShareCommunities(mgr, share)
 
@@ -251,5 +267,62 @@ func TestBackfillAuthorsDistinct(t *testing.T) {
 	}
 	if !seen[pkA] || !seen[pkB] {
 		t.Fatalf("missing an author: %v", got)
+	}
+}
+
+func TestFetchStoreVerifiesNIP05(t *testing.T) {
+	skGood, skBad, skNone := nostr.Generate(), nostr.Generate(), nostr.Generate()
+	pkGood, pkBad, pkNone := skGood.Public(), skBad.Public(), skNone.Public()
+	src := fakeSource{byPubkey: map[nostr.PubKey]nostr.Event{
+		pkGood: mkKind0JSON(t, skGood, `{"name":"good","nip05":"good@uni.example"}`),
+		pkBad:  mkKind0JSON(t, skBad, `{"name":"bad","nip05":"fake@uni.example"}`),
+		pkNone: mkKind0JSON(t, skNone, `{"name":"none"}`),
+	}}
+	q := newFakeQueue()
+	for pk := range src.byPubkey {
+		q.EnqueueProfileCandidate(pk.Hex())
+	}
+	var mu sync.Mutex
+	verifiedBy := map[nostr.PubKey]bool{}
+	verifierCalls := map[string]int{}
+	store := func(e nostr.Event, v bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		verifiedBy[e.PubKey] = v
+	}
+	verify := func(_ context.Context, id string, pk nostr.PubKey) bool {
+		mu.Lock()
+		verifierCalls[id]++
+		mu.Unlock()
+		return id == "good@uni.example" && pk == pkGood
+	}
+	pm := NewProfileManager(q, src, store, func() []nostr.PubKey { return nil }, verify, []string{"wss://p"}, nil, 10)
+	pm.drainOnce(context.Background())
+
+	if !verifiedBy[pkGood] {
+		t.Error("good profile: verified = false, want true")
+	}
+	if verifiedBy[pkBad] {
+		t.Error("bad profile: verified = true, want false")
+	}
+	if v, ok := verifiedBy[pkNone]; !ok || v {
+		t.Errorf("no-nip05 profile: stored=%v verified=%v, want stored unverified", ok, v)
+	}
+	if verifierCalls["good@uni.example"] != 1 || verifierCalls["fake@uni.example"] != 1 || len(verifierCalls) != 2 {
+		t.Errorf("verifier calls = %v, want exactly one call per claimed identifier", verifierCalls)
+	}
+}
+
+func TestVerifyNIP05RejectsInvalidIdentifierWithoutHTTP(t *testing.T) {
+	pk := nostr.Generate().Public()
+	// Empty and non-identifier strings must short-circuit before any network
+	// call — a canceled context would make an HTTP attempt fail differently.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if verifyNIP05(ctx, "", pk) {
+		t.Error("empty identifier verified")
+	}
+	if verifyNIP05(ctx, "not an identifier", pk) {
+		t.Error("garbage identifier verified")
 	}
 }

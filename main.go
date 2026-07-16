@@ -667,10 +667,11 @@ func main() {
 		profileMgr = NewProfileManager(
 			&mgmt,
 			poolSource{pool: nostr.NewPool()},
-			func(e nostr.Event) { storeProfile(profilesEnabled, profilesDB, e, false) },
+			func(e nostr.Event, nip05Verified bool) { storeProfile(profilesEnabled, profilesDB, e, nip05Verified) },
 			func() []nostr.PubKey {
 				return backfillProfileCandidates(&boltDB, profileContentKinds, communityKinds, 1_000_000)
 			},
+			verifyNIP05,
 			profileRelays,
 			fallbackRelays,
 			50,
