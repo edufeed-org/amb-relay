@@ -54,7 +54,7 @@ func newStructuredEnvelope(event *nostr.Event) (structuredEnvelope, error) {
 // overwrite each other. Single-kind collections keep the legacy {pubkey}:{d}.
 func docIDFor(kind nostr.Kind, pubkey, dTag string) string {
 	switch kind {
-	case 30143, 30144, 30145, 31922, 31923, 31924, 31925:
+	case 30040, 30041, 30143, 30144, 30145, 31922, 31923, 31924, 31925:
 		return fmt.Sprintf("%d:%s", kind, typesense30142.GenerateDocumentID(pubkey, dTag))
 	}
 	return typesense30142.GenerateDocumentID(pubkey, dTag)
