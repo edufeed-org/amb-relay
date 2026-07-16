@@ -667,7 +667,7 @@ func main() {
 		profileMgr = NewProfileManager(
 			&mgmt,
 			poolSource{pool: nostr.NewPool()},
-			func(e nostr.Event) { storeProfile(profilesEnabled, profilesDB, e) },
+			func(e nostr.Event) { storeProfile(profilesEnabled, profilesDB, e, false) },
 			func() []nostr.PubKey {
 				return backfillProfileCandidates(&boltDB, profileContentKinds, communityKinds, 1_000_000)
 			},
