@@ -320,6 +320,9 @@ func main() {
 			CollectionName:  pColl,
 			Schema:          &pSchema,
 			SearchFields:    "name,display_name,about,nip05",
+			// Verified-first ranking: at equal text relevance a nip05-verified
+			// profile outranks an unverified one; explicit client sort: wins.
+			SearchSortBy:    "_text_match:desc,nip05_verified:desc,eventCreatedAt:desc",
 			StopwordsSet:    stopwordsSet,
 			StopwordsList:   stopwordsList,
 			StopwordsLocale: "de",
