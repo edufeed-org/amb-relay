@@ -66,6 +66,7 @@ func main() {
 	profilesEnabled := os.Getenv("PROFILES_ENABLED") == "true"
 	sharesEnabled := os.Getenv("COMMUNITY_SHARES_ENABLED") == "true"
 	transferkioskEnabled := os.Getenv("TRANSFERKIOSK_ENABLED") == "true"
+	publicationsEnabled := os.Getenv("PUBLICATIONS_ENABLED") == "true"
 
 	// NIP-11: Retention
 	retentionKinds := [][]int{{5}, {30142}}
@@ -83,6 +84,9 @@ func main() {
 	}
 	if transferkioskEnabled {
 		retentionKinds = append(retentionKinds, []int{30143}, []int{30144}, []int{30145})
+	}
+	if publicationsEnabled {
+		retentionKinds = append(retentionKinds, []int{30040}, []int{30041})
 	}
 	relay.Info.Retention = []*nip11.RelayRetentionDocument{
 		{Kinds: retentionKinds},
@@ -389,6 +393,33 @@ func main() {
 		fmt.Printf("Transferkiosk (kinds 30143/30144/30145) enabled — collection %s\n", tkColl)
 	}
 
+	// Publications (NKBIP-01 kinds 30040/30041) backend — gated behind
+	// PUBLICATIONS_ENABLED. One shared collection for indices + sections; nil
+	// when the flag is off so the registry omits the kinds.
+	var tsDB7 *typesense30142.TSBackend
+	if publicationsEnabled {
+		pubColl := os.Getenv("TS_COLLECTION_PUBLICATIONS")
+		if pubColl == "" {
+			pubColl = "publications"
+		}
+		pubSchema := publicationsSchema(pubColl)
+		tsDB7 = &typesense30142.TSBackend{
+			ApiKey:          os.Getenv("TS_APIKEY"),
+			Host:            os.Getenv("TS_HOST"),
+			CollectionName:  pubColl,
+			RawEventStore:   &boltDB,
+			Schema:          &pubSchema,
+			SearchFields:    "title,summary,searchText,content",
+			StopwordsSet:    stopwordsSet,
+			StopwordsList:   stopwordsList,
+			StopwordsLocale: "de",
+		}
+		if err := tsDB7.Init(); err != nil {
+			panic(fmt.Sprintf("publications TSBackend init: %v", err))
+		}
+		fmt.Printf("Publications (kinds 30040/30041) enabled — collection %s\n", pubColl)
+	}
+
 	// Optional: reconcile BoltDB ↔ Typesense at startup. Both stores are
 	// open and the listener hasn't started yet, so this runs single-threaded
 	// against the relay's own opened BoltDB — no lock juggling, unlike the
@@ -511,6 +542,17 @@ func main() {
 			chunked:  true,
 		})
 	}
+	if publicationsEnabled && tsDB7 != nil {
+		contentTypes = append(contentTypes, contentType{
+			kinds:    []nostr.Kind{30040, 30041},
+			validate: validatePublication,
+			store:    func(e nostr.Event) { storePublication(true, tsDB7, e) },
+			fetch:    tsDB7.QueryEvents,
+			count:    tsDB7.CountEvents,
+			deleteID: tsDB7.DeleteEvent,
+			chunked:  true,
+		})
+	}
 	// NIP-09 (issue #1): serve stored kind-5 deletion requests. Always on —
 	// deletion *processing* has always been unconditional, so the deletion
 	// trail is too. Registered last so content types keep fan-out priority;
@@ -579,6 +621,9 @@ func main() {
 		if tsDB6 != nil {
 			tsDB6.Embedder = embedder
 		}
+		if tsDB7 != nil {
+			tsDB7.Embedder = embedder
+		}
 		fmt.Printf("Semantic search enabled with fields: %v\n", semanticCfg.EmbedFields)
 	} else {
 		fmt.Println("Semantic search disabled")
@@ -633,6 +678,14 @@ func main() {
 			kinds:     []nostr.Kind{30143, 30144, 30145},
 			recreate:  func() error { return tsDB6.RecreateCollection(tsDB6.Schema) },
 			reproject: func(e nostr.Event) error { return reprojectStructured(tsDB6, e, nostrToTransferkiosk) },
+		})
+	}
+	if publicationsEnabled && tsDB7 != nil {
+		structuredTargets = append(structuredTargets, structuredReindexTarget{
+			label:     "publications",
+			kinds:     []nostr.Kind{30040, 30041},
+			recreate:  func() error { return tsDB7.RecreateCollection(tsDB7.Schema) },
+			reproject: func(e nostr.Event) error { return reprojectStructured(tsDB7, e, nostrToPublication) },
 		})
 	}
 
@@ -738,6 +791,11 @@ func main() {
 		if transferkioskEnabled && tsDB6 != nil {
 			for _, k := range []nostr.Kind{30143, 30144, 30145} {
 				stampTargets[k] = tsDB6
+			}
+		}
+		if publicationsEnabled && tsDB7 != nil {
+			for _, k := range []nostr.Kind{30040, 30041} {
+				stampTargets[k] = tsDB7
 			}
 		}
 
