@@ -46,6 +46,11 @@ type PublicationDocument struct {
 	// assume these are 30041.
 	Sections []string `json:"sections,omitempty"`
 
+	// PartOf holds a-tag coords with an isPartOf/isOutputOf marker — e.g. a
+	// transferkiosk-born publication's parent-project link. Kept out of
+	// Sections so the parts list stays purely the publication's content.
+	PartOf []string `json:"partOf,omitempty"`
+
 	Embedding []float32 `json:"embedding,omitempty"`
 	structuredEnvelope
 }
@@ -98,6 +103,8 @@ func nostrToPublication(event *nostr.Event) (*PublicationDocument, error) {
 			fold = append(fold, val)
 		case "creator:affiliation:name":
 			fold = append(fold, val)
+		case "editor:name":
+			fold = append(fold, val)
 		case "i":
 			if doi, ok := strings.CutPrefix(val, "doi:"); ok && doc.Doi == "" {
 				doc.Doi = doi
@@ -123,7 +130,20 @@ func nostrToPublication(event *nostr.Event) (*PublicationDocument, error) {
 		case "encoding:contentUrl":
 			doc.EncodingURL = val
 		case "a":
-			doc.Sections = append(doc.Sections, val)
+			marker := ""
+			if len(tag) >= 4 {
+				marker = tag[3]
+			}
+			switch {
+			case marker == "isPartOf" || marker == "isOutputOf":
+				doc.PartOf = append(doc.PartOf, val)
+			case marker == "" || isHex64(marker):
+				// NKBIP-01 puts an optional event id in position 3; bare or
+				// event-id-hinted a-tags are the publication's parts. Any
+				// other word marker (vocab concept refs, `documents`) is a
+				// typed link — eventRaw only.
+				doc.Sections = append(doc.Sections, val)
+			}
 		}
 	}
 
@@ -146,6 +166,21 @@ func (d *PublicationDocument) EmbedText() string {
 
 // SetEmbedding stores the computed dense vector.
 func (d *PublicationDocument) SetEmbedding(v []float32) { d.Embedding = v }
+
+// isHex64 reports whether s is a 64-char hex string — the shape of an
+// NKBIP-01 optional event-id hint in an a-tag's 4th position, as opposed to
+// a word marker like isOutputOf.
+func isHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
 
 // storePublication projects and upserts a kind-30040/30041 event to the shared
 // publications collection via the structured-collection helper.
@@ -188,6 +223,7 @@ func publicationsSchema(name string) typesense30142.CollectionSchema {
 			str("license", true),
 			str("encodingUrl", false),
 			strArr("sections"),
+			strArr("partOf"),
 			{Name: "content_fetched_at", Type: "int64", Optional: true},
 			str("content_status", false),
 			{Name: "embedding", Type: "float[]", NumDim: 768, VecDistMetric: "cosine", Optional: true},
