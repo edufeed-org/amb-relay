@@ -27,6 +27,11 @@ type structuredReindexTarget struct {
 	kinds     []nostr.Kind
 	recreate  func() error
 	reproject func(nostr.Event) error
+	// after, when set, runs once after the reprojection pass — e.g. the
+	// publications target replays indexer-written content from the
+	// ContentStore onto the rebuilt docs. Returns (patched, errs) to fold
+	// into the reindex counters.
+	after func() (patched, errs int64)
 }
 
 type ReindexStatus struct {
@@ -55,7 +60,7 @@ type Reindexer struct {
 	contentPatched  atomic.Int64
 	contentOrphaned atomic.Int64
 	lastErr         atomic.Value // stores string
-	afterRun        func()        // optional; invoked once after a reindex completes (stamp replay)
+	afterRun        func()       // optional; invoked once after a reindex completes (stamp replay)
 }
 
 func NewReindexer(tsDB *typesense30142.TSBackend, boltDB *boltdb.BoltBackend, mgmt *ManagementStore, content *ContentStore, structured []structuredReindexTarget) *Reindexer {
@@ -160,16 +165,30 @@ func (r *Reindexer) run() {
 		id    string
 		entry ContentEntry
 	}
-	var orphans []string
+	var orphanCandidates []string
 	var liveRows []liveContent
 
 	_ = r.content.ForEach(func(eventID string, entry ContentEntry) error {
 		if _, alive := liveEventIDs[eventID]; !alive {
-			orphans = append(orphans, eventID)
+			orphanCandidates = append(orphanCandidates, eventID)
 		} else {
 			liveRows = append(liveRows, liveContent{id: eventID, entry: entry})
 		}
 		return nil
+	})
+
+	// A row absent from the AMB live set may belong to another kind's
+	// collection (kind-routed setcontent) — only rows whose event is gone
+	// from BoltDB entirely are deleted.
+	orphans := classifyOrphans(orphanCandidates, func(idHex string) (nostr.Kind, bool) {
+		id, err := nostr.IDFromHex(idHex)
+		if err != nil {
+			return 0, false
+		}
+		for e := range r.boltDB.QueryEvents(nostr.Filter{IDs: []nostr.ID{id}, Limit: 1}, 1) {
+			return e.Kind, true
+		}
+		return 0, false
 	})
 
 	// Orphan GC — outside the read txn.
@@ -252,6 +271,25 @@ func (r *Reindexer) reindexStructured(t structuredReindexTarget) {
 	r.total.Add(total)
 	r.indexed.Add(indexed)
 	r.errors.Add(errs)
+
+	if t.after != nil {
+		patched, errs := t.after()
+		r.contentPatched.Add(patched)
+		r.errors.Add(errs)
+	}
+}
+
+// classifyOrphans returns the content-row ids whose event no longer exists in
+// BoltDB at all. Rows whose event exists under ANY kind are kept: non-AMB
+// rows (e.g. kind-30040 publication fulltext) belong to another collection,
+// whose own reindex target replays them.
+func classifyOrphans(candidates []string, kindOf func(string) (nostr.Kind, bool)) (orphans []string) {
+	for _, id := range candidates {
+		if _, ok := kindOf(id); !ok {
+			orphans = append(orphans, id)
+		}
+	}
+	return
 }
 
 // GetStatus returns the current reindex status.
