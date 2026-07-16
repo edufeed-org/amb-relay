@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -686,6 +687,41 @@ func main() {
 			kinds:     []nostr.Kind{30040, 30041},
 			recreate:  func() error { return tsDB7.RecreateCollection(tsDB7.Schema) },
 			reproject: func(e nostr.Event) error { return reprojectStructured(tsDB7, e, nostrToPublication) },
+			// Replay indexer-written 30040 fulltext from the ContentStore onto
+			// the rebuilt docs (reprojection writes content="" for 30040).
+			after: func() (patched, errs int64) {
+				type row struct {
+					id    string
+					entry ContentEntry
+				}
+				var rows []row // collect under the read txn, patch outside it
+				_ = contentStore.ForEach(func(id string, e ContentEntry) error {
+					rows = append(rows, row{id, e})
+					return nil
+				})
+				for _, rw := range rows {
+					id, err := nostr.IDFromHex(rw.id)
+					if err != nil {
+						continue
+					}
+					var ev nostr.Event
+					var found bool
+					for e := range boltDB.QueryEvents(nostr.Filter{IDs: []nostr.ID{id}, Limit: 1}, 1) {
+						ev, found = e, true
+					}
+					if !found || ev.Kind != 30040 {
+						continue // AMB rows are replayed by the AMB path
+					}
+					docID := docIDFor(ev.Kind, ev.PubKey.Hex(), ev.Tags.GetD())
+					if err := PatchContent(tsDB7.Host, tsDB7.ApiKey, tsDB7.CollectionName, docID, rw.entry); err != nil {
+						log.Printf("reindex: publication content patch failed for %s: %v", rw.id, err)
+						errs++
+						continue
+					}
+					patched++
+				}
+				return
+			},
 		})
 	}
 

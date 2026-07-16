@@ -94,3 +94,46 @@ func TestReindexerAfterRunCallbackFires(t *testing.T) {
 		t.Fatal("afterRun must be invoked by runAfter")
 	}
 }
+
+// classifyOrphans keeps any candidate row whose event still exists in BoltDB
+// under any kind — only rows whose event is gone entirely are orphans.
+func TestClassifyOrphans(t *testing.T) {
+	kinds := map[string]nostr.Kind{
+		"aaa": 30040, // publication content row — must NOT be deleted
+		"bbb": 30142, // present in bolt → not orphan
+	}
+	kindOf := func(id string) (nostr.Kind, bool) {
+		k, ok := kinds[id]
+		return k, ok
+	}
+	orphans := classifyOrphans([]string{"aaa", "bbb", "ccc"}, kindOf)
+	// Only "ccc" (event gone from BoltDB entirely) is an orphan.
+	if len(orphans) != 1 || orphans[0] != "ccc" {
+		t.Errorf("orphans = %v, want [ccc]", orphans)
+	}
+}
+
+// reindexStructured must invoke after() once and fold its counters in.
+func TestReindexStructuredAfterHookCounters(t *testing.T) {
+	called := 0
+	r := &Reindexer{}
+	tgt := structuredReindexTarget{
+		label:     "publications",
+		kinds:     []nostr.Kind{30040},
+		recreate:  func() error { return nil },
+		reproject: func(nostr.Event) error { return nil },
+		after: func() (int64, int64) {
+			called++
+			return 3, 1
+		},
+	}
+	bb := openTestBolt(t)
+	r.boltDB = bb
+	r.reindexStructured(tgt)
+	if called != 1 {
+		t.Fatalf("after called %d times, want 1", called)
+	}
+	if r.contentPatched.Load() != 3 || r.errors.Load() != 1 {
+		t.Errorf("counters = patched %d errs %d, want 3/1", r.contentPatched.Load(), r.errors.Load())
+	}
+}
