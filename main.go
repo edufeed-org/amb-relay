@@ -84,7 +84,7 @@ func main() {
 		retentionKinds = append(retentionKinds, []int{16}, []int{30222})
 	}
 	if transferkioskEnabled {
-		retentionKinds = append(retentionKinds, []int{30143}, []int{30144}, []int{30145})
+		retentionKinds = append(retentionKinds, []int{30143}, []int{30144})
 	}
 	if publicationsEnabled {
 		retentionKinds = append(retentionKinds, []int{30040}, []int{30041})
@@ -367,9 +367,10 @@ func main() {
 		fmt.Printf("Community shares (kinds 16, 30222) enabled — collection %s\n", shColl)
 	}
 
-	// Transferkiosk (NIP-DIDACTIC kinds 30143/30144/30145) backend — gated behind
-	// TRANSFERKIOSK_ENABLED. One shared collection for projekt/massnahme/
-	// publikation; nil when the flag is off so the registry omits the kinds.
+	// Transferkiosk (NIP-DIDACTIC kinds 30143/30144) backend — gated behind
+	// TRANSFERKIOSK_ENABLED. One shared collection for projekt/massnahme; nil
+	// when the flag is off so the registry omits the kinds. Publikationen
+	// (formerly kind 30145) moved to NKBIP-01 kind 30040 — see publications.go.
 	var tsDB6 *typesense30142.TSBackend
 	if transferkioskEnabled {
 		tkColl := os.Getenv("TS_COLLECTION_TRANSFERKIOSK")
@@ -391,7 +392,7 @@ func main() {
 		if err := tsDB6.Init(); err != nil {
 			panic(fmt.Sprintf("transferkiosk TSBackend init: %v", err))
 		}
-		fmt.Printf("Transferkiosk (kinds 30143/30144/30145) enabled — collection %s\n", tkColl)
+		fmt.Printf("Transferkiosk (kinds 30143/30144) enabled — collection %s\n", tkColl)
 	}
 
 	// Publications (NKBIP-01 kinds 30040/30041) backend — gated behind
@@ -534,7 +535,7 @@ func main() {
 	}
 	if transferkioskEnabled && tsDB6 != nil {
 		contentTypes = append(contentTypes, contentType{
-			kinds:    []nostr.Kind{30143, 30144, 30145},
+			kinds:    []nostr.Kind{30143, 30144},
 			validate: validateTransferkiosk,
 			store:    func(e nostr.Event) { storeTransferkiosk(true, tsDB6, e) },
 			fetch:    tsDB6.QueryEvents,
@@ -676,7 +677,7 @@ func main() {
 	if transferkioskEnabled && tsDB6 != nil {
 		structuredTargets = append(structuredTargets, structuredReindexTarget{
 			label:     "transferkiosk",
-			kinds:     []nostr.Kind{30143, 30144, 30145},
+			kinds:     []nostr.Kind{30143, 30144},
 			recreate:  func() error { return tsDB6.RecreateCollection(tsDB6.Schema) },
 			reproject: func(e nostr.Event) error { return reprojectStructured(tsDB6, e, nostrToTransferkiosk) },
 		})
@@ -825,7 +826,7 @@ func main() {
 			}
 		}
 		if transferkioskEnabled && tsDB6 != nil {
-			for _, k := range []nostr.Kind{30143, 30144, 30145} {
+			for _, k := range []nostr.Kind{30143, 30144} {
 				stampTargets[k] = tsDB6
 			}
 		}
