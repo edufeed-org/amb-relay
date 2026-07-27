@@ -225,3 +225,82 @@ func TestSlowSearchBackendFanoutTerminatesWithinBudget(t *testing.T) {
 		t.Fatal("timed out waiting for EOSE — search fetch budget did not terminate the REQ in time (this is the 07-24 outage symptom: client hangs)")
 	}
 }
+
+// TestSingleBackendSlowHangTerminatesWithinBudget pins the exact incident
+// shape that hung the reporting client: a filter targeting a SINGLE
+// registered content type (kinds:[30142], no fan-out at all) whose backend
+// simply takes longer to answer than the query budget — no error, no 503,
+// just slow. This is deliberately the simplest possible reproduction: even
+// with only one collection in play (so registry.fetch's serial-fan-out
+// multiplier, exercised by the other tests in this file, isn't the thing
+// doing the work here), an unbounded wait on a single slow backend call is
+// enough to hang a client waiting on EOSE. Wired exactly as main.go wires
+// production (relay.QueryStored wraps reg.fetch's result in boundedSeq), the
+// client must still get EOSE within budget.
+func TestSingleBackendSlowHangTerminatesWithinBudget(t *testing.T) {
+	const backendDelay = 2 * time.Second
+	const budget = 200 * time.Millisecond
+
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(backendDelay)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"found":0,"hits":[]}`))
+	}))
+	defer slow.Close()
+
+	backend := &typesense30142.TSBackend{
+		ApiKey:         "xyz",
+		Host:           slow.URL,
+		CollectionName: "amb_30142",
+	}
+
+	reg := newRegistry(
+		contentType{kinds: []nostr.Kind{30142}, fetch: backend.QueryEvents, chunked: true},
+	)
+
+	relay := khatru.NewRelay()
+	relay.QueryStored = func(ctx context.Context, filter nostr.Filter) iter.Seq[nostr.Event] {
+		return boundedSeq(reg.fetch(filter, 250), budget)
+	}
+	relay.Count = func(ctx context.Context, filter nostr.Filter) (uint32, error) { return reg.count(filter) }
+	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error { return nil }
+
+	server := httptest.NewServer(relay)
+	defer server.Close()
+
+	url := "ws" + server.URL[4:]
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	client, err := nostr.RelayConnect(ctx, url, nostr.RelayOptions{})
+	if err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+	defer client.Close()
+
+	start := time.Now()
+	// Single targeted kind: no registry fan-out at all, isolating the "one
+	// slow backend, one collection" mechanism from the multi-collection
+	// serial-stacking mechanism the other tests in this file cover.
+	sub, err := client.Subscribe(ctx, nostr.Filter{
+		Kinds:  []nostr.Kind{30142},
+		Search: "mathematik",
+	}, nostr.SubscriptionOptions{})
+	if err != nil {
+		t.Fatalf("failed to subscribe: %v", err)
+	}
+	defer sub.Unsub()
+
+	select {
+	case <-sub.EndOfStoredEvents:
+		elapsed := time.Since(start)
+		t.Logf("EOSE arrived after %s (budget %s, single slow backend delay %s)", elapsed, budget, backendDelay)
+		if elapsed > 1*time.Second {
+			t.Fatalf("EOSE arrived but too late (%s) — budget not effectively enforced", elapsed)
+		}
+	case ev := <-sub.Events:
+		t.Fatalf("did not expect any event from a slow-but-empty backend, got %v", ev.ID)
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for EOSE from a single slow backend — this is the exact mechanism that hung the reporting client: no fan-out needed, just one collection answering slower than the budget")
+	}
+}

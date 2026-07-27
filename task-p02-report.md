@@ -168,3 +168,118 @@ contract is correct given what it's handed.
 - `query_failure_repro_test.go` (new) — 3 tests (2 fast-503 regression
   checks, 1 red/green slow-fan-out reproduction).
 - `.env.example`, `CLAUDE.md` — document the new env var.
+
+## Follow-up: bound COUNT, explicit budget-disable, pin single-backend hang
+
+Three items from review, applied on top of the above.
+
+### 1. Bound the COUNT path
+
+`relay.Count = reg.count` (`main.go`, was line ~1039) had the exact same
+hazard as the unhardened `QueryStored`, one envelope over: `registry.count`
+(`content_registry.go:155-165`) loops `r.selected(filter)` **serially**,
+calling each selected content type's own `count`, each bounded only by its
+own HTTP client timeout. A kind-less COUNT during a degraded/lagging
+Typesense can stack the same `N × (per-call timeout)` stall that
+`boundedSeq` was written to fix for REQ.
+
+Checked khatru's actual contract before choosing a shape
+(`nostrlib/khatru/relay.go:83`, `responding.go:39-58`): `Count` is
+`func(ctx, filter) (uint32, error)`; `handleCountRequest` sends `err.Error()`
+as a `NOTICE` when non-nil and **still replies with a `CountEnvelope`**
+carrying whatever `uint32` was returned (there's no path that lets an error
+silently hang the COUNT round-trip — khatru already replies gracefully as
+long as `Count` itself returns). That meant a straight port of `boundedSeq`'s
+approach was safe: `boundedCount(fn func(nostr.Filter) (uint32, error),
+budget time.Duration) func(nostr.Filter) (uint32, error)` (`query_budget.go`)
+runs `fn` in a goroutine against a buffered result channel (capacity 1, so
+the goroutine can never block on send even after the caller gives up — no
+leak, mirroring `boundedSeq`'s `stop`-channel discipline via a different
+mechanism suited to a single-shot, non-streaming call) and races it against
+a timer. On timeout it returns `(0, fmt.Errorf("count timed out after %s",
+budget))` — unlike a query result there is no partial value to stream back,
+so zero-plus-error is the only honest answer, and khatru turns that into
+exactly the graceful NOTICE+CountEnvelope(0) response the code already
+supports. `budget<=0` returns `fn` unchanged, matching `boundedSeq`'s
+convention.
+
+Wired in `main.go`: `boundedRegCount := boundedCount(reg.count,
+queryFetchBudget)`, then `relay.Count` calls through it. Same env-derived
+budget value as `QueryStored` — no separate knob, since they share the exact
+fan-out shape and there's no reason to tune them independently.
+
+### 2. Budget disable semantics
+
+Before: `QUERY_FETCH_TIMEOUT_MS=0` parsed fine (`strconv.Atoi` succeeds) but
+failed the `n > 0` guard, so it silently fell back to the 20s default —
+indistinguishable from leaving the variable unset, even though `boundedSeq`
+(and now `boundedCount`) both already treat `budget<=0` as "no cap" and were
+fully able to honor an explicit opt-out.
+
+Fix is a one-character guard change, `n > 0` → `n >= 0`, in both places
+`main.go` parses the var (the `QUERY_FETCH_TIMEOUT_MS` block feeding
+`queryFetchBudget`). Semantics now: unset (empty string) → 20s default;
+negative or non-numeric → 20s default (invalid input, not a valid opt-out
+spelling); `"0"` → explicit unbounded, passed straight through as
+`time.Duration(0)`, which both wrappers already treat as "run the wrapped
+call directly, no timer." Documented in `.env.example` and `CLAUDE.md`
+(both updated to state the `"0"` vs. unset distinction explicitly, since it's
+exactly the kind of footgun a future reader would silently reintroduce
+without the callout).
+
+### 3. Pin the adjudicated incident shape
+
+Added `TestSingleBackendSlowHangTerminatesWithinBudget`
+(`query_failure_repro_test.go`): a registry with **one** registered content
+type (`kinds:[30142]`, no fan-out at all — deliberately not the multi-type
+registry the other tests in this file use) whose `httptest.Server` sleeps
+2s (no error, no 503 — just slow) before answering 200 with zero hits, wired
+exactly as `main.go` wires production (`relay.QueryStored` wraps
+`reg.fetch`'s result in `boundedSeq`). Budget 200ms. Client still receives
+`EndOfStoredEvents` at ~200ms, not at 2s. This isolates the "one slow
+backend, one collection, no serial multiplier" mechanism from the
+multi-collection serial-stacking mechanism the pre-existing tests
+(`TestSlowSearchBackendFanoutTerminatesWithinBudget`, etc.) cover — i.e. the
+literal incident shape: even a single unresponsive collection, on its own,
+is enough to hang a client waiting on EOSE without the budget wrapper.
+
+Also added, for the COUNT-side helper directly (unit-level, no
+websocket/khatru harness needed since `boundedCount` has no dependency on
+either): `TestBoundedCountTerminatesWithinBudget` (slow `fn`, budget 100ms,
+backend 2s → returns within budget with a timeout error and `n=0`),
+`TestBoundedCountPassesThroughFastResult` (fast `fn` → real value, no
+error), `TestBoundedCountPropagatesUnderlyingError` (fast, clean error from
+`fn` → propagated unchanged, not masked by the wrapper), and
+`TestBoundedCountZeroBudgetDisables` (`budget=0` → `fn` called exactly once,
+untouched — confirms the disable path doesn't add a no-op timer or double
+invocation). New file: `query_budget_test.go`.
+
+### Full suite after this follow-up
+
+```
+$ GOWORK=off GOCACHE=$PWD/.gocache go build ./... && go vet ./... \
+    && go test ./... -count=1 -timeout 300s
+ok  	github.com/edufeed-org/amb-relay	3.255s
+?   	github.com/edufeed-org/amb-relay/cmd/hydrate-bolt	[no test files]
+ok  	github.com/edufeed-org/amb-relay/internal/hydrate	0.004s
+```
+
+Targeted run of the new/changed tests (`-run
+'TestBoundedCount|TestSingleBackendSlowHang|TestSlowSearchBackendFanout'
+-v`): all 6 pass, including the two pre-existing slow-fan-out tests
+(unaffected by this follow-up's changes).
+
+`gofmt -l main.go query_budget.go query_budget_test.go
+query_failure_repro_test.go` — clean.
+
+### Files changed (this follow-up)
+
+- `query_budget.go` — add `boundedCount`.
+- `query_budget_test.go` (new) — 4 unit tests for `boundedCount`.
+- `query_failure_repro_test.go` — add
+  `TestSingleBackendSlowHangTerminatesWithinBudget`.
+- `main.go` — wrap `relay.Count` with `boundedCount`; fix
+  `QUERY_FETCH_TIMEOUT_MS` parse guard (`n > 0` → `n >= 0`) so `"0"` is a
+  real opt-out.
+- `.env.example`, `CLAUDE.md` — document COUNT bounding and the `"0"` vs.
+  unset disable semantics.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"iter"
 	"log"
 	"time"
@@ -70,6 +71,49 @@ func boundedSeq(seq iter.Seq[nostr.Event], budget time.Duration) iter.Seq[nostr.
 				close(stop)
 				return
 			}
+		}
+	}
+}
+
+// boundedCount wraps a registry.count-shaped function so a single COUNT
+// request never blocks longer than budget. registry.count (content_registry.go)
+// has the exact same serial fan-out hazard as registry.fetch — it loops over
+// every selected content type's own count call, each bounded only by its own
+// HTTP client timeout — so a kind-less COUNT during a degraded/lagging
+// Typesense can stack up the same N × (per-call timeout) stall that
+// boundedSeq guards QueryStored against. Unlike a query result, a count has
+// no partial value to stream back as it arrives, so on timeout this reports
+// zero with a descriptive error; khatru's handleCountRequest
+// (nostrlib/khatru/responding.go) sends that error as a NOTICE and still
+// replies with a CountEnvelope carrying the zero, so the COUNT round-trip
+// always terminates within budget instead of blocking the websocket handler.
+// budget<=0 disables the wrapper (matching boundedSeq's convention) and
+// returns fn unchanged.
+func boundedCount(fn func(nostr.Filter) (uint32, error), budget time.Duration) func(nostr.Filter) (uint32, error) {
+	if budget <= 0 {
+		return fn
+	}
+	return func(filter nostr.Filter) (uint32, error) {
+		type result struct {
+			n   uint32
+			err error
+		}
+		done := make(chan result, 1)
+
+		go func() {
+			n, err := fn(filter)
+			done <- result{n, err}
+		}()
+
+		timer := time.NewTimer(budget)
+		defer timer.Stop()
+
+		select {
+		case res := <-done:
+			return res.n, res.err
+		case <-timer.C:
+			log.Printf("query: COUNT exceeded %s budget, returning early with a timeout error", budget)
+			return 0, fmt.Errorf("count timed out after %s", budget)
 		}
 	}
 }

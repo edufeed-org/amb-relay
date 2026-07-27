@@ -1007,9 +1007,15 @@ func main() {
 	// Typesense instance, that serial worst case stacks up to minutes, which
 	// is indistinguishable from "hangs forever" to a real client. See
 	// query_budget.go.
+	//
+	// QUERY_FETCH_TIMEOUT_MS=="" (unset) or a negative/unparseable value
+	// falls back to the 20s default. "0" is a deliberate, explicit opt-out —
+	// boundedSeq/boundedCount both treat budget<=0 as "no cap" — so it must
+	// be distinguished from "unset", not silently coerced back to the
+	// default.
 	queryFetchBudget := DefaultQueryFetchBudget
 	if ms := os.Getenv("QUERY_FETCH_TIMEOUT_MS"); ms != "" {
-		if n, err := strconv.Atoi(ms); err == nil && n > 0 {
+		if n, err := strconv.Atoi(ms); err == nil && n >= 0 {
 			queryFetchBudget = time.Duration(n) * time.Millisecond
 		}
 	}
@@ -1036,8 +1042,12 @@ func main() {
 		}
 		return boundedSeq(results, queryFetchBudget)
 	}
+	// COUNT has the same serial fan-out hazard as QueryStored (registry.count
+	// loops over every selected content type's own count call), so it gets
+	// the same budget wrapper. See boundedCount (query_budget.go).
+	boundedRegCount := boundedCount(reg.count, queryFetchBudget)
 	relay.Count = func(ctx context.Context, filter nostr.Filter) (uint32, error) {
-		return reg.count(filter)
+		return boundedRegCount(filter)
 	}
 	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error {
 		boltBuf.Queue(event, false)
