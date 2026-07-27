@@ -23,10 +23,11 @@ type boltEventWriter interface {
 // goroutine. Events are processed one-by-one (no batch API in BoltDB) and
 // sequentially to correctly handle same-d-tag replacements.
 type BoltWriteBuffer struct {
-	boltDB boltEventWriter
-	ch     chan boltOp
-	done   chan struct{}
-	wg     sync.WaitGroup
+	boltDB  boltEventWriter
+	ch      chan boltOp
+	done    chan struct{}
+	wg      sync.WaitGroup
+	sleepFn func(time.Duration)
 }
 
 type boltOp struct {
@@ -40,9 +41,10 @@ const boltBufSize = 10_000
 // BoltDB writes sequentially. Call Close() to drain and shut down.
 func NewBoltWriteBuffer(boltDB boltEventWriter) *BoltWriteBuffer {
 	buf := &BoltWriteBuffer{
-		boltDB: boltDB,
-		ch:     make(chan boltOp, boltBufSize),
-		done:   make(chan struct{}),
+		boltDB:  boltDB,
+		ch:      make(chan boltOp, boltBufSize),
+		done:    make(chan struct{}),
+		sleepFn: time.Sleep,
 	}
 	buf.wg.Add(1)
 	go buf.run()
@@ -125,7 +127,7 @@ func (b *BoltWriteBuffer) process(op boltOp) {
 			backoff = 16 * time.Second
 		}
 		log.Printf("bolt-buffer: write failed (attempt %d/%d): %v, retrying in %v", attempt+1, boltMaxRetries, err, backoff)
-		time.Sleep(backoff)
+		b.sleepFn(backoff)
 	}
 	log.Printf("bolt-buffer: dropping event %s after %d retries (client can re-send)", op.event.ID, boltMaxRetries)
 }

@@ -101,21 +101,32 @@ func TestBoltBuffer_InvalidPrefixErrorDoesNotRetry(t *testing.T) {
 
 // TestBoltBuffer_TransientErrorStillRetries verifies genuine transient (I/O)
 // errors keep the existing retry/backoff behavior and succeed once the
-// backend recovers.
+// backend recovers. Uses an injected sleepFn to assert backoff sequence
+// without wall-clock delays.
 func TestBoltBuffer_TransientErrorStillRetries(t *testing.T) {
 	w := &fakeBoltWriter{errs: []error{errors.New("i/o error: disk full"), errors.New("i/o error: disk full")}}
 	buf := &BoltWriteBuffer{boltDB: w}
 
+	// Record sleep calls instead of actually sleeping.
+	var recordedSleeps []time.Duration
+	buf.sleepFn = func(d time.Duration) {
+		recordedSleeps = append(recordedSleeps, d)
+	}
+
 	sk := nostr.Generate()
 	evt := mkEvent(t, sk, "d1", 1_700_000_000)
 
-	start := time.Now()
 	buf.process(boltOp{event: evt, replace: false})
-	elapsed := time.Since(start)
 
-	// Two failures before success means two backoff sleeps: 1s + 2s = 3s.
-	if elapsed < 3*time.Second {
-		t.Fatalf("process() took only %v, expected backoff sleeps (>=3s) before the 3rd (successful) attempt", elapsed)
+	// Two failures before success means two backoff sleeps: 1s + 2s.
+	if len(recordedSleeps) != 2 {
+		t.Fatalf("expected 2 sleep calls (1s and 2s), got %d: %v", len(recordedSleeps), recordedSleeps)
+	}
+	if recordedSleeps[0] != 1*time.Second {
+		t.Fatalf("first backoff should be 1s, got %v", recordedSleeps[0])
+	}
+	if recordedSleeps[1] != 2*time.Second {
+		t.Fatalf("second backoff should be 2s, got %v", recordedSleeps[1])
 	}
 	if got := w.callCount(); got != 3 {
 		t.Fatalf("expected 3 SaveEvent calls (2 failures + 1 success), got %d", got)
@@ -124,7 +135,8 @@ func TestBoltBuffer_TransientErrorStillRetries(t *testing.T) {
 
 // TestBoltBuffer_ExhaustedRetriesDrops verifies a persistently failing
 // transient error still gives up after boltMaxRetries attempts (unchanged
-// behavior), rather than retrying forever.
+// behavior), rather than retrying forever. Uses an injected sleepFn to
+// assert backoff sequence (1s, 2s, 4s, 8s, 16s) without wall-clock delays.
 func TestBoltBuffer_ExhaustedRetriesDrops(t *testing.T) {
 	persistentErr := errors.New("i/o error: disk full")
 	errs := make([]error, boltMaxRetries)
@@ -134,11 +146,33 @@ func TestBoltBuffer_ExhaustedRetriesDrops(t *testing.T) {
 	w := &fakeBoltWriter{errs: errs}
 	buf := &BoltWriteBuffer{boltDB: w}
 
+	// Record sleep calls instead of actually sleeping.
+	var recordedSleeps []time.Duration
+	buf.sleepFn = func(d time.Duration) {
+		recordedSleeps = append(recordedSleeps, d)
+	}
+
 	sk := nostr.Generate()
 	evt := mkEvent(t, sk, "d1", 1_700_000_000)
 
 	buf.process(boltOp{event: evt, replace: false})
 
+	// All 5 retries should fail, with sleeps: 1s, 2s, 4s, 8s, 16s.
+	expectedSleeps := []time.Duration{
+		1 * time.Second,
+		2 * time.Second,
+		4 * time.Second,
+		8 * time.Second,
+		16 * time.Second,
+	}
+	if len(recordedSleeps) != len(expectedSleeps) {
+		t.Fatalf("expected %d sleep calls, got %d: %v", len(expectedSleeps), len(recordedSleeps), recordedSleeps)
+	}
+	for i, expected := range expectedSleeps {
+		if recordedSleeps[i] != expected {
+			t.Fatalf("sleep[%d] should be %v, got %v", i, expected, recordedSleeps[i])
+		}
+	}
 	if got := w.callCount(); got != boltMaxRetries {
 		t.Fatalf("expected %d SaveEvent calls (all retries exhausted), got %d", boltMaxRetries, got)
 	}
