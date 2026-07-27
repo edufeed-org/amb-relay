@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
@@ -1052,7 +1053,14 @@ func main() {
 		return boundedRegCount(filter)
 	}
 	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error {
-		boltBuf.Queue(event, false)
+		if !boltBuf.Queue(event, false) {
+			// Buffer is closed for shutdown: nothing was enqueued, so no OK
+			// should reach the client for it either. StoreEvent runs before
+			// khatru sends OK (khatru/adding.go), so returning an error here
+			// (rather than the previous unconditional nil) makes "the client
+			// gets no OK and can retry" actually true instead of aspirational.
+			return errors.New("error: relay is shutting down, please retry")
+		}
 		reg.store(event)
 		if profileMgr != nil {
 			profileMgr.Enqueue(event.PubKey)
@@ -1073,7 +1081,10 @@ func main() {
 		return nil
 	}
 	relay.ReplaceEvent = func(ctx context.Context, event nostr.Event) error {
-		boltBuf.Queue(event, true)
+		if !boltBuf.Queue(event, true) {
+			// See relay.StoreEvent above: no enqueue means no OK either.
+			return errors.New("error: relay is shutting down, please retry")
+		}
 		reg.store(event)
 		if profileMgr != nil {
 			profileMgr.Enqueue(event.PubKey)

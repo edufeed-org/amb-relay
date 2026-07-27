@@ -42,15 +42,33 @@ events were silently lost from Typesense on every deploy/restart.
 
 The drain still needs **time** to run: Compose/the orchestrator must send
 SIGTERM and then actually wait before SIGKILL, not just fire-and-forget.
-Set `stop_grace_period` to **at least 30s** on the `amb-relay` service in
-`docker-compose.yml` (and any homelab/ops equivalent) — that floor covers
-`shutdownDrainTimeout` (main.go, 25s bounding in-flight HTTP connections)
-alone; the buffer drain that follows (`tsBuf.Close()`/`boltBuf.Close()`,
-deferred in `main()`) can itself take up to ~31s if Typesense is unreachable
-when the pending batch's upsert retries (`upsertHTTPMaxRetries`/
-`upsertHTTPMaxBackoff`, buffer.go), so ~60s is a safer setting where the
-orchestrator allows it. The Compose/Ansible template change itself is
-tracked separately; this note documents the requirement it must satisfy.
+Set `stop_grace_period` to **at least 30s**, and **~60s where the
+orchestrator allows it**, on the `amb-relay` service in `docker-compose.yml`
+(and any homelab/ops equivalent) — that covers `shutdownDrainTimeout`
+(main.go, 25s bounding in-flight HTTP connections) plus the near-empty-queue
+common case for the buffer drains that follow (`tsBuf.Close()`/
+`boltBuf.Close()`, deferred in `main()`; LIFO order means `boltBuf` drains
+first, then `tsBuf`), which normally finish in low single digits of
+seconds.
+
+**60s is a common-case target, not a worst-case bound.** A deep queue
+backlog against a hanging Typesense/BoltDB no longer risks the *unbounded*
+nested-retry chain an earlier version of this note warned about (up to
+~12.7min/flush, per the cutover-gating review that predated the fix below)
+— each buffer's drain is now hard-capped by an explicit deadline
+(`tsDrainDeadline` = 90s in `buffer.go`, `boltDrainDeadline` = 45s in
+`bolt_buffer.go`; both run the actual writer call in a goroutine raced
+against the deadline, so even a call that never returns can't hold the
+drain open past it). Combined with `shutdownDrainTimeout` (25s) and LIFO
+close order, the theoretical worst case if **both** buffers hit their full
+deadline is ~25s + 45s + 90s ≈ 160s — well past any 60s `stop_grace_period`,
+meaning SIGKILL can still cut a worst-case drain short. That's an accepted
+trade-off, not a regression: whatever's abandoned at deadline (or cut off by
+SIGKILL) is logged with its queue depth and is safe in BoltDB (for the
+Typesense buffer) or was never OK'd to the client (for the Bolt buffer, see
+`bolt_buffer.go`'s `Queue`) — reindex (`HYDRATE_ON_START`) is the recovery
+path either way, exactly as it was before this note's original ≥30s/~60s
+guidance, which only ever covered the common case to begin with.
 
 ## Architecture
 

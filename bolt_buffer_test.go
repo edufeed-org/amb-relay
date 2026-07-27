@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"log"
+	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -223,5 +228,150 @@ func TestBoltBuffer_WorkerContinuesAfterPermanentRejection(t *testing.T) {
 
 	if elapsed > 1*time.Second {
 		t.Fatalf("second op took %v to process after a duplicate ahead of it in queue, expected <1s (no 31s stall)", elapsed)
+	}
+}
+
+// TestBoltBuffer_QueueAfterCloseDropsWithoutPanic locks in the CRITICAL fix:
+// b.ch is never closed, so Queue() called after Close() has fully returned
+// logs-and-drops (returning false) instead of sending on a closed channel
+// (which would panic).
+func TestBoltBuffer_QueueAfterCloseDropsWithoutPanic(t *testing.T) {
+	w := &fakeBoltWriter{}
+	buf := NewBoltWriteBuffer(w)
+
+	sk := nostr.Generate()
+	buf.Queue(unsignedEvent(sk, "pre-close"), false)
+	buf.Close()
+
+	before := w.callCount()
+
+	var queued bool
+	var panicked bool
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+			}
+		}()
+		queued = buf.Queue(unsignedEvent(sk, "post-close"), false)
+	}()
+
+	if panicked {
+		t.Fatal("Queue after Close panicked (send on closed channel)")
+	}
+	if queued {
+		t.Error("Queue after Close returned true, want false (dropped)")
+	}
+	if got := w.callCount(); got != before {
+		t.Errorf("post-close event reached the writer (callCount %d -> %d), want dropped", before, got)
+	}
+}
+
+// TestBoltBuffer_HammerCloseNoPanic hammers Queue from many concurrent
+// goroutines while Close() runs, asserting the send never panics. Uses
+// unsignedEvent (built once, single-threaded, before any goroutine starts,
+// reused by value across all producers) rather than mkEvent/Sign — see
+// unsignedEvent's doc comment: nostrlib's Sign/SetID path has a
+// pre-existing checkptr bug that intermittently trips `go test -race` on
+// its own, unrelated to concurrency in the code under test here.
+func TestBoltBuffer_HammerCloseNoPanic(t *testing.T) {
+	w := &fakeBoltWriter{}
+	buf := NewBoltWriteBuffer(w)
+
+	sk := nostr.Generate()
+	event := unsignedEvent(sk, "hammer")
+
+	const producers = 20
+	var wg sync.WaitGroup
+	var panicked atomic.Bool
+	stop := make(chan struct{})
+
+	for range producers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicked.Store(true)
+				}
+			}()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					buf.Queue(event, false)
+				}
+			}
+		}()
+	}
+
+	// Let producers spam Queue for a moment, then close concurrently with
+	// them still running — this is the exact race the fix targets.
+	time.Sleep(20 * time.Millisecond)
+	buf.Close()
+	close(stop)
+	wg.Wait()
+
+	if panicked.Load() {
+		t.Fatal("Queue panicked under concurrent Close (send on closed channel)")
+	}
+}
+
+// blockingBoltWriter's SaveEvent/ReplaceEvent block until unblock is
+// closed, simulating a BoltDB call that never returns — the scenario
+// boltDrainDeadline exists to bound.
+type blockingBoltWriter struct {
+	unblock chan struct{}
+}
+
+func (w *blockingBoltWriter) SaveEvent(nostr.Event) error {
+	<-w.unblock
+	return nil
+}
+
+func (w *blockingBoltWriter) ReplaceEvent(nostr.Event) ([]nostr.Event, error) {
+	<-w.unblock
+	return nil, nil
+}
+
+// TestBoltBuffer_DrainDeadlineHonored verifies drain() returns within
+// drainDeadline even when the writer's SaveEvent call never returns, and
+// logs the abandoned queue depth instead of hanging shutdown indefinitely.
+//
+// drain() is exercised directly (not through Close()/run()) so the test is
+// deterministic: BoltWriteBuffer processes one op at a time with no
+// batching, so if the run() goroutine's live loop happened to dequeue the
+// op before drain() started, the blocking call would be unbounded (a
+// pre-existing, out-of-scope property of the single already-in-flight-op
+// case — see process()'s own ~31s retry budget). Calling drain() directly
+// on a buffer whose channel already holds the op sidesteps that race
+// entirely and tests the deadline bound itself.
+func TestBoltBuffer_DrainDeadlineHonored(t *testing.T) {
+	w := &blockingBoltWriter{unblock: make(chan struct{})}
+	defer close(w.unblock) // let the abandoned goroutine finish eventually
+
+	buf := &BoltWriteBuffer{
+		boltDB:        w,
+		ch:            make(chan boltOp, 10),
+		drainDeadline: 50 * time.Millisecond,
+	}
+
+	sk := nostr.Generate()
+	buf.ch <- boltOp{event: unsignedEvent(sk, "bolt-hang")}
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	start := time.Now()
+	buf.drain()
+	elapsed := time.Since(start)
+
+	if elapsed > 1*time.Second {
+		t.Fatalf("drain() took %v, want well under 1s (drainDeadline=50ms)", elapsed)
+	}
+	if !strings.Contains(logBuf.String(), "drain deadline") {
+		t.Errorf("expected a 'drain deadline' log line, got: %q", logBuf.String())
 	}
 }

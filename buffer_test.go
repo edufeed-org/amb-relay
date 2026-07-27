@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"log"
+	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -73,6 +78,28 @@ func mkEvent(t *testing.T, sk nostr.SecretKey, d string, ts int64) nostr.Event {
 		t.Fatalf("sign: %v", err)
 	}
 	return evt
+}
+
+// unsignedEvent builds a nostr.Event with a synthetic (non-cryptographic)
+// ID and no signature, deliberately WITHOUT calling Sign()/SetID(). Those
+// call into nostrlib's serializedHash/writeJSONString path, which has a
+// pre-existing checkptr bug that intermittently trips `go test -race`
+// (confirmed independent of anything in this bundle: pre-existing tests
+// using the ordinary Sign-based mkEvent above trip the same panic on their
+// own under -race). The buffer/Queue machinery under test never validates
+// signatures or recomputes the ID, so a synthetic event is enough — and it
+// keeps -race clean for the panic-safety/deadline properties the tests
+// below actually check.
+func unsignedEvent(sk nostr.SecretKey, d string) nostr.Event {
+	var id nostr.ID
+	copy(id[:], d)
+	return nostr.Event{
+		ID:        id,
+		PubKey:    nostr.GetPublicKey(sk),
+		CreatedAt: nostr.Timestamp(1_700_000_000),
+		Kind:      nostr.Kind(30142),
+		Tags:      nostr.Tags{{"d", d}, {"name", "n-" + d}},
+	}
 }
 
 // waitFor polls fn until it returns true or the deadline passes.
@@ -425,5 +452,159 @@ func TestTSWriteBuffer_DrainDoesNotInheritRetries(t *testing.T) {
 	// because Upsert retries are not the drain's job.
 	if len(w.patches) != 2 {
 		t.Fatalf("got %d patches after drain, want 2 (drain dropped patches due to retry-state bleed)", len(w.patches))
+	}
+}
+
+// TestTSWriteBuffer_QueueAfterCloseDropsWithoutPanic locks in the CRITICAL
+// fix: b.ch is never closed, so Queue/QueueContent/QueueCommunityPatch
+// called after Close() has fully returned log-and-drop instead of sending
+// on a closed channel (which would panic).
+func TestTSWriteBuffer_QueueAfterCloseDropsWithoutPanic(t *testing.T) {
+	w := &fakeWriter{}
+	buf := newProjectorBuffer(w, 10, 10*time.Millisecond)
+
+	sk := nostr.Generate()
+	buf.Queue(unsignedEvent(sk, "pre-close"))
+	buf.Close()
+
+	e2 := unsignedEvent(sk, "post-close")
+	docID, err := tsDocIDFromEvent(e2)
+	if err != nil {
+		t.Fatalf("tsDocIDFromEvent: %v", err)
+	}
+
+	assertNoPanic := func(name string, fn func()) {
+		t.Helper()
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("%s after Close panicked: %v", name, r)
+			}
+		}()
+		fn()
+	}
+	assertNoPanic("Queue", func() { buf.Queue(e2) })
+	assertNoPanic("QueueContent", func() {
+		buf.QueueContent(e2, ContentEntry{Text: "x", FetchedAt: 1, Status: "ok"})
+	})
+	assertNoPanic("QueueCommunityPatch", func() { buf.QueueCommunityPatch(docID, []string{"C1"}) })
+
+	// Post-close calls must have been dropped, not processed.
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, b := range w.upsertBatches {
+		for _, id := range b {
+			if id == e2.ID {
+				t.Errorf("e2 was upserted after Close, want dropped")
+			}
+		}
+	}
+	if len(w.patches) != 0 {
+		t.Errorf("got %d patches after Close, want 0 (post-close QueueContent should drop)", len(w.patches))
+	}
+	if len(w.communityPatches) != 0 {
+		t.Errorf("got %d community patches after Close, want 0", len(w.communityPatches))
+	}
+}
+
+// TestTSWriteBuffer_HammerCloseNoPanic hammers Queue from many concurrent
+// goroutines while Close() runs, asserting the send never panics — the
+// CRITICAL property this bundle fixes (b.ch is never closed, so there is no
+// closed channel for a racing send to land on).
+//
+// Uses unsignedEvent (built once, single-threaded, before any goroutine
+// starts, reused by value across all producers) rather than mkEvent/Sign —
+// see unsignedEvent's doc comment for why: nostrlib's Sign/SetID path has a
+// pre-existing checkptr bug that intermittently trips `go test -race` on
+// its own, unrelated to concurrency in the code under test here.
+func TestTSWriteBuffer_HammerCloseNoPanic(t *testing.T) {
+	w := &fakeWriter{}
+	buf := newProjectorBuffer(w, 20, 5*time.Millisecond)
+
+	sk := nostr.Generate()
+	event := unsignedEvent(sk, "hammer")
+
+	const producers = 20
+	var wg sync.WaitGroup
+	var panicked atomic.Bool
+	stop := make(chan struct{})
+
+	for range producers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicked.Store(true)
+				}
+			}()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					buf.Queue(event)
+				}
+			}
+		}()
+	}
+
+	// Let producers spam Queue for a moment, then close concurrently with
+	// them still running — this is the exact race the fix targets.
+	time.Sleep(20 * time.Millisecond)
+	buf.Close()
+	close(stop)
+	wg.Wait()
+
+	if panicked.Load() {
+		t.Fatal("Queue panicked under concurrent Close (send on closed channel)")
+	}
+}
+
+// blockingWriter's Upsert blocks until unblock is closed, simulating a
+// Typesense call that never returns — the scenario tsDrainDeadline exists
+// to bound.
+type blockingWriter struct {
+	unblock chan struct{}
+}
+
+func (w *blockingWriter) Upsert(events []nostr.Event) (int, []error) {
+	<-w.unblock
+	return len(events), nil
+}
+func (w *blockingWriter) Patch(nostr.Event, ContentEntry) error { return nil }
+func (w *blockingWriter) PatchCommunity(string, []string) error { return nil }
+
+// TestTSWriteBuffer_DrainDeadlineHonored verifies Close() returns within
+// drainDeadline even when the writer's Upsert call never returns, and logs
+// the abandoned queue depth instead of hanging shutdown indefinitely.
+//
+// A single plain Queue()'d event with batchSize=10 never triggers the
+// writer from the live loop (it only appends to the in-memory batch below
+// the size threshold), so the only place Upsert can be invoked is drain's
+// final flush — making the blocking call deterministically exercise the
+// deadline path rather than racing the live loop.
+func TestTSWriteBuffer_DrainDeadlineHonored(t *testing.T) {
+	w := &blockingWriter{unblock: make(chan struct{})}
+	defer close(w.unblock) // let the abandoned goroutine finish eventually
+
+	buf := newProjectorBuffer(w, 10, 1*time.Hour)
+	buf.drainDeadline = 50 * time.Millisecond
+
+	sk := nostr.Generate()
+	buf.Queue(unsignedEvent(sk, "hang"))
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	start := time.Now()
+	buf.Close()
+	elapsed := time.Since(start)
+
+	if elapsed > 1*time.Second {
+		t.Fatalf("Close() took %v, want well under 1s (drainDeadline=50ms)", elapsed)
+	}
+	if !strings.Contains(logBuf.String(), "drain deadline") {
+		t.Errorf("expected a 'drain deadline' log line, got: %q", logBuf.String())
 	}
 }
