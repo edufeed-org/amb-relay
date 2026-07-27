@@ -998,6 +998,28 @@ func main() {
 		}
 	}
 
+	// Query fetch budget: bounds how long a single REQ waits on the search
+	// backend before khatru is allowed to terminate the subscription
+	// handshake (EOSE) with whatever was collected so far. Each Typesense
+	// call is already bounded by its own client timeout, but registry.fetch
+	// fans a kind-less filter out across every registered content type
+	// SERIALLY — with several collections on one (possibly degraded)
+	// Typesense instance, that serial worst case stacks up to minutes, which
+	// is indistinguishable from "hangs forever" to a real client. See
+	// query_budget.go.
+	//
+	// QUERY_FETCH_TIMEOUT_MS=="" (unset) or a negative/unparseable value
+	// falls back to the 20s default. "0" is a deliberate, explicit opt-out —
+	// boundedSeq/boundedCount both treat budget<=0 as "no cap" — so it must
+	// be distinguished from "unset", not silently coerced back to the
+	// default.
+	queryFetchBudget := DefaultQueryFetchBudget
+	if ms := os.Getenv("QUERY_FETCH_TIMEOUT_MS"); ms != "" {
+		if n, err := strconv.Atoi(ms); err == nil && n >= 0 {
+			queryFetchBudget = time.Duration(n) * time.Millisecond
+		}
+	}
+
 	// Dual-write eventstore wiring (query from Typesense, persist to both)
 	relay.QueryStored = func(ctx context.Context, filter nostr.Filter) iter.Seq[nostr.Event] {
 		maxLimit := 250
@@ -1012,13 +1034,20 @@ func main() {
 		// "community:<pubkey>") have no semantic term, so rerank would send the
 		// raw string to the chunk index and drop the field filter — those must
 		// take the plain field-filter path too.
+		var results iter.Seq[nostr.Event]
 		if reg.targetsChunked(filter) && searchHasFreeText(filter.Search) {
-			return calendarRerankQuery(ctx, filter, chunkSearcher, reg.fetch, maxLimit, relaySK)
+			results = calendarRerankQuery(ctx, filter, chunkSearcher, reg.fetch, maxLimit, relaySK)
+		} else {
+			results = reg.fetch(filter, maxLimit)
 		}
-		return reg.fetch(filter, maxLimit)
+		return boundedSeq(results, queryFetchBudget)
 	}
+	// COUNT has the same serial fan-out hazard as QueryStored (registry.count
+	// loops over every selected content type's own count call), so it gets
+	// the same budget wrapper. See boundedCount (query_budget.go).
+	boundedRegCount := boundedCount(reg.count, queryFetchBudget)
 	relay.Count = func(ctx context.Context, filter nostr.Filter) (uint32, error) {
-		return reg.count(filter)
+		return boundedRegCount(filter)
 	}
 	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error {
 		boltBuf.Queue(event, false)
