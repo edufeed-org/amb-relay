@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -101,8 +103,26 @@ func (b *TSWriteBuffer) run() {
 	defer b.wg.Done()
 
 	batch := make([]nostr.Event, 0, b.batchSize)
+	// pendingDocIDs tracks the Typesense doc id of every event currently
+	// sitting in `batch`, unflushed. A community-patch (Stamp) task only
+	// needs to force a flush when ITS target doc is in this set — i.e. its
+	// own upsert hasn't landed yet, so an unordered PATCH could be clobbered
+	// by the later flush (which re-derives `community` from the event's own
+	// h-tags only). When the target doc isn't pending, its upsert already
+	// landed via an earlier flush (batchSize/interval cadence), so the patch
+	// can apply immediately with no flush at all — this is what let stamp
+	// tasks collapse batching to 1-event upserts under stamper load
+	// (root-cause 2026-07-28: 67 imports : 79 PATCHes in 24s).
+	pendingDocIDs := make(map[string]struct{}, b.batchSize)
 	ticker := time.NewTicker(b.flushInterval)
 	defer ticker.Stop()
+
+	addToBatch := func(event nostr.Event) {
+		batch = append(batch, event)
+		if docID, err := tsDocIDFromEvent(event); err == nil {
+			pendingDocIDs[docID] = struct{}{}
+		}
+	}
 
 	// flushBatch upserts the in-memory batch. The retry budget lives inside
 	// writer.Upsert (productionWriter computes embeddings once and retries
@@ -118,6 +138,7 @@ func (b *TSWriteBuffer) run() {
 			log.Printf("ts-buffer: dropping %d events after Upsert exhausted retries (data safe in BoltDB, reindex to recover)", len(batch))
 		}
 		batch = batch[:0]
+		pendingDocIDs = make(map[string]struct{}, b.batchSize)
 	}
 
 	drainFlush := func() {
@@ -128,6 +149,7 @@ func (b *TSWriteBuffer) run() {
 			log.Printf("ts-buffer: shutdown flush failed for %d events (data safe in BoltDB, reindex to recover)", len(batch))
 		}
 		batch = batch[:0]
+		pendingDocIDs = make(map[string]struct{}, b.batchSize)
 	}
 
 	// drain is the shutdown path: best-effort, no retries, no sleeps.
@@ -136,20 +158,22 @@ func (b *TSWriteBuffer) run() {
 		for task := range b.ch {
 			switch {
 			case task.Stamp != nil:
-				// Community-patch task: flush pending upserts first so any
-				// in-flight upsert of this doc lands before the PATCH.
-				drainFlush()
+				// Community-patch task: flush only if this doc's own upsert
+				// is still pending (see pendingDocIDs comment above).
+				if _, pending := pendingDocIDs[task.Stamp.DocID]; pending {
+					drainFlush()
+				}
 				if err := b.writer.PatchCommunity(task.Stamp.DocID, task.Stamp.Communities); err != nil {
 					log.Printf("ts-buffer: shutdown community patch %s: %v", task.Stamp.DocID, err)
 				}
 			case task.Content != nil:
-				batch = append(batch, task.Event)
+				addToBatch(task.Event)
 				drainFlush()
 				if err := b.writer.Patch(task.Event, *task.Content); err != nil {
 					log.Printf("ts-buffer: shutdown patch %s: %v", task.Event.ID.Hex(), err)
 				}
 			default:
-				batch = append(batch, task.Event)
+				addToBatch(task.Event)
 				if len(batch) >= b.batchSize {
 					drainFlush()
 				}
@@ -177,21 +201,30 @@ func (b *TSWriteBuffer) run() {
 			}
 			switch {
 			case task.Stamp != nil:
-				// Community-patch task: flush pending upserts first so any
-				// in-flight upsert of this doc lands before the PATCH.
-				flushBatch()
+				// Community-patch task: only force a flush when this doc's
+				// own upsert is still pending in the batch (see
+				// pendingDocIDs comment above) — riding the normal
+				// batchSize/interval cadence otherwise. The interval ticker
+				// still bounds worst-case latency for whatever partial
+				// batch is left once the queue goes idle.
+				if _, pending := pendingDocIDs[task.Stamp.DocID]; pending {
+					flushBatch()
+				}
 				if err := b.writer.PatchCommunity(task.Stamp.DocID, task.Stamp.Communities); err != nil {
 					log.Printf("ts-buffer: community patch %s: %v", task.Stamp.DocID, err)
 				}
 			case task.Content != nil:
 				// Content task: ensure event is upserted before patching.
-				batch = append(batch, task.Event)
+				// Always forced — the event was just appended by THIS task,
+				// so it is always the pending doc; there is no cadence to
+				// ride without breaking the upsert-before-patch guarantee.
+				addToBatch(task.Event)
 				flushBatch()
 				if err := b.writer.Patch(task.Event, *task.Content); err != nil {
 					log.Printf("ts-buffer: patch %s: %v", task.Event.ID.Hex(), err)
 				}
 			default:
-				batch = append(batch, task.Event)
+				addToBatch(task.Event)
 				if len(batch) >= b.batchSize {
 					flushBatch()
 				}
@@ -241,10 +274,19 @@ type productionWriter struct {
 const (
 	upsertHTTPMaxRetries = 5
 	upsertHTTPMaxBackoff = 16 * time.Second
+
+	// maxEmbedBatchSize bounds each call to the embed service. The service
+	// accepts a list of texts and returns one vector per text; batching
+	// amortizes HTTP + model-forward overhead across the whole flush batch
+	// instead of paying it once per event (see prepareBatch).
+	maxEmbedBatchSize = 32
+
+	// embedTimeout bounds a single (batched) embed HTTP call.
+	embedTimeout = 30 * time.Second
 )
 
 func (p *productionWriter) Upsert(events []nostr.Event) (int, []error) {
-	docs, prepErrs := p.tsDB.PrepareBatch(events)
+	docs, prepErrs := prepareBatch(p.tsDB, events)
 	if len(docs) == 0 {
 		return 0, prepErrs
 	}
@@ -270,6 +312,82 @@ func (p *productionWriter) Upsert(events []nostr.Event) (int, []error) {
 		lastErrs = append(prepErrs, lastErrs...)
 	}
 	return indexed, lastErrs
+}
+
+// prepareBatch converts events to AMBMetadata docs and computes embeddings
+// with BOUNDED-BATCH calls to the embed service, instead of nostrlib
+// PrepareBatch's one-embed-call-per-event loop (typesense30142/replace.go).
+// That per-event loop was the root cause of the 2026-07-28 minutes-deep
+// TSWriteBuffer backlog: a flush batch of N events issued N blocking 30s-
+// timeout HTTP calls to the embed service serially, on the buffer's single
+// worker goroutine. Batching collapses that to ceil(N/maxEmbedBatchSize)
+// calls. Kept relay-side (not in nostrlib) because the seam already exists
+// here: NostrToAMB and the embedder fields are exported, and amb-relay
+// already carries its own BuildEmbedText (embedding.go) mirroring nostrlib's
+// private buildEmbedText.
+func prepareBatch(tsDB *typesense30142.TSBackend, events []nostr.Event) (docs []*typesense30142.AMBMetadata, errs []error) {
+	if len(events) == 0 {
+		return nil, nil
+	}
+	docs = make([]*typesense30142.AMBMetadata, 0, len(events))
+	for _, event := range events {
+		ambData, err := typesense30142.NostrToAMB(&event)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("event %s: convert error: %w", event.ID.Hex(), err))
+			continue
+		}
+		docs = append(docs, ambData)
+	}
+
+	if tsDB.Embedder == nil || len(tsDB.EmbedFields) == 0 || len(docs) == 0 {
+		return docs, errs
+	}
+
+	// Collect embed texts alongside the doc index they belong to — docs with
+	// an empty embed text (e.g. no configured fields populated) are skipped,
+	// exactly like the per-event path did.
+	type pendingEmbed struct {
+		docIdx int
+		text   string
+	}
+	pending := make([]pendingEmbed, 0, len(docs))
+	for i, doc := range docs {
+		text := BuildEmbedText(doc, tsDB.EmbedFields)
+		if text != "" {
+			pending = append(pending, pendingEmbed{docIdx: i, text: text})
+		}
+	}
+
+	for start := 0; start < len(pending); start += maxEmbedBatchSize {
+		end := start + maxEmbedBatchSize
+		if end > len(pending) {
+			end = len(pending)
+		}
+		chunk := pending[start:end]
+
+		texts := make([]string, len(chunk))
+		for i, p := range chunk {
+			texts[i] = p.text
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), embedTimeout)
+		embeddings, err := tsDB.Embedder.Embed(ctx, texts, typesense30142.EmbedPassage)
+		cancel()
+		if err != nil {
+			// Graceful degradation, same contract as the per-event path: the
+			// docs in this chunk upsert without a vector rather than failing
+			// the whole batch.
+			log.Printf("Warning: batch embedding failed for %d events: %v", len(chunk), err)
+			continue
+		}
+		for i, p := range chunk {
+			if i < len(embeddings) {
+				docs[p.docIdx].Embedding = embeddings[i]
+			}
+		}
+	}
+
+	return docs, errs
 }
 
 func (p *productionWriter) Patch(event nostr.Event, content ContentEntry) error {

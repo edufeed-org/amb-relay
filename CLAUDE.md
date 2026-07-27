@@ -29,6 +29,29 @@ docker compose up -d --build
 cd ../nostrlib/eventstore/typesense30142 && go test ./...
 ```
 
+### Deployment: `stop_grace_period` must give the relay ≥30s
+
+`main.go` wraps the listener in an `http.Server` and handles SIGTERM/SIGINT
+(`server.go`'s `runServer`) with `srv.Shutdown` before returning from
+`main()`, so the deferred `tsBuf.Close()`/`boltBuf.Close()` drains actually
+run and flush whatever is still sitting in the in-memory `TSWriteBuffer` /
+`BoltWriteBuffer` queues. Before this fix (root-caused 2026-07-28, see
+`.superpowers/sdd/rootcause-30142-drop.md`), a bare `http.ListenAndServe`
+meant SIGTERM killed the process outright and any queued-but-unflushed
+events were silently lost from Typesense on every deploy/restart.
+
+The drain still needs **time** to run: Compose/the orchestrator must send
+SIGTERM and then actually wait before SIGKILL, not just fire-and-forget.
+Set `stop_grace_period` to **at least 30s** on the `amb-relay` service in
+`docker-compose.yml` (and any homelab/ops equivalent) — that floor covers
+`shutdownDrainTimeout` (main.go, 25s bounding in-flight HTTP connections)
+alone; the buffer drain that follows (`tsBuf.Close()`/`boltBuf.Close()`,
+deferred in `main()`) can itself take up to ~31s if Typesense is unreachable
+when the pending batch's upsert retries (`upsertHTTPMaxRetries`/
+`upsertHTTPMaxBackoff`, buffer.go), so ~60s is a safer setting where the
+orchestrator allows it. The Compose/Ansible template change itself is
+tracked separately; this note documents the requirement it must satisfy.
+
 ## Architecture
 
 ```

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/eventstore/typesense30142"
 )
 
 // fakeWriter records Upsert, Patch, and PatchCommunity calls in arrival order.
@@ -219,12 +220,19 @@ func TestTSWriteBuffer_DrainsOnClose(t *testing.T) {
 	}
 }
 
-// TestTSWriteBuffer_CommunityPatchForcesFlushThenPatch verifies that
+// TestTSWriteBuffer_CommunityPatchForcesFlushWhenPending verifies that
 // QueueCommunityPatch flushes any pending event upserts BEFORE applying the
-// community PATCH — the same flush-before-patch ordering guarantee as
+// community PATCH, WHEN the patch's target doc is itself still sitting
+// unflushed in the batch — the same flush-before-patch ordering guarantee as
 // QueueContent. This locks in the fix for C1: AMB community stamps routed
 // through the buffer so they never race the batched flush.
-func TestTSWriteBuffer_CommunityPatchForcesFlushThenPatch(t *testing.T) {
+//
+// (Renamed from TestTSWriteBuffer_CommunityPatchForcesFlushThenPatch as part
+// of the 2026-07-28 write-path fix: a stamp task now only forces a flush
+// when its own doc is pending — see
+// TestTSWriteBuffer_CommunityPatchSkipsFlushWhenNotPending for the
+// complementary case that collapses the force-flush-per-stamp backlog.)
+func TestTSWriteBuffer_CommunityPatchForcesFlushWhenPending(t *testing.T) {
 	w := &fakeWriter{}
 	buf := newProjectorBuffer(w, 100, 1*time.Hour) // very long tick → only forced flushes
 	defer buf.Close()
@@ -237,10 +245,14 @@ func TestTSWriteBuffer_CommunityPatchForcesFlushThenPatch(t *testing.T) {
 	buf.Queue(e1)
 	buf.Queue(e2)
 	buf.Queue(e3)
-	// Community patch: must flush e1+e2+e3 first, then call PatchCommunity.
-	const testDocID = "test-doc-id-community"
+	// Community patch targets e3's OWN doc id, which is still pending
+	// (unflushed) — must flush e1+e2+e3 first, then call PatchCommunity.
+	docID, err := tsDocIDFromEvent(e3)
+	if err != nil {
+		t.Fatalf("tsDocIDFromEvent: %v", err)
+	}
 	wantCommunities := []string{"C1", "C2"}
-	buf.QueueCommunityPatch(testDocID, wantCommunities)
+	buf.QueueCommunityPatch(docID, wantCommunities)
 
 	waitFor(t, 2*time.Second, func() bool {
 		w.mu.Lock()
@@ -265,8 +277,8 @@ func TestTSWriteBuffer_CommunityPatchForcesFlushThenPatch(t *testing.T) {
 		t.Fatalf("got %d community patches, want 1", len(w.communityPatches))
 	}
 	cp := w.communityPatches[0]
-	if cp.DocID != testDocID {
-		t.Errorf("community patch docID = %q, want %q", cp.DocID, testDocID)
+	if cp.DocID != docID {
+		t.Errorf("community patch docID = %q, want %q", cp.DocID, docID)
 	}
 	if len(cp.Communities) != 2 || cp.Communities[0] != "C1" || cp.Communities[1] != "C2" {
 		t.Errorf("community patch communities = %v, want %v", cp.Communities, wantCommunities)
@@ -290,6 +302,98 @@ func TestTSWriteBuffer_CommunityPatchForcesFlushThenPatch(t *testing.T) {
 	}
 	if !sawE1 || !sawE2 || !sawE3 {
 		t.Errorf("flush incomplete before community patch: e1=%v e2=%v e3=%v", sawE1, sawE2, sawE3)
+	}
+}
+
+// TestTSWriteBuffer_CommunityPatchSkipsFlushWhenNotPending verifies the
+// 2026-07-28 write-path fix: a stamp task whose target doc is NOT sitting
+// unflushed in the current batch must NOT force a flush of unrelated
+// pending events — it should ride the normal batch cadence. Root cause: the
+// old unconditional force-flush collapsed batching to ~1 event per upsert
+// under stamper load (67 imports : 79 PATCHes in 24s on dev).
+func TestTSWriteBuffer_CommunityPatchSkipsFlushWhenNotPending(t *testing.T) {
+	w := &fakeWriter{}
+	buf := newProjectorBuffer(w, 100, 1*time.Hour) // very long tick → only forced flushes
+	defer buf.Close()
+
+	sk := nostr.Generate()
+	e1 := mkEvent(t, sk, "np-1", 1_700_003_001)
+	e2 := mkEvent(t, sk, "np-2", 1_700_003_002)
+
+	buf.Queue(e1)
+	buf.Queue(e2)
+
+	// Target a doc that is NOT in the pending batch at all (as if its own
+	// upsert already landed in an earlier flush cycle).
+	otherDocID := typesense30142.GenerateDocumentID(nostr.GetPublicKey(sk).Hex(), "not-pending")
+	buf.QueueCommunityPatch(otherDocID, []string{"C9"})
+
+	waitFor(t, 2*time.Second, func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return len(w.communityPatches) >= 1
+	})
+
+	// Give any (incorrect) flush a moment to show up before asserting absence.
+	time.Sleep(50 * time.Millisecond)
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if len(w.upsertBatches) != 0 {
+		t.Errorf("got %d upsert batches, want 0 — stamp task for a non-pending doc must not force a flush of unrelated events", len(w.upsertBatches))
+	}
+	if len(w.communityPatches) != 1 || w.communityPatches[0].DocID != otherDocID {
+		t.Fatalf("community patch not recorded correctly: %+v", w.communityPatches)
+	}
+}
+
+// TestTSWriteBuffer_StampsUnderLoadFlushFarLessThanN is the throughput
+// regression test for the 2026-07-28 fix: N content-writes each followed by
+// a stamp task for an ALREADY-flushed doc (simulating the common case where
+// the async CommunityStamper reconcile lands after the doc's own batch
+// already flushed on the normal size/interval cadence) must produce a flush
+// count far below N, not one flush per stamp.
+func TestTSWriteBuffer_StampsUnderLoadFlushFarLessThanN(t *testing.T) {
+	w := &fakeWriter{}
+	const batchSize = 10
+	const n = 10
+	buf := newProjectorBuffer(w, batchSize, 1*time.Hour) // very long tick → only size-triggered flushes
+	defer buf.Close()
+
+	sk := nostr.Generate()
+	events := make([]nostr.Event, n)
+	for i := 0; i < n; i++ {
+		events[i] = mkEvent(t, sk, "load-"+string(rune('a'+i)), int64(i)+1_700_004_000)
+		buf.Queue(events[i])
+	}
+	// The nth Queue() hits batchSize and auto-flushes: pendingDocIDs is now
+	// empty, so none of the following stamp tasks (one per event, as the
+	// CommunityStamper does on every content write) should force a flush.
+	for i := 0; i < n; i++ {
+		docID, err := tsDocIDFromEvent(events[i])
+		if err != nil {
+			t.Fatalf("tsDocIDFromEvent: %v", err)
+		}
+		buf.QueueCommunityPatch(docID, []string{"C1"})
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return len(w.communityPatches) >= n
+	})
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if len(w.communityPatches) != n {
+		t.Fatalf("got %d community patches, want %d", len(w.communityPatches), n)
+	}
+	// Exactly one flush: the automatic batchSize-triggered one. None of the
+	// n stamp tasks should have forced an additional flush.
+	if len(w.upsertBatches) != 1 {
+		t.Errorf("got %d upsert batches for %d stamps, want 1 (flush count must stay far below N=%d)", len(w.upsertBatches), n, n)
 	}
 }
 
