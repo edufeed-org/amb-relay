@@ -65,7 +65,7 @@ deadline is ~25s + 45s + 90s ≈ 160s — well past any 60s `stop_grace_period`,
 meaning SIGKILL can still cut a worst-case drain short. That's an accepted
 trade-off, not a regression: whatever's abandoned at deadline (or cut off by
 SIGKILL) is logged with its queue depth and is safe in BoltDB (for the
-Typesense buffer) or was never OK'd to the client (for the Bolt buffer, see
+Typesense buffer) or, for the Bolt buffer, was in nearly all cases never OK'd to the client (bolt drain-deadline abandonment against a wedged BoltDB is the exception and is real loss, see
 `bolt_buffer.go`'s `Queue`) — reindex (`HYDRATE_ON_START`) is the recovery
 path either way, exactly as it was before this note's original ≥30s/~60s
 guidance, which only ever covered the common case to begin with.

@@ -128,7 +128,11 @@ func (b *BoltWriteBuffer) run() {
 // select/default loop keeps consuming until the channel is genuinely
 // empty), or, in the rare case it arrives after this loop has already
 // concluded the channel is empty and returned, it sits unconsumed until
-// process exit — harmless, since the caller already got a non-OK reply
+// process exit. Almost always the caller got a non-OK reply (Queue
+// returned false); the one exception is a send that raced past the
+// closed-flag check — that single event can be lost with OK=true, a
+// microsecond window accepted as vastly better than the pre-fix loss
+// of the entire queue on every deploy
 // (or, for the stamp-fetch `store` callback in main.go, is not tied to any
 // client reply at all).
 func (b *BoltWriteBuffer) drain() {
@@ -137,7 +141,7 @@ func (b *BoltWriteBuffer) drain() {
 		select {
 		case op := <-b.ch:
 			if !runBounded(deadline, func() { b.process(op) }) {
-				log.Printf("bolt-buffer: drain deadline (%s) exceeded while processing a write, abandoning (client got no OK for these; can re-send); %d further write(s) still queued", b.drainDeadline, len(b.ch))
+				log.Printf("bolt-buffer: drain deadline (%s) exceeded while processing a write, abandoning (events queued pre-shutdown DID get OK=true — this is real loss, only reachable when BoltDB itself is wedged; pre-fix the whole queue was lost silently); %d further write(s) still queued", b.drainDeadline, len(b.ch))
 				return
 			}
 		default:
