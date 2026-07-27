@@ -3,15 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"fiatjaf.com/nostr"
@@ -1050,7 +1053,14 @@ func main() {
 		return boundedRegCount(filter)
 	}
 	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error {
-		boltBuf.Queue(event, false)
+		if !boltBuf.Queue(event, false) {
+			// Buffer is closed for shutdown: nothing was enqueued, so no OK
+			// should reach the client for it either. StoreEvent runs before
+			// khatru sends OK (khatru/adding.go), so returning an error here
+			// (rather than the previous unconditional nil) makes "the client
+			// gets no OK and can retry" actually true instead of aspirational.
+			return errors.New("error: relay is shutting down, please retry")
+		}
 		reg.store(event)
 		if profileMgr != nil {
 			profileMgr.Enqueue(event.PubKey)
@@ -1071,7 +1081,10 @@ func main() {
 		return nil
 	}
 	relay.ReplaceEvent = func(ctx context.Context, event nostr.Event) error {
-		boltBuf.Queue(event, true)
+		if !boltBuf.Queue(event, true) {
+			// See relay.StoreEvent above: no enqueue means no OK either.
+			return errors.New("error: relay is shutting down, please retry")
+		}
 		reg.store(event)
 		if profileMgr != nil {
 			profileMgr.Enqueue(event.PubKey)
@@ -1683,8 +1696,28 @@ func main() {
 		port = "3334"
 	}
 	fmt.Printf("running on :%s\n", port)
-	http.ListenAndServe(":"+port, relay)
+
+	// Graceful shutdown: SIGTERM (docker stop / every deploy) and SIGINT must
+	// return from main() rather than kill the process outright, so the
+	// deferred tsBuf.Close()/boltBuf.Close() drains above actually run and
+	// in-flight TSWriteBuffer/BoltWriteBuffer contents are flushed instead of
+	// discarded. See runServer (server.go) and CLAUDE.md's deployment note on
+	// stop_grace_period — the drain needs the orchestrator to actually wait
+	// for it.
+	srv := &http.Server{Addr: ":" + port, Handler: relay}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	if err := runServer(srv, sigCh, shutdownDrainTimeout); err != nil {
+		log.Printf("server error: %v", err)
+	}
 }
+
+// shutdownDrainTimeout bounds how long runServer waits for in-flight HTTP
+// connections to finish during graceful shutdown. It does not bound the
+// buffer drains that follow (tsBuf.Close()/boltBuf.Close() are deferred in
+// main() above and run after runServer returns) — those have their own
+// internal bounds (upsertOnce's retry budget, ~31s worst case).
+const shutdownDrainTimeout = 25 * time.Second
 
 var startTime = time.Now()
 
