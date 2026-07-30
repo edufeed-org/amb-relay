@@ -35,9 +35,15 @@ type structuredReindexTarget struct {
 }
 
 type ReindexStatus struct {
-	Running         bool   `json:"running"`
-	Total           int64  `json:"total"`
-	Indexed         int64  `json:"indexed"`
+	Running bool  `json:"running"`
+	Total   int64 `json:"total"`
+	Indexed int64 `json:"indexed"`
+	// Superseded counts events skipped because a newer version of the same
+	// addressable document was projected instead. Reported so total > indexed
+	// reads as resolved versions rather than as unexplained shrinkage — a
+	// reindex that silently drops events and one that correctly supersedes
+	// them otherwise look identical from the outside.
+	Superseded      int64  `json:"superseded"`
 	Errors          int64  `json:"errors"`
 	ContentPatched  int64  `json:"content_patched"`
 	ContentOrphaned int64  `json:"content_orphaned"`
@@ -56,6 +62,7 @@ type Reindexer struct {
 	running         atomic.Bool
 	total           atomic.Int64
 	indexed         atomic.Int64
+	superseded      atomic.Int64
 	errors          atomic.Int64
 	contentPatched  atomic.Int64
 	contentOrphaned atomic.Int64
@@ -82,6 +89,7 @@ func (r *Reindexer) Start() error {
 	// Reset counters
 	r.total.Store(0)
 	r.indexed.Store(0)
+	r.superseded.Store(0)
 	r.errors.Store(0)
 	r.contentPatched.Store(0)
 	r.contentOrphaned.Store(0)
@@ -123,14 +131,30 @@ func (r *Reindexer) run() {
 	// reproject content rows keyed by event hex id back to {pubkey}:{d-tag}.
 	liveDocIDs := make(map[string]string)
 
+	// BoltDB can hold more than one version of the same addressable event, and
+	// the Typesense document id collapses them onto one document. The import
+	// upsert is unconditional, so without this the version written LAST wins
+	// whatever its created_at — and the walk is newest-first, which makes that
+	// always the oldest. See nostrlib#4.
+	dedup := typesense30142.NewAddressDedup()
+
 	// Iterate all events from BoltDB
 	for event := range r.boltDB.QueryEvents(nostr.Filter{Kinds: []nostr.Kind{30142}}, reindexMaxEvents) {
 		r.total.Add(1)
 		eventIDHex := event.ID.Hex()
+		// Every walked version stays in the live set: it exists in BoltDB, so
+		// its content row is not an orphan even when the version itself is
+		// superseded. Content replay keys on the document id either way.
 		liveEventIDs[eventIDHex] = struct{}{}
 		if docID, err := tsDocIDFromEvent(event); err == nil {
 			liveDocIDs[eventIDHex] = docID
+			if !dedup.Keep(docID, event) {
+				r.superseded.Add(1)
+				continue
+			}
 		} else {
+			// No d-tag: nothing to dedupe on, and no document id to collide
+			// with either, so it is projected exactly as before.
 			log.Printf("reindex: skipping content projection for %s: %v", eventIDHex, err)
 		}
 		batch = append(batch, event)
@@ -226,8 +250,8 @@ func (r *Reindexer) run() {
 		r.reindexStructured(t)
 	}
 
-	log.Printf("reindex: completed. total=%d indexed=%d errors=%d content_patched=%d content_orphaned=%d",
-		r.total.Load(), r.indexed.Load(), r.errors.Load(),
+	log.Printf("reindex: completed. total=%d indexed=%d superseded=%d errors=%d content_patched=%d content_orphaned=%d",
+		r.total.Load(), r.indexed.Load(), r.superseded.Load(), r.errors.Load(),
 		r.contentPatched.Load(), r.contentOrphaned.Load())
 	r.runAfter()
 }
@@ -239,12 +263,41 @@ func (r *Reindexer) runAfter() {
 	}
 }
 
+// structuredDedupKey returns the Typesense document id an event will be
+// projected onto, and whether versions of it need resolving at all.
+//
+// Only addressable kinds need it: their document id is derived from
+// (kind, pubkey, d), so BoltDB holding two versions of one address means two
+// events landing on one document. Non-addressable kinds in these collections
+// (kind 16 shares) key on the event hex id, which is unique per event, so every
+// one of them is its own document and must be projected.
+//
+// An addressable event with no d tag is address d="" per NIP-01, so those
+// legitimately share a document id and resolve against each other.
+func structuredDedupKey(event nostr.Event) (string, bool) {
+	if !event.Kind.IsAddressable() {
+		return "", false
+	}
+	return docIDFor(event.Kind, event.PubKey.Hex(), event.Tags.GetD()), true
+}
+
 // reindexStructuredEvents reprojects each event, returning (total, indexed,
-// errs). Pure over its inputs so it is unit-testable without live Typesense or
-// BoltDB. Continues past a failing event, mirroring the AMB batch path.
-func reindexStructuredEvents(label string, events iter.Seq[nostr.Event], reproject func(nostr.Event) error) (total, indexed, errs int64) {
+// superseded, errs). Pure over its inputs so it is unit-testable without live
+// Typesense or BoltDB. Continues past a failing event, mirroring the AMB batch
+// path.
+//
+// Versions of the same addressable document are resolved before projection, for
+// the same reason the AMB pass does it: the upsert is unconditional, so without
+// this the version reprojected LAST wins whatever its created_at. See
+// nostrlib#4.
+func reindexStructuredEvents(label string, events iter.Seq[nostr.Event], reproject func(nostr.Event) error) (total, indexed, superseded, errs int64) {
+	dedup := typesense30142.NewAddressDedup()
 	for event := range events {
 		total++
+		if docID, addressable := structuredDedupKey(event); addressable && !dedup.Keep(docID, event) {
+			superseded++
+			continue
+		}
 		if err := reproject(event); err != nil {
 			log.Printf("reindex: %s reproject %s failed: %v", label, event.ID.Hex(), err)
 			errs++
@@ -263,13 +316,14 @@ func (r *Reindexer) reindexStructured(t structuredReindexTarget) {
 		r.errors.Add(1)
 		return
 	}
-	total, indexed, errs := reindexStructuredEvents(
+	total, indexed, superseded, errs := reindexStructuredEvents(
 		t.label,
 		r.boltDB.QueryEvents(nostr.Filter{Kinds: t.kinds}, reindexMaxEvents),
 		t.reproject,
 	)
 	r.total.Add(total)
 	r.indexed.Add(indexed)
+	r.superseded.Add(superseded)
 	r.errors.Add(errs)
 
 	if t.after != nil {
@@ -298,6 +352,7 @@ func (r *Reindexer) GetStatus() ReindexStatus {
 		Running:         r.running.Load(),
 		Total:           r.total.Load(),
 		Indexed:         r.indexed.Load(),
+		Superseded:      r.superseded.Load(),
 		Errors:          r.errors.Load(),
 		ContentPatched:  r.contentPatched.Load(),
 		ContentOrphaned: r.contentOrphaned.Load(),
