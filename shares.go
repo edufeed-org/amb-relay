@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strconv"
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/typesense30142"
@@ -26,10 +25,22 @@ const (
 // explicitly rather than via the envelope's h-only fold, because kind 30222 also
 // targets via `p`.
 type ShareDocument struct {
-	ID      string   `json:"id"`
-	RefE    []string `json:"refE,omitempty"`
-	RefA    []string `json:"refA,omitempty"`
-	RefKind int      `json:"refKind,omitempty"`
+	ID string `json:"id"`
+	// D is the addressable identifier of a kind-30222 targeted publication,
+	// empty for kind-16 reposts (which are not addressable). Without it the
+	// collection has no queryable `d` identity, which also breaks a-tag
+	// deletion enforcement: handleDeleteRequest looks its target up by the
+	// parsed d identifier through this same collection, so the lookup found
+	// nothing at every d length and khatru reported the deletion as OK while
+	// the share stayed live. See nostrlib#6.
+	D    string   `json:"d,omitempty"`
+	RefE []string `json:"refE,omitempty"`
+	RefA []string `json:"refA,omitempty"`
+	// RefKind is the referenced kind as a string rather than a number, so the
+	// shared query path can filter it with the same backtick-quoted exact-match
+	// syntax it uses for every other tag. `k` tag values are strings on the
+	// wire anyway.
+	RefKind string `json:"refKind,omitempty"`
 	structuredEnvelope
 }
 
@@ -80,7 +91,7 @@ func nostrToShare(event *nostr.Event) (*ShareDocument, error) {
 		id = event.ID.Hex()
 	}
 
-	doc := &ShareDocument{ID: id, structuredEnvelope: env}
+	doc := &ShareDocument{ID: id, D: event.Tags.GetD(), structuredEnvelope: env}
 	for _, tag := range event.Tags {
 		if len(tag) < 2 {
 			continue
@@ -91,9 +102,7 @@ func nostrToShare(event *nostr.Event) (*ShareDocument, error) {
 		case "a":
 			doc.RefA = append(doc.RefA, tag[1])
 		case "k":
-			if n, err := strconv.Atoi(tag[1]); err == nil {
-				doc.RefKind = n
-			}
+			doc.RefKind = tag[1]
 		}
 	}
 	return doc, nil
@@ -139,10 +148,26 @@ func sharesSchema(name string) typesense30142.CollectionSchema {
 		DefaultSortingField: "eventCreatedAt",
 		Fields: append([]typesense30142.Field{
 			{Name: "id", Type: "string"},
+			{Name: "d", Type: "string", Optional: true, Facet: true},
 			{Name: "refE", Type: "string[]", Optional: true, Facet: true},
 			{Name: "refA", Type: "string[]", Optional: true, Facet: true},
-			{Name: "refKind", Type: "int32", Optional: true, Facet: true},
+			{Name: "refKind", Type: "string", Optional: true, Facet: true},
 		}, structuredEnvelopeFields()...),
+	}
+}
+
+// sharesTagFields is the nostr-tag -> Typesense-field mapping for the
+// community_shares collection. The shared query path maps tags onto the AMB
+// collection's field names, which this collection does not use: #a resolved to
+// nostr_a and #e/#k had no mapping at all, so "which communities carry this
+// resource" returned 0 for every input while the data sat indexed and faceted.
+// #d needs no entry — the query path emits `d:=` directly, and the schema now
+// declares that field. See nostrlib#6.
+func sharesTagFields() map[string]string {
+	return map[string]string{
+		"a": "refA",
+		"e": "refE",
+		"k": "refKind",
 	}
 }
 
