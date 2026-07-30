@@ -148,14 +148,19 @@ func (r *Reindexer) run() {
 		liveEventIDs[eventIDHex] = struct{}{}
 		if docID, err := tsDocIDFromEvent(event); err == nil {
 			liveDocIDs[eventIDHex] = docID
-			if !dedup.Keep(docID, event) {
+		} else {
+			log.Printf("reindex: skipping content projection for %s: %v", eventIDHex, err)
+		}
+		// Resolved against the projection's OWN key, not the content-replay
+		// key above: tsDocIDFromEvent rejects an empty d value, but NostrToAMB
+		// still assigns such an event a real (and colliding) document id, so
+		// deduping on the content key would leave exactly this PR's bug in
+		// place for d="" resources.
+		if key, addressable := ambDedupKey(event); addressable {
+			if !dedup.Keep(key, event) {
 				r.superseded.Add(1)
 				continue
 			}
-		} else {
-			// No d-tag: nothing to dedupe on, and no document id to collide
-			// with either, so it is projected exactly as before.
-			log.Printf("reindex: skipping content projection for %s: %v", eventIDHex, err)
 		}
 		batch = append(batch, event)
 
@@ -261,6 +266,28 @@ func (r *Reindexer) runAfter() {
 	if r.afterRun != nil {
 		r.afterRun()
 	}
+}
+
+// ambDedupKey returns the Typesense document id NostrToAMB will store an AMB
+// event under, and whether it assigns one at all.
+//
+// It deliberately mirrors NostrToAMB rather than reusing tsDocIDFromEvent:
+// NostrToAMB keys off the d tag being PRESENT and takes its value verbatim, so
+// an event carrying {"d",""} gets the real, collidable id `{pubkey}:`, while
+// tsDocIDFromEvent treats an empty value as "no d-tag" because content replay
+// has no use for it. Deduping on the content key would therefore skip
+// resolution for d="" events and leave them on the unconditional
+// last-write-wins path this fix exists to close.
+//
+// Only an event with no d tag at all gets no id — Typesense assigns its own,
+// so there is nothing for it to collide with.
+func ambDedupKey(event nostr.Event) (string, bool) {
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "d" {
+			return typesense30142.GenerateDocumentID(event.PubKey.Hex(), tag[1]), true
+		}
+	}
+	return "", false
 }
 
 // structuredDedupKey returns the Typesense document id an event will be

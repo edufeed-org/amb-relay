@@ -306,3 +306,72 @@ func TestTSDocIDFromEvent_MatchesProjectedAMBDocumentID(t *testing.T) {
 		}
 	}
 }
+
+// An event carrying {"d",""} is the gap a review caught: tsDocIDFromEvent
+// rejects an empty d value, but NostrToAMB still assigns the real, collidable
+// document id `{pubkey}:`. Deduping on the content key would have skipped
+// resolution for exactly these events and left them on the unconditional
+// last-write-wins path this whole change exists to close.
+func TestAMBDedupKey_MatchesProjectedAMBDocumentID(t *testing.T) {
+	pk := nostr.MustPubKeyFromHex("776c7bfe528c041cd1114efb6d48100b2e49d4faf27e301fb3f83c64a28694f4")
+
+	for _, tc := range []struct {
+		name        string
+		tags        nostr.Tags
+		addressable bool
+	}{
+		{"normal d", nostr.Tags{{"name", "x"}, {"d", "https://example.org/r"}}, true},
+		{"empty d value", nostr.Tags{{"name", "x"}, {"d", ""}}, true},
+		{"no d tag at all", nostr.Tags{{"name", "x"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evt := nostr.Event{Kind: 30142, PubKey: pk, Tags: tc.tags}
+			evt.ID = evt.GetID()
+
+			key, addressable := ambDedupKey(evt)
+			if addressable != tc.addressable {
+				t.Fatalf("addressable = %v, want %v", addressable, tc.addressable)
+			}
+
+			amb, err := typesense30142.NostrToAMB(&evt)
+			if err != nil {
+				t.Fatalf("NostrToAMB: %v", err)
+			}
+			if !tc.addressable {
+				if amb.ID != "" {
+					t.Errorf("projection assigns id %q but dedup treats the event as unaddressable", amb.ID)
+				}
+				return
+			}
+			if key != amb.ID {
+				t.Errorf("dedup key %q != the id the projection stores the document under %q", key, amb.ID)
+			}
+		})
+	}
+}
+
+// Two versions of a d="" resource must resolve against each other rather than
+// both being projected onto the one document id they share.
+func TestAMBDedupKey_EmptyDVersionsCollide(t *testing.T) {
+	pk := nostr.MustPubKeyFromHex("776c7bfe528c041cd1114efb6d48100b2e49d4faf27e301fb3f83c64a28694f4")
+	mk := func(createdAt nostr.Timestamp) nostr.Event {
+		e := nostr.Event{Kind: 30142, PubKey: pk, CreatedAt: createdAt, Tags: nostr.Tags{{"d", ""}}}
+		e.ID = e.GetID()
+		return e
+	}
+	newer, older := mk(1785000556), mk(1778576388)
+
+	kNew, ok1 := ambDedupKey(newer)
+	kOld, ok2 := ambDedupKey(older)
+	if !ok1 || !ok2 || kNew != kOld {
+		t.Fatalf("empty-d events must share a dedup key: %q vs %q (ok %v/%v)", kNew, kOld, ok1, ok2)
+	}
+
+	d := typesense30142.NewAddressDedup()
+	if !d.Keep(kNew, newer) {
+		t.Fatal("the newer version must be kept")
+	}
+	if d.Keep(kOld, older) {
+		t.Error("the older version must be superseded, not projected onto the same document")
+	}
+}
