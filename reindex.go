@@ -1,9 +1,11 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"iter"
 	"log"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -131,6 +133,12 @@ func (r *Reindexer) run() {
 	// reproject content rows keyed by event hex id back to {pubkey}:{d-tag}.
 	liveDocIDs := make(map[string]string)
 
+	// created_at of every walked event, so the content replay below can order
+	// rows that share a document id. Content is keyed by EVENT id but patched
+	// onto a document keyed by ADDRESS, so several versions of one resource
+	// can each carry a row that lands on the same document.
+	walkedCreatedAt := make(map[string]nostr.Timestamp)
+
 	// BoltDB can hold more than one version of the same addressable event, and
 	// the Typesense document id collapses them onto one document. The import
 	// upsert is unconditional, so without this the version written LAST wins
@@ -146,6 +154,7 @@ func (r *Reindexer) run() {
 		// its content row is not an orphan even when the version itself is
 		// superseded. Content replay keys on the document id either way.
 		liveEventIDs[eventIDHex] = struct{}{}
+		walkedCreatedAt[eventIDHex] = event.CreatedAt
 		if docID, err := tsDocIDFromEvent(event); err == nil {
 			liveDocIDs[eventIDHex] = docID
 		} else {
@@ -190,10 +199,6 @@ func (r *Reindexer) run() {
 	// Classify rows while holding only a read txn (ContentStore.ForEach uses DB.View).
 	// Then perform Delete/PatchContent OUTSIDE the ForEach callback to avoid
 	// nesting a write txn (Delete) or long HTTP calls inside the read txn.
-	type liveContent struct {
-		id    string
-		entry ContentEntry
-	}
 	var orphanCandidates []string
 	var liveRows []liveContent
 
@@ -230,23 +235,12 @@ func (r *Reindexer) run() {
 	}
 
 	// Live content replay — outside the read txn.
-	for _, row := range liveRows {
-		docID, ok := liveDocIDs[row.id]
-		if !ok {
-			// Event has no d-tag (or iteration failed to record it). The
-			// content row stays in BoltDB; a future reindex once the event
-			// is re-projected can retry.
-			log.Printf("reindex: content patch skipped for %s: no typesense doc id", row.id)
-			r.errors.Add(1)
-			continue
-		}
-		if err := PatchContent(r.tsDB.Host, r.tsDB.ApiKey, r.tsDB.CollectionName, docID, row.entry); err != nil {
-			log.Printf("reindex: content patch failed for %s: %v", row.id, err)
-			r.errors.Add(1)
-			continue
-		}
-		r.contentPatched.Add(1)
-	}
+	patched, errs := replayContent(liveRows, liveDocIDs, walkedCreatedAt,
+		func(docID string, entry ContentEntry) error {
+			return PatchContent(r.tsDB.Host, r.tsDB.ApiKey, r.tsDB.CollectionName, docID, entry)
+		})
+	r.contentPatched.Add(patched)
+	r.errors.Add(errs)
 
 	// Rebuild every enabled structured (long-form/wiki) collection from BoltDB
 	// truth. Empty when LONGFORM/WIKI are disabled, so reindex is byte-for-byte
@@ -358,6 +352,73 @@ func (r *Reindexer) reindexStructured(t structuredReindexTarget) {
 		r.contentPatched.Add(patched)
 		r.errors.Add(errs)
 	}
+}
+
+// liveContent is a stored content row whose event is still in BoltDB.
+type liveContent struct {
+	id    string
+	entry ContentEntry
+}
+
+// orderContentReplay sorts content rows oldest-first by their owning event's
+// created_at, so that where several rows land on the same Typesense document
+// the newest version's content is patched LAST and therefore wins.
+//
+// Rows whose event was not walked (absent from createdAt) sort as timestamp 0,
+// i.e. first, so a known-newer row still overwrites them.
+//
+// Stable, so rows with equal timestamps keep their original relative order
+// rather than shuffling between runs.
+func orderContentReplay(rows []liveContent, createdAt map[string]nostr.Timestamp) {
+	slices.SortStableFunc(rows, func(a, b liveContent) int {
+		return cmp.Compare(createdAt[a.id], createdAt[b.id])
+	})
+}
+
+// replayContent patches every live content row onto its Typesense document,
+// oldest-first by the owning event's created_at.
+//
+// The ordering is the fix for amb-relay#11. PatchContent is an unconditional
+// PATCH and ContentStore.ForEach walks BoltDB key order — lexicographic by
+// event id hex, unrelated to time. So where an address has several stored
+// versions and more than one carries a content row, every row was patched onto
+// the one shared document in arbitrary order: the document could end up with
+// the newest version's metadata (which AddressDedup now guarantees) and an
+// older version's fulltext, non-deterministically, on every reindex.
+//
+// Sorting means the newest version's content is the last write and wins.
+// Deliberately NOT "patch only the dedup winner": a superseded version may hold
+// the only fetched content for that resource, and dropping it would trade a
+// wrong answer for a missing one.
+//
+// Separated from run() for testability — the order in which patch is called is
+// the whole behaviour, and it is not observable through run().
+func replayContent(
+	rows []liveContent,
+	docIDs map[string]string,
+	createdAt map[string]nostr.Timestamp,
+	patch func(docID string, entry ContentEntry) error,
+) (patched, errs int64) {
+	orderContentReplay(rows, createdAt)
+
+	for _, row := range rows {
+		docID, ok := docIDs[row.id]
+		if !ok {
+			// Event has no d-tag (or iteration failed to record it). The
+			// content row stays in BoltDB; a future reindex once the event
+			// is re-projected can retry.
+			log.Printf("reindex: content patch skipped for %s: no typesense doc id", row.id)
+			errs++
+			continue
+		}
+		if err := patch(docID, row.entry); err != nil {
+			log.Printf("reindex: content patch failed for %s: %v", row.id, err)
+			errs++
+			continue
+		}
+		patched++
+	}
+	return patched, errs
 }
 
 // classifyOrphans returns the content-row ids whose event no longer exists in

@@ -375,3 +375,162 @@ func TestAMBDedupKey_EmptyDVersionsCollide(t *testing.T) {
 		t.Error("the older version must be superseded, not projected onto the same document")
 	}
 }
+
+// amb-relay#11: content rows are keyed by EVENT id but patched onto a document
+// keyed by ADDRESS, and PatchContent is an unconditional PATCH. Where an
+// address has several stored versions each carrying a row, all of them land on
+// the one shared document — so without ordering, the document could end up with
+// the newest version's metadata and an OLDER version's fulltext, chosen by
+// BoltDB key order (lexicographic by event id hex, unrelated to time).
+func TestOrderContentReplay_NewestWinsTheLastWrite(t *testing.T) {
+	// ids deliberately in an order where lexicographic != chronological
+	rows := []liveContent{
+		{id: "aaa_newest"},
+		{id: "bbb_oldest"},
+		{id: "ccc_middle"},
+	}
+	createdAt := map[string]nostr.Timestamp{
+		"aaa_newest": 1785390556,
+		"bbb_oldest": 1778576388,
+		"ccc_middle": 1779543035,
+	}
+
+	orderContentReplay(rows, createdAt)
+
+	got := []string{rows[0].id, rows[1].id, rows[2].id}
+	want := []string{"bbb_oldest", "ccc_middle", "aaa_newest"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("replay order = %v, want %v (oldest first, so the newest is patched last)", got, want)
+	}
+	if rows[len(rows)-1].id != "aaa_newest" {
+		t.Error("the LAST write must be the newest version — that is the one the document keeps")
+	}
+}
+
+// A row whose event was not walked has no timestamp. It must not be able to
+// overwrite a known-newer row, so it sorts first.
+func TestOrderContentReplay_UnknownEventSortsFirst(t *testing.T) {
+	rows := []liveContent{
+		{id: "known_new"},
+		{id: "unknown"},
+	}
+	orderContentReplay(rows, map[string]nostr.Timestamp{"known_new": 1785390556})
+
+	if rows[0].id != "unknown" || rows[1].id != "known_new" {
+		t.Errorf("order = [%s %s], want [unknown known_new]", rows[0].id, rows[1].id)
+	}
+}
+
+// Equal timestamps must keep their input order rather than shuffling between
+// runs — a reindex that reorders content non-deterministically is the bug.
+func TestOrderContentReplay_StableOnTies(t *testing.T) {
+	mk := func() []liveContent {
+		return []liveContent{{id: "first"}, {id: "second"}, {id: "third"}}
+	}
+	ts := map[string]nostr.Timestamp{"first": 100, "second": 100, "third": 100}
+
+	a, b := mk(), mk()
+	orderContentReplay(a, ts)
+	orderContentReplay(b, ts)
+
+	for i := range a {
+		if a[i].id != b[i].id || a[i].id != mk()[i].id {
+			t.Fatalf("tie ordering not stable: %v", []string{a[0].id, a[1].id, a[2].id})
+		}
+	}
+}
+
+// The ordering only matters because of what it does to the PATCH sequence, and
+// that sequence is not observable through run(). This drives the replay itself
+// and asserts the order the patches land in — so removing the sort from
+// replayContent fails here, which the orderContentReplay unit tests above
+// cannot do.
+func TestReplayContent_PatchesOldestFirstOntoTheSharedDocument(t *testing.T) {
+	// Three versions of ONE address: same document id, rows keyed by event id.
+	// ForEach walks BoltDB key order, so that is the input order here.
+	const docID = "pubkey:the-d-tag"
+	rows := []liveContent{
+		{id: "aaa", entry: ContentEntry{Text: "newest text"}},
+		{id: "bbb", entry: ContentEntry{Text: "oldest text"}},
+		{id: "ccc", entry: ContentEntry{Text: "middle text"}},
+	}
+	docIDs := map[string]string{"aaa": docID, "bbb": docID, "ccc": docID}
+	createdAt := map[string]nostr.Timestamp{
+		"aaa": 1785390556,
+		"bbb": 1778576388,
+		"ccc": 1779543035,
+	}
+
+	var gotText []string
+	patched, errs := replayContent(rows, docIDs, createdAt,
+		func(gotDoc string, entry ContentEntry) error {
+			if gotDoc != docID {
+				t.Errorf("patched doc id = %q, want %q", gotDoc, docID)
+			}
+			gotText = append(gotText, entry.Text)
+			return nil
+		})
+
+	want := []string{"oldest text", "middle text", "newest text"}
+	if !slices.Equal(gotText, want) {
+		t.Fatalf("patch order = %v, want %v", gotText, want)
+	}
+	// The surviving fulltext is whatever the LAST patch wrote.
+	if gotText[len(gotText)-1] != "newest text" {
+		t.Errorf("document keeps %q, want the newest version's text", gotText[len(gotText)-1])
+	}
+	if patched != 3 || errs != 0 {
+		t.Errorf("patched=%d errs=%d, want 3/0", patched, errs)
+	}
+}
+
+// A row with no document id is skipped and counted as an error, and must not
+// abort the rows after it — a single d-tag-less event should not cost the rest
+// of the corpus its fulltext.
+func TestReplayContent_SkipsRowsWithNoDocIDAndContinues(t *testing.T) {
+	rows := []liveContent{
+		{id: "no_doc", entry: ContentEntry{Text: "orphaned"}},
+		{id: "has_doc", entry: ContentEntry{Text: "kept"}},
+	}
+	createdAt := map[string]nostr.Timestamp{"no_doc": 100, "has_doc": 200}
+
+	var gotText []string
+	patched, errs := replayContent(rows, map[string]string{"has_doc": "doc-1"}, createdAt,
+		func(_ string, entry ContentEntry) error {
+			gotText = append(gotText, entry.Text)
+			return nil
+		})
+
+	if !slices.Equal(gotText, []string{"kept"}) {
+		t.Fatalf("patched %v, want only the row that has a doc id", gotText)
+	}
+	if patched != 1 || errs != 1 {
+		t.Errorf("patched=%d errs=%d, want 1/1", patched, errs)
+	}
+}
+
+// A failing PATCH is counted and the replay carries on to the next row.
+func TestReplayContent_PatchErrorCountedAndContinues(t *testing.T) {
+	rows := []liveContent{
+		{id: "boom", entry: ContentEntry{Text: "fails"}},
+		{id: "ok", entry: ContentEntry{Text: "succeeds"}},
+	}
+	createdAt := map[string]nostr.Timestamp{"boom": 100, "ok": 200}
+
+	var seen []string
+	patched, errs := replayContent(rows, map[string]string{"boom": "d1", "ok": "d2"}, createdAt,
+		func(docID string, entry ContentEntry) error {
+			seen = append(seen, entry.Text)
+			if entry.Text == "fails" {
+				return errors.New("typesense down")
+			}
+			return nil
+		})
+
+	if !slices.Equal(seen, []string{"fails", "succeeds"}) {
+		t.Fatalf("attempted %v, want both rows attempted in order", seen)
+	}
+	if patched != 1 || errs != 1 {
+		t.Errorf("patched=%d errs=%d, want 1/1", patched, errs)
+	}
+}
