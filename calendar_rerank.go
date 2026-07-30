@@ -65,6 +65,13 @@ func calendarRerankQuery(ctx context.Context, filter nostr.Filter, searcher sema
 		return semantic.ChunkRerankQuery(ctx, filter, searcher, fetch, maxLimit, sk)
 	}
 	cf := calendar.ExtractCalendarFilter(filter)
+	// An unsatisfiable bound must not fall through to the all-zero check
+	// below, which reads "no window requested" and would drop the window
+	// entirely — returning the full reranked pool for a filter that asked to
+	// be narrowed. See nostrlib#3.
+	if cf.Unsatisfiable {
+		return func(yield func(nostr.Event) bool) {}
+	}
 	if len(cf.Geohashes) > 0 {
 		// geohash-prefix is Bolt-only; rerank can't serve it.
 		return fetch(filter, maxLimit)
