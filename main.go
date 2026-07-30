@@ -360,6 +360,7 @@ func main() {
 			RawEventStore:   &boltDB,
 			Schema:          &shSchema,
 			SearchFields:    "eventID",
+			TagFields:       sharesTagFields(),
 			StopwordsSet:    stopwordsSet,
 			StopwordsList:   stopwordsList,
 			StopwordsLocale: "de",

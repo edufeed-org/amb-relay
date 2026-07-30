@@ -1,6 +1,9 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"fiatjaf.com/nostr"
@@ -64,8 +67,8 @@ func TestNostrToShare_Repost(t *testing.T) {
 	if len(doc.RefA) != 1 || doc.RefA[0] != "30142:auth:slug" {
 		t.Errorf("RefA = %v", doc.RefA)
 	}
-	if doc.RefKind != 30142 {
-		t.Errorf("RefKind = %d, want 30142", doc.RefKind)
+	if doc.RefKind != "30142" {
+		t.Errorf("RefKind = %q, want \"30142\"", doc.RefKind)
 	}
 	if len(doc.Community) != 1 || doc.Community[0] != "comm1" {
 		t.Errorf("Community = %v, want [comm1]", doc.Community)
@@ -141,10 +144,16 @@ func TestSharesSchema(t *testing.T) {
 		t.Fatalf("schema name = %q", schema.Name)
 	}
 	want := map[string]string{
-		"id":        "string",
-		"refE":      "string[]",
-		"refA":      "string[]",
-		"refKind":   "int32",
+		"id": "string",
+		// `d` gives the collection a queryable addressable identity. Its
+		// absence also broke a-tag deletion enforcement on kind 30222, since
+		// handleDeleteRequest resolves its target through this collection.
+		"d":    "string",
+		"refE": "string[]",
+		"refA": "string[]",
+		// string, not int32: the shared query path filters every tag with
+		// backtick-quoted exact match, which an int field will not accept.
+		"refKind":   "string",
 		"community": "string[]", // from structuredEnvelopeFields — drives #h / community:
 		"eventID":   "string",   // delete-by-eventID needs this present
 	}
@@ -156,5 +165,119 @@ func TestSharesSchema(t *testing.T) {
 		if got[name] != typ {
 			t.Errorf("field %q type = %q, want %q", name, got[name], typ)
 		}
+	}
+}
+
+// nostrlib#6: the community_shares collection was filterable by #h and nothing
+// else. Every other tag resolved to a field the collection does not declare,
+// and Typesense answers found:0 for a filter on an absent field — so the query
+// was honoured-as-empty, indistinguishable from "no events match".
+//
+// These pin the two halves of the fix together: the field the schema declares
+// and the field a filter on that tag actually resolves to. If they ever drift,
+// the filters go silently back to returning 0.
+func TestSharesTagFilters_ResolveToDeclaredFields(t *testing.T) {
+	declared := make(map[string]bool)
+	for _, f := range sharesSchema("community_shares").Fields {
+		declared[f.Name] = true
+	}
+
+	for tag, field := range sharesTagFields() {
+		if !declared[field] {
+			t.Errorf("#%s maps to %q, which sharesSchema does not declare — the filter would return 0 for every input", tag, field)
+		}
+	}
+
+	// `d` is not in the map: the query path handles it directly as `d:=`, so
+	// the schema has to carry that exact field name.
+	if !declared["d"] {
+		t.Error("sharesSchema declares no `d` field, so #d and a-tag deletion enforcement both resolve to nothing")
+	}
+	// `h` was the one tag that already worked; it must keep working.
+	if !declared["community"] {
+		t.Error("sharesSchema lost the `community` field that backs #h")
+	}
+}
+
+// The plugin-shaped queries that returned 0 for every input before this.
+// Driven through the public CountEvents path against a stub Typesense so the
+// assertion is on the filter_by the relay actually sends, not on an internal
+// helper.
+func sharesFilterBy(t *testing.T, filter nostr.Filter) (string, bool) {
+	t.Helper()
+	var gotFilterBy string
+	var called bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		gotFilterBy = r.URL.Query().Get("filter_by")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"found":0}`))
+	}))
+	defer srv.Close()
+
+	ts := &typesense30142.TSBackend{
+		Host:           srv.URL,
+		ApiKey:         "k",
+		CollectionName: "community_shares",
+		SearchFields:   "eventID",
+		TagFields:      sharesTagFields(),
+	}
+	if _, err := ts.CountEvents(filter); err != nil {
+		t.Fatalf("CountEvents: %v", err)
+	}
+	return gotFilterBy, called
+}
+
+func TestSharesBackendFilterExpressions(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		filter nostr.Filter
+		want   string
+	}{
+		{
+			"which communities carry this resource",
+			nostr.Filter{Kinds: []nostr.Kind{16}, Tags: nostr.TagMap{"a": []string{"30142:pk:https://example.org/r"}}},
+			"refA:=`30142:pk:https://example.org/r`",
+		},
+		{
+			"all community shares of AMB resources",
+			nostr.Filter{Kinds: []nostr.Kind{16}, Tags: nostr.TagMap{"k": []string{"30142"}}},
+			"refKind:=`30142`",
+		},
+		{
+			"shares referencing this event",
+			nostr.Filter{Tags: nostr.TagMap{"e": []string{"abc123"}}},
+			"refE:=`abc123`",
+		},
+		{
+			"a-tag deletion enforcement shape: kinds + #d",
+			nostr.Filter{Kinds: []nostr.Kind{30222}, Tags: nostr.TagMap{"d": []string{"the-d"}}},
+			"d:=`the-d`",
+		},
+		{
+			"the one that already worked",
+			nostr.Filter{Tags: nostr.TagMap{"h": []string{"comm1"}}},
+			"community:=`comm1`",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, called := sharesFilterBy(t, tc.filter)
+			if !called {
+				t.Fatal("no request reached Typesense — the filter was reported unsatisfiable and would yield nothing")
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("filter_by = %q, want it to contain %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Fail-closed must survive: a tag the collection genuinely cannot express still
+// yields nothing rather than dropping the clause and widening the query. The
+// evidence is that no request is sent at all.
+func TestSharesBackendUnmappedTagStillFailsClosed(t *testing.T) {
+	_, called := sharesFilterBy(t, nostr.Filter{Tags: nostr.TagMap{"zzz": []string{"v"}}})
+	if called {
+		t.Error("an unmappable tag must fail closed, but a request was sent to Typesense")
 	}
 }

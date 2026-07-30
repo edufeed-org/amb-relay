@@ -1,6 +1,7 @@
 package main
 
 import (
+	"iter"
 	"testing"
 
 	"fiatjaf.com/nostr"
@@ -297,4 +298,67 @@ func TestCalendarSchemaHasEmbedding(t *testing.T) {
 		}
 	}
 	t.Fatal("calendar schema missing embedding field")
+}
+
+// nostrlib#3 integration: the library now flags a calendar bound it cannot
+// honour, but amb-relay routes calendar queries itself, so the flag only takes
+// effect if THESE call sites check it. Without this, calendarFetch would route
+// an unsatisfiable filter to a backend that does not interpret the raw param —
+// Typesense drops the clause and returns the corpus.
+func TestCalendarFetch_UnsatisfiableBoundYieldsNothing(t *testing.T) {
+	var boltCalled, tsCalled bool
+	seq := func(nostr.Filter, int) iter.Seq[nostr.Event] {
+		return func(yield func(nostr.Event) bool) {}
+	}
+	fetch := calendarFetch(
+		func(f nostr.Filter, n int) iter.Seq[nostr.Event] { boltCalled = true; return seq(f, n) },
+		func(f nostr.Filter, n int) iter.Seq[nostr.Event] { tsCalled = true; return seq(f, n) },
+	)
+
+	for _, tc := range []struct {
+		name string
+		tags nostr.TagMap
+	}{
+		{"unparseable start_after", nostr.TagMap{"start_after": []string{"not-a-number"}}},
+		{"unparseable end_before", nostr.TagMap{"end_before": []string{"tomorrow"}}},
+		{"empty value list", nostr.TagMap{"start_after": []string{}}},
+		{"garbage in a later position", nostr.TagMap{"start_after": []string{"1785000000", "junk"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			boltCalled, tsCalled = false, false
+			n := 0
+			for range fetch(nostr.Filter{Kinds: []nostr.Kind{31923}, Tags: tc.tags}, 100) {
+				n++
+			}
+			if n != 0 {
+				t.Errorf("yielded %d events for an unsatisfiable bound, want 0", n)
+			}
+			if boltCalled || tsCalled {
+				t.Errorf("routed to a backend (bolt=%v ts=%v); neither interprets the raw param, so this widens the query", boltCalled, tsCalled)
+			}
+		})
+	}
+}
+
+// A VALID bound must still route normally — the fix must not trade a fail-open
+// for a fail-closed on the queries that actually work.
+func TestCalendarFetch_ValidBoundStillRoutes(t *testing.T) {
+	var boltCalled bool
+	fetch := calendarFetch(
+		func(f nostr.Filter, n int) iter.Seq[nostr.Event] {
+			boltCalled = true
+			return func(yield func(nostr.Event) bool) {}
+		},
+		func(f nostr.Filter, n int) iter.Seq[nostr.Event] {
+			return func(yield func(nostr.Event) bool) {}
+		},
+	)
+	for range fetch(nostr.Filter{
+		Kinds: []nostr.Kind{31923},
+		Tags:  nostr.TagMap{"start_after": []string{"1785000000"}},
+	}, 100) {
+	}
+	if !boltCalled {
+		t.Error("a valid calendar bound must still route to the calendar backend")
+	}
 }

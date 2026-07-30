@@ -125,6 +125,13 @@ func storeCalendar(enabled bool, ts *typesense30142.TSBackend, event nostr.Event
 func calendarFetch(boltFetch, tsFetch fetchFunc) fetchFunc {
 	return func(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event] {
 		cf := calendar.ExtractCalendarFilter(filter)
+		// A calendar bound we cannot honour yields nothing. Neither backend
+		// interprets the raw param, so routing such a filter to either one
+		// answers a DIFFERENT question than the client asked — Typesense drops
+		// the clause and returns the corpus. See nostrlib#3.
+		if cf.Unsatisfiable {
+			return func(yield func(nostr.Event) bool) {}
+		}
 		hasCalParams := cf.HasCalendarParams() && calendar.HasCalendarKinds(filter)
 		hasSearch := filter.Search != ""
 		hasGeo := len(cf.Geohashes) > 0
