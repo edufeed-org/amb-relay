@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -203,15 +205,35 @@ func TestSharesTagFilters_ResolveToDeclaredFields(t *testing.T) {
 // Driven through the public CountEvents path against a stub Typesense so the
 // assertion is on the filter_by the relay actually sends, not on an internal
 // helper.
+//
+// filter_by is read from the POST /multi_search BODY, not the query string:
+// CountEvents used to be a GET and moved to POST (nostrlib#14) because
+// Typesense refuses a GET query string over 4000 characters, which a few dozen
+// authors clear on their own. Reading the URL after that change returns an
+// empty string for every case — which looks exactly like the fail-open this
+// test exists to catch, so it is worth being explicit about where to look.
 func sharesFilterBy(t *testing.T, filter nostr.Filter) (string, bool) {
 	t.Helper()
 	var gotFilterBy string
 	var called bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
-		gotFilterBy = r.URL.Query().Get("filter_by")
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading multi_search body: %v", err)
+		}
+		var req struct {
+			Searches []struct {
+				FilterBy string `json:"filter_by"`
+			} `json:"searches"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("multi_search body is not the expected shape: %v (raw: %s)", err, body)
+		} else if len(req.Searches) > 0 {
+			gotFilterBy = req.Searches[0].FilterBy
+		}
 		w.WriteHeader(200)
-		_, _ = w.Write([]byte(`{"found":0}`))
+		_, _ = w.Write([]byte(`{"results":[{"found":0}]}`))
 	}))
 	defer srv.Close()
 
