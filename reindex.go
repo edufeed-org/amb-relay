@@ -127,17 +127,14 @@ func (r *Reindexer) run() {
 
 	// Collect events in batches for efficient bulk upsert
 	var batch []nostr.Event
-	liveEventIDs := make(map[string]struct{}, 1024)
 
-	// Track the Typesense document id for each live event so we can
-	// reproject content rows keyed by event hex id back to {pubkey}:{d-tag}.
-	liveDocIDs := make(map[string]string)
-
-	// created_at of every walked event, so the content replay below can order
-	// rows that share a document id. Content is keyed by EVENT id but patched
-	// onto a document keyed by ADDRESS, so several versions of one resource
-	// can each carry a row that lands on the same document.
-	walkedCreatedAt := make(map[string]nostr.Timestamp)
+	// Every event the walk saw, with everything the content replay below needs
+	// to place and order its row. ONE map on purpose: liveness, timestamp and
+	// document id are recorded in a single assignment, so an event cannot be
+	// marked live without also carrying the created_at that orders it. Kept as
+	// three maps, dropping just the timestamp write left the whole suite green
+	// and silently restored amb-relay#11.
+	walked := make(map[string]walkedEvent, 1024)
 
 	// BoltDB can hold more than one version of the same addressable event, and
 	// the Typesense document id collapses them onto one document. The import
@@ -153,13 +150,11 @@ func (r *Reindexer) run() {
 		// Every walked version stays in the live set: it exists in BoltDB, so
 		// its content row is not an orphan even when the version itself is
 		// superseded. Content replay keys on the document id either way.
-		liveEventIDs[eventIDHex] = struct{}{}
-		walkedCreatedAt[eventIDHex] = event.CreatedAt
-		if docID, err := tsDocIDFromEvent(event); err == nil {
-			liveDocIDs[eventIDHex] = docID
-		} else {
+		w, err := recordWalked(event)
+		if err != nil {
 			log.Printf("reindex: skipping content projection for %s: %v", eventIDHex, err)
 		}
+		walked[eventIDHex] = w
 		// Resolved against the projection's OWN key, not the content-replay
 		// key above: tsDocIDFromEvent rejects an empty d value, but NostrToAMB
 		// still assigns such an event a real (and colliding) document id, so
@@ -203,7 +198,7 @@ func (r *Reindexer) run() {
 	var liveRows []liveContent
 
 	_ = r.content.ForEach(func(eventID string, entry ContentEntry) error {
-		if _, alive := liveEventIDs[eventID]; !alive {
+		if _, alive := walked[eventID]; !alive {
 			orphanCandidates = append(orphanCandidates, eventID)
 		} else {
 			liveRows = append(liveRows, liveContent{id: eventID, entry: entry})
@@ -235,7 +230,7 @@ func (r *Reindexer) run() {
 	}
 
 	// Live content replay — outside the read txn.
-	patched, errs := replayContent(liveRows, liveDocIDs, walkedCreatedAt,
+	patched, errs := replayContent(liveRows, walked,
 		func(docID string, entry ContentEntry) error {
 			return PatchContent(r.tsDB.Host, r.tsDB.ApiKey, r.tsDB.CollectionName, docID, entry)
 		})
@@ -360,25 +355,67 @@ type liveContent struct {
 	entry ContentEntry
 }
 
-// orderContentReplay sorts content rows oldest-first by their owning event's
-// created_at, so that where several rows land on the same Typesense document
-// the newest version's content is patched LAST and therefore wins.
+// walkedEvent is what the BoltDB walk records about one event for the content
+// replay: when it was created, and which Typesense document its content row
+// belongs on ("" when the event has no usable d-tag).
+type walkedEvent struct {
+	createdAt nostr.Timestamp
+	docID     string
+}
+
+// recordWalked builds the content-replay bookkeeping for one walked event.
 //
-// Rows whose event was not walked (absent from createdAt) sort as timestamp 0,
+// Extracted from the walk so that "record this event as live" and "record the
+// created_at that orders its content row" cannot come apart: dropping the
+// timestamp here is a test failure, whereas as a separate assignment in run()
+// it was a silent no-op that left the whole suite green.
+//
+// The error is returned rather than swallowed so the caller can log it, but the
+// walkedEvent is still valid and MUST still be stored — the event is live in
+// BoltDB either way, and a content row for it is not an orphan. Its docID is
+// empty, which replayContent reads as "cannot place this row"; tsDocIDFromEvent
+// returns a non-empty id only on success, so "" is unambiguous.
+func recordWalked(event nostr.Event) (walkedEvent, error) {
+	docID, err := tsDocIDFromEvent(event)
+	if err != nil {
+		return walkedEvent{createdAt: event.CreatedAt}, err
+	}
+	return walkedEvent{createdAt: event.CreatedAt, docID: docID}, nil
+}
+
+// orderContentReplay sorts content rows into the order they must be patched in,
+// so that where several rows land on the same Typesense document the version
+// that WINS is patched LAST.
+//
+// The winner is not simply "the newest". The metadata on that document is
+// chosen by AddressDedup.Keep, which defers to nostr.IsOlder: newest
+// created_at, and on a created_at TIE the LOWEST event id. The replay has to
+// agree with that comparator exactly, or the document ends up with one
+// version's metadata and another's fulltext — which is amb-relay#11 itself.
+// Hence ascending created_at, then DESCENDING id so the lowest id is last.
+//
+// Event ids are fixed-length lowercase hex, so comparing the strings is the
+// same ordering as bytes.Compare over the decoded ids, which is what IsOlder
+// uses.
+//
+// This is a total order over distinct ids, so sort stability is not
+// load-bearing — two rows only compare equal if they are the same event.
+//
+// Rows whose event was not walked (absent from walked) sort as timestamp 0,
 // i.e. first, so a known-newer row still overwrites them.
-//
-// Stable, so rows with equal timestamps keep their original relative order
-// rather than shuffling between runs.
-func orderContentReplay(rows []liveContent, createdAt map[string]nostr.Timestamp) {
-	slices.SortStableFunc(rows, func(a, b liveContent) int {
-		return cmp.Compare(createdAt[a.id], createdAt[b.id])
+func orderContentReplay(rows []liveContent, walked map[string]walkedEvent) {
+	slices.SortFunc(rows, func(a, b liveContent) int {
+		if c := cmp.Compare(walked[a.id].createdAt, walked[b.id].createdAt); c != 0 {
+			return c
+		}
+		return cmp.Compare(b.id, a.id)
 	})
 }
 
-// replayContent patches every live content row onto its Typesense document,
-// oldest-first by the owning event's created_at.
+// replayContent patches every live content row onto its Typesense document, in
+// the order orderContentReplay establishes.
 //
-// The ordering is the fix for amb-relay#11. PatchContent is an unconditional
+// That ordering is the fix for amb-relay#11. PatchContent is an unconditional
 // PATCH and ContentStore.ForEach walks BoltDB key order — lexicographic by
 // event id hex, unrelated to time. So where an address has several stored
 // versions and more than one carries a content row, every row was patched onto
@@ -386,24 +423,30 @@ func orderContentReplay(rows []liveContent, createdAt map[string]nostr.Timestamp
 // the newest version's metadata (which AddressDedup now guarantees) and an
 // older version's fulltext, non-deterministically, on every reindex.
 //
-// Sorting means the newest version's content is the last write and wins.
+// Sorting means the dedup winner's content is the last write and wins.
 // Deliberately NOT "patch only the dedup winner": a superseded version may hold
 // the only fetched content for that resource, and dropping it would trade a
 // wrong answer for a missing one.
+//
+// Ordering also matters for licensing, not just freshness. When a resource's
+// license is not on the allowlist the indexer stores an EMPTY-text row for it
+// (amb-indexer worker.go, "Text stripped when license not permissive"). If a
+// newer version denies the license but an older permissive version's row is
+// patched after it, the document keeps text it is not licensed to expose.
+// Winner-last makes that clearing reliable rather than order-dependent.
 //
 // Separated from run() for testability — the order in which patch is called is
 // the whole behaviour, and it is not observable through run().
 func replayContent(
 	rows []liveContent,
-	docIDs map[string]string,
-	createdAt map[string]nostr.Timestamp,
+	walked map[string]walkedEvent,
 	patch func(docID string, entry ContentEntry) error,
 ) (patched, errs int64) {
-	orderContentReplay(rows, createdAt)
+	orderContentReplay(rows, walked)
 
 	for _, row := range rows {
-		docID, ok := docIDs[row.id]
-		if !ok {
+		docID := walked[row.id].docID
+		if docID == "" {
 			// Event has no d-tag (or iteration failed to record it). The
 			// content row stays in BoltDB; a future reindex once the event
 			// is re-projected can retry.
