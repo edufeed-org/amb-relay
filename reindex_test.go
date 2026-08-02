@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"io"
 	"net/http"
@@ -373,5 +374,316 @@ func TestAMBDedupKey_EmptyDVersionsCollide(t *testing.T) {
 	}
 	if d.Keep(kOld, older) {
 		t.Error("the older version must be superseded, not projected onto the same document")
+	}
+}
+
+// walkedFrom builds the walk bookkeeping for a set of (id -> created_at) rows
+// that all live on ONE Typesense document — the shape that produces
+// amb-relay#11.
+func walkedFrom(docID string, at map[string]nostr.Timestamp) map[string]walkedEvent {
+	w := make(map[string]walkedEvent, len(at))
+	for id, ts := range at {
+		w[id] = walkedEvent{createdAt: ts, docID: docID}
+	}
+	return w
+}
+
+// amb-relay#11: content rows are keyed by EVENT id but patched onto a document
+// keyed by ADDRESS, and PatchContent is an unconditional PATCH. Where an
+// address has several stored versions each carrying a row, all of them land on
+// the one shared document — so without ordering, the document could end up with
+// the newest version's metadata and an OLDER version's fulltext, chosen by
+// BoltDB key order (lexicographic by event id hex, unrelated to time).
+func TestOrderContentReplay_NewestWinsTheLastWrite(t *testing.T) {
+	// ids deliberately in an order where lexicographic != chronological
+	rows := []liveContent{
+		{id: "aaa_newest"},
+		{id: "bbb_oldest"},
+		{id: "ccc_middle"},
+	}
+	walked := walkedFrom("doc-1", map[string]nostr.Timestamp{
+		"aaa_newest": 1785390556,
+		"bbb_oldest": 1778576388,
+		"ccc_middle": 1779543035,
+	})
+
+	orderContentReplay(rows, walked)
+
+	got := []string{rows[0].id, rows[1].id, rows[2].id}
+	want := []string{"bbb_oldest", "ccc_middle", "aaa_newest"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("replay order = %v, want %v (oldest first, so the newest is patched last)", got, want)
+	}
+	if rows[len(rows)-1].id != "aaa_newest" {
+		t.Error("the LAST write must be the newest version — that is the one the document keeps")
+	}
+}
+
+// A row whose event was not walked has no timestamp. It must not be able to
+// overwrite a known-newer row, so it sorts first. Defence only: the walk
+// records liveness and created_at in one assignment, so a live row always has
+// a timestamp.
+func TestOrderContentReplay_UnknownEventSortsFirst(t *testing.T) {
+	rows := []liveContent{
+		{id: "known_new"},
+		{id: "unknown"},
+	}
+	orderContentReplay(rows, map[string]walkedEvent{
+		"known_new": {createdAt: 1785390556, docID: "doc-1"},
+	})
+
+	if rows[0].id != "unknown" || rows[1].id != "known_new" {
+		t.Errorf("order = [%s %s], want [unknown known_new]", rows[0].id, rows[1].id)
+	}
+}
+
+// On a created_at TIE the replay must agree with AddressDedup, which defers to
+// nostr.IsOlder and keeps the LOWEST id. So the lowest id has to be patched
+// LAST. Ordering by created_at alone leaves this to BoltDB key order — which is
+// ASCENDING id, i.e. exactly backwards — and reproduces amb-relay#11
+// deterministically instead of randomly.
+func TestOrderContentReplay_CreatedAtTieKeepsTheLowestIDLast(t *testing.T) {
+	// input in bbolt's ascending-key order, which is what ContentStore.ForEach
+	// hands over
+	rows := []liveContent{
+		{id: "11aaaaaa"},
+		{id: "22bbbbbb"},
+		{id: "33cccccc"},
+	}
+	walked := walkedFrom("doc-1", map[string]nostr.Timestamp{
+		"11aaaaaa": 1785390556,
+		"22bbbbbb": 1785390556,
+		"33cccccc": 1785390556,
+	})
+
+	orderContentReplay(rows, walked)
+
+	if rows[len(rows)-1].id != "11aaaaaa" {
+		t.Errorf("last patched = %s, want 11aaaaaa — AddressDedup keeps the lowest id on a tie, so its content must be the last write", rows[len(rows)-1].id)
+	}
+	want := []string{"33cccccc", "22bbbbbb", "11aaaaaa"}
+	got := []string{rows[0].id, rows[1].id, rows[2].id}
+	if !slices.Equal(got, want) {
+		t.Errorf("order = %v, want %v (descending id on a created_at tie)", got, want)
+	}
+}
+
+// The replay order and the metadata order must not be able to drift apart, so
+// this asserts against the REAL comparator rather than a restatement of it: the
+// row patched last must be the version AddressDedup keeps. If nostr.IsOlder
+// ever changes, this fails instead of silently reintroducing #11.
+func TestOrderContentReplay_LastPatchIsTheDedupWinner(t *testing.T) {
+	pk := nostr.MustPubKeyFromHex("776c7bfe528c041cd1114efb6d48100b2e49d4faf27e301fb3f83c64a28694f4")
+	mk := func(createdAt nostr.Timestamp, content string) nostr.Event {
+		e := nostr.Event{
+			Kind: 30142, PubKey: pk, CreatedAt: createdAt,
+			Content: content, Tags: nostr.Tags{{"d", "the-resource"}},
+		}
+		e.ID = e.GetID()
+		return e
+	}
+
+	cases := []struct {
+		name string
+		a, b nostr.Event
+	}{
+		// distinct created_at — newest wins
+		{"distinct created_at", mk(1778576388, "older"), mk(1785390556, "newer")},
+		// same created_at, different ids — IsOlder falls through to the id
+		{"created_at tie", mk(1785390556, "one"), mk(1785390556, "two")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key, addressable := ambDedupKey(tc.a)
+			if !addressable {
+				t.Fatal("fixture must be addressable")
+			}
+			if tc.a.ID == tc.b.ID {
+				t.Fatal("fixture must be two distinct events")
+			}
+
+			// who does the PROJECTION keep? ask AddressDedup, do not restate it
+			dedup := typesense30142.NewAddressDedup()
+			winner := tc.a
+			dedup.Keep(key, tc.a)
+			if dedup.Keep(key, tc.b) {
+				winner = tc.b
+			}
+
+			// ContentStore.ForEach hands rows over in ascending id order
+			rows := []liveContent{
+				{id: tc.a.ID.Hex(), entry: ContentEntry{Text: tc.a.Content}},
+				{id: tc.b.ID.Hex(), entry: ContentEntry{Text: tc.b.Content}},
+			}
+			slices.SortFunc(rows, func(x, y liveContent) int { return cmp.Compare(x.id, y.id) })
+
+			walked := walkedFrom(key, map[string]nostr.Timestamp{
+				tc.a.ID.Hex(): tc.a.CreatedAt,
+				tc.b.ID.Hex(): tc.b.CreatedAt,
+			})
+
+			var lastText string
+			if _, errs := replayContent(rows, walked, func(_ string, e ContentEntry) error {
+				lastText = e.Text
+				return nil
+			}); errs != 0 {
+				t.Fatalf("errs = %d, want 0", errs)
+			}
+
+			if lastText != winner.Content {
+				t.Errorf("document keeps text %q, but AddressDedup keeps the version whose content is %q — that mismatch IS amb-relay#11",
+					lastText, winner.Content)
+			}
+		})
+	}
+}
+
+// The ordering only matters because of what it does to the PATCH sequence, and
+// that sequence is not observable through run(). This drives the replay itself
+// and asserts the order the patches land in — so removing the sort from
+// replayContent fails here, which the orderContentReplay unit tests above
+// cannot do.
+func TestReplayContent_PatchesOldestFirstOntoTheSharedDocument(t *testing.T) {
+	// Three versions of ONE address: same document id, rows keyed by event id.
+	// ForEach walks BoltDB key order, so that is the input order here.
+	const docID = "pubkey:the-d-tag"
+	rows := []liveContent{
+		{id: "aaa", entry: ContentEntry{Text: "newest text"}},
+		{id: "bbb", entry: ContentEntry{Text: "oldest text"}},
+		{id: "ccc", entry: ContentEntry{Text: "middle text"}},
+	}
+	walked := walkedFrom(docID, map[string]nostr.Timestamp{
+		"aaa": 1785390556,
+		"bbb": 1778576388,
+		"ccc": 1779543035,
+	})
+
+	var gotText []string
+	patched, errs := replayContent(rows, walked,
+		func(gotDoc string, entry ContentEntry) error {
+			if gotDoc != docID {
+				t.Errorf("patched doc id = %q, want %q", gotDoc, docID)
+			}
+			gotText = append(gotText, entry.Text)
+			return nil
+		})
+
+	want := []string{"oldest text", "middle text", "newest text"}
+	if !slices.Equal(gotText, want) {
+		t.Fatalf("patch order = %v, want %v", gotText, want)
+	}
+	// The surviving fulltext is whatever the LAST patch wrote.
+	if gotText[len(gotText)-1] != "newest text" {
+		t.Errorf("document keeps %q, want the newest version's text", gotText[len(gotText)-1])
+	}
+	if patched != 3 || errs != 0 {
+		t.Errorf("patched=%d errs=%d, want 3/0", patched, errs)
+	}
+}
+
+// A row with no document id is skipped and counted as an error, and must not
+// abort the rows after it — a single d-tag-less event should not cost the rest
+// of the corpus its fulltext.
+func TestReplayContent_SkipsRowsWithNoDocIDAndContinues(t *testing.T) {
+	rows := []liveContent{
+		{id: "no_doc", entry: ContentEntry{Text: "orphaned"}},
+		{id: "has_doc", entry: ContentEntry{Text: "kept"}},
+	}
+	walked := map[string]walkedEvent{
+		"no_doc":  {createdAt: 100, docID: ""},
+		"has_doc": {createdAt: 200, docID: "doc-1"},
+	}
+
+	var gotText []string
+	patched, errs := replayContent(rows, walked,
+		func(_ string, entry ContentEntry) error {
+			gotText = append(gotText, entry.Text)
+			return nil
+		})
+
+	if !slices.Equal(gotText, []string{"kept"}) {
+		t.Fatalf("patched %v, want only the row that has a doc id", gotText)
+	}
+	if patched != 1 || errs != 1 {
+		t.Errorf("patched=%d errs=%d, want 1/1", patched, errs)
+	}
+}
+
+// A failing PATCH is counted and the replay carries on to the next row.
+func TestReplayContent_PatchErrorCountedAndContinues(t *testing.T) {
+	rows := []liveContent{
+		{id: "boom", entry: ContentEntry{Text: "fails"}},
+		{id: "ok", entry: ContentEntry{Text: "succeeds"}},
+	}
+	walked := map[string]walkedEvent{
+		"boom": {createdAt: 100, docID: "d1"},
+		"ok":   {createdAt: 200, docID: "d2"},
+	}
+
+	var seen []string
+	patched, errs := replayContent(rows, walked,
+		func(docID string, entry ContentEntry) error {
+			seen = append(seen, entry.Text)
+			if entry.Text == "fails" {
+				return errors.New("typesense down")
+			}
+			return nil
+		})
+
+	if !slices.Equal(seen, []string{"fails", "succeeds"}) {
+		t.Fatalf("attempted %v, want both rows attempted in order", seen)
+	}
+	if patched != 1 || errs != 1 {
+		t.Errorf("patched=%d errs=%d, want 1/1", patched, errs)
+	}
+}
+
+// The walk must record the created_at that orders an event's content row at the
+// same moment it records where that row goes. Dropping the timestamp is the
+// mutation that silently restores amb-relay#11 — the fix ships, does nothing,
+// and every test still passes — so it is asserted here rather than left to a
+// live-Typesense harness.
+func TestRecordWalked_CarriesCreatedAtAndDocID(t *testing.T) {
+	pk := nostr.MustPubKeyFromHex("776c7bfe528c041cd1114efb6d48100b2e49d4faf27e301fb3f83c64a28694f4")
+	e := nostr.Event{
+		Kind: 30142, PubKey: pk, CreatedAt: 1785390556,
+		Tags: nostr.Tags{{"d", "the-resource"}},
+	}
+	e.ID = e.GetID()
+
+	w, err := recordWalked(e)
+	if err != nil {
+		t.Fatalf("recordWalked: %v", err)
+	}
+	if w.createdAt != e.CreatedAt {
+		t.Errorf("createdAt = %d, want %d — without it every row sorts as 0 and the replay order collapses to BoltDB key order", w.createdAt, e.CreatedAt)
+	}
+	wantDoc, derr := tsDocIDFromEvent(e)
+	if derr != nil {
+		t.Fatalf("fixture must have a usable d-tag: %v", derr)
+	}
+	if w.docID != wantDoc {
+		t.Errorf("docID = %q, want %q", w.docID, wantDoc)
+	}
+}
+
+// An event with no usable d-tag still has to be recorded as live — it exists in
+// BoltDB, so its content row is not an orphan and must not be deleted. Only its
+// placement is unknown.
+func TestRecordWalked_NoDTagStillCarriesCreatedAt(t *testing.T) {
+	pk := nostr.MustPubKeyFromHex("776c7bfe528c041cd1114efb6d48100b2e49d4faf27e301fb3f83c64a28694f4")
+	e := nostr.Event{Kind: 30142, PubKey: pk, CreatedAt: 1785390556, Tags: nostr.Tags{}}
+	e.ID = e.GetID()
+
+	w, err := recordWalked(e)
+	if err == nil {
+		t.Error("want an error for an event with no d-tag, so the caller can log it")
+	}
+	if w.createdAt != e.CreatedAt {
+		t.Errorf("createdAt = %d, want %d — the row still has to sort correctly", w.createdAt, e.CreatedAt)
+	}
+	if w.docID != "" {
+		t.Errorf("docID = %q, want empty — replayContent reads that as 'cannot place this row'", w.docID)
 	}
 }
