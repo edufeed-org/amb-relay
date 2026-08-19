@@ -1031,15 +1031,17 @@ func main() {
 			maxLimit = 250 * 20
 		}
 		// Chunk-rerank only owns searches that (a) can be served by the chunk
-		// index and (b) carry a free-text term to rank. Calendar-only
-		// (non-chunked) searches go straight to plain full-text; otherwise the
-		// rerank would drop them whenever the term also matched a chunk from
-		// another content type. Pure field-filter searches (e.g.
-		// "community:<pubkey>") have no semantic term, so rerank would send the
-		// raw string to the chunk index and drop the field filter — those must
-		// take the plain field-filter path too.
+		// index, (b) carry a free-text term to rank, and (c) carry NO field
+		// filter. Calendar-only (non-chunked) searches go straight to plain
+		// full-text; otherwise the rerank would drop them whenever the term
+		// also matched a chunk from another content type. Any search with a
+		// field filter — pure ("community:<pubkey>") or combined with free
+		// text ("forschung publisher.name:…") — must take the plain path:
+		// rerank sends the raw string to the chunk index and the filter is
+		// silently dropped, widening the query (issue #22). See
+		// registry.rerankOwns.
 		var results iter.Seq[nostr.Event]
-		if reg.targetsChunked(filter) && searchHasFreeText(filter.Search) {
+		if reg.rerankOwns(filter) {
 			results = calendarRerankQuery(ctx, filter, chunkSearcher, reg.fetch, maxLimit, relaySK)
 		} else {
 			results = reg.fetch(filter, maxLimit)
