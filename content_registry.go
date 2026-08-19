@@ -151,6 +151,28 @@ func searchHasFreeText(search string) bool {
 	return len(typesense30142.ParseSearchQuery(search).RawTerms) > 0
 }
 
+// searchHasFieldFilters reports whether a NIP-50 search carries any
+// field:value filter (publisher.name:…, community:…, …). A `sort:` directive
+// is not a field filter (ParseSearchQuery separates it out).
+func searchHasFieldFilters(search string) bool {
+	return len(typesense30142.ParseSearchQuery(search).FieldFilters) > 0
+}
+
+// rerankOwns reports whether the chunk-rerank path may serve this search.
+// It requires a chunked target and a free-text term to rank — and it must
+// refuse any search carrying a field filter, even one that ALSO has free
+// text: rerank sends the raw search string to the chunk index (which reads
+// the filter tokens as text), and the filter.Matches post-filter ignores the
+// Search field, so the field filter would be silently dropped and the query
+// answered WIDER than asked. Fail closed on ranking, never on filtering —
+// the plain path honours the filter and loses only passage ordering and
+// snippets (issue #22).
+func (r *registry) rerankOwns(filter nostr.Filter) bool {
+	return r.targetsChunked(filter) &&
+		searchHasFreeText(filter.Search) &&
+		!searchHasFieldFilters(filter.Search)
+}
+
 // count sums event counts across the content types a filter targets.
 func (r *registry) count(filter nostr.Filter) (uint32, error) {
 	var total uint32

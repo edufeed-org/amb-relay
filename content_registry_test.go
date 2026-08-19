@@ -268,3 +268,39 @@ func TestRegistryKind0ReadWriteSplit(t *testing.T) {
 		t.Fatal("kind-0 should not be chunked")
 	}
 }
+
+// A search combining free text with a field filter must NOT be owned by the
+// chunk-rerank path: rerank sends the raw string to the chunk index, which
+// treats the filter tokens as text, and filter.Matches never re-applies
+// NIP-50 field filters — so the filter was silently dropped and the query
+// answered WIDER than asked (verified live: "LADEN publisher.name:zzz-bogus"
+// returned free-text hits instead of zero). See issue #22.
+func TestRerankOwnsSearch(t *testing.T) {
+	reg := newRegistry(
+		contentType{kinds: []nostr.Kind{30142}, chunked: true},
+		contentType{kinds: []nostr.Kind{31922, 31923, 31924, 31925}}, // calendar, not chunked
+	)
+
+	cases := []struct {
+		name   string
+		kinds  []nostr.Kind
+		search string
+		want   bool
+	}{
+		{"plain free text", []nostr.Kind{30142}, "mathematik", true},
+		{"empty search", []nostr.Kind{30142}, "", false},
+		{"pure field filter", []nostr.Kind{30142}, "publisher.name:e-teaching.org", false},
+		{"free text plus field filter", []nostr.Kind{30142}, "forschung publisher.name:e-teaching.org", false},
+		{"free text plus community filter", []nostr.Kind{30142}, "mathematik community:abcdef", false},
+		{"free text plus sort directive", []nostr.Kind{30142}, "mathematik sort:datePublished", true},
+		{"non-chunked kinds", []nostr.Kind{31923}, "mathematik", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := nostr.Filter{Kinds: c.kinds, Search: c.search}
+			if got := reg.rerankOwns(f); got != c.want {
+				t.Errorf("rerankOwns(kinds=%v, search=%q) = %v, want %v", c.kinds, c.search, got, c.want)
+			}
+		})
+	}
+}
