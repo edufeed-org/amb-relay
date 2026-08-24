@@ -35,28 +35,24 @@ services:
     # entry — which silently breaks REQ for those events.
     volumes:
       - relay_data:/root/data
+    # Pass .env through wholesale. This used to be a hand-maintained list of
+    # individual variables, which silently dropped every var not on it — all
+    # seven content-type flags, every TS_COLLECTION_*, DB_PATH, SERVICE_URL,
+    # PROFILE_*, COMMUNITY_*, QUERY_FETCH_TIMEOUT_MS and HYDRATE_ON_START.
+    # Setting them in .env per .env.example did nothing. Every var the relay
+    # reads is documented in .env.example; anything absent falls back to the
+    # code default.
+    env_file:
+      # required:false keeps `docker compose up` working before the
+      # `cp .env.example .env` step in the README's Quick Start.
+      - path: .env
+        required: false
+    # environment: wins over env_file:, so this override survives. It is the
+    # only value compose must override: .env points TS_HOST at the host port
+    # for local `go run .` development, but in-stack the relay reaches
+    # Typesense over the compose network.
     environment:
-      - NAME=${NAME}
-      - PUBKEY=${PUBKEY}
-      - DESCRIPTION=${DESCRIPTION}
-      - ICON=${ICON}
-      - TS_APIKEY=${TS_APIKEY}
       - TS_HOST=http://typesense:8108
-      - TS_COLLECTION=${TS_COLLECTION}
-      - EMBED_ENDPOINT=${EMBED_ENDPOINT}
-      - EMBED_TOKEN=${EMBED_TOKEN}
-      - SEMANTIC_SEARCH_ENABLED=${SEMANTIC_SEARCH_ENABLED:-false}
-      - ADMIN_PUBKEYS=${ADMIN_PUBKEYS}
-      # Chunk-level re-ranking of NIP-50 searches via amb-indexer's
-      # /search_chunks. Token must match INDEXER_API_TOKEN in
-      # ../amb-indexer/.env.indexer. Falls back to plain search when the
-      # indexer is unreachable.
-      - CHUNK_RERANK_ENABLED=${CHUNK_RERANK_ENABLED:-false}
-      - INDEXER_BASE_URL=${INDEXER_BASE_URL:-http://amb-indexer:8080}
-      - INDEXER_API_TOKEN=${INDEXER_API_TOKEN}
-      # Dedicated key signing ephemeral kind-21142 search snippets. Optional;
-      # unset means a per-boot generated key (see .env.example).
-      - RELAY_SECKEY=${RELAY_SECKEY:-}
     mem_limit: 1g
     mem_reservation: 256m
 
