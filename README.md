@@ -140,6 +140,15 @@ Two traps worth knowing before you file a bug:
   `#doi` / `#author` / `#partOf` / `#published_on` filter hits the builder's
   default case and is **silently skipped** — use NIP-50
   `search:"field:value"` instead.
+  The exception are concept URIs: `#<facet>:id` works on every collection that
+  carries concepts. On 30142 it resolves to the nested `<facet>.id`; the
+  transferkiosk collection (30143/30144: `about`, `audience`, `activity`,
+  `actionField`, `actionScope`, `studyModel`, `objective`, `transferability`,
+  `ext:tk:{fachbezug,projectCyclePhase,evaluationMethod,qualityDevelopment}`)
+  and the calendar collection (`about`, `audience`, `educationalLevel`, plus
+  `#t`) map it to flat `<facet>Id` fields via `TagFields`
+  (`tkConceptIDFacets`, `calendarConceptIDFacets`). Documents indexed before
+  these fields existed need a `reindex` of that collection.
 - **Query community membership with `search:"community:X"`, never `#h:X`.** When a
   community member shares content, the relay denormalizes the community onto the
   content's own document; it cannot add an `h` tag to the event, since that would
