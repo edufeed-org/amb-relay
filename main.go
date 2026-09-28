@@ -457,6 +457,17 @@ func main() {
 	boltBuf := NewBoltWriteBuffer(&boltDB)
 	defer boltBuf.Close()
 
+	// NIP-11: the NIP-50 search grammar this relay understands — `sort:`
+	// plus every top-level field any enabled collection can filter on, in
+	// both spellings clients read (see search_extensions.go).
+	var searchSchemas []typesense30142.CollectionSchema
+	for _, b := range []*typesense30142.TSBackend{&tsDB, tsDB2, tsDB3, tsDB4, profilesDB, tsDB5, tsDB6, tsDB7} {
+		if b != nil {
+			searchSchemas = append(searchSchemas, b.GetCollectionSchema())
+		}
+	}
+	advertiseSearchExtensions(relay.Info, nip50SearchExtensions(searchSchemas...))
+
 	// Content-type registry: one registration per kind the relay serves. AMB
 	// is always present; long-form is appended only when enabled, so every
 	// event-path dispatch below is kind-agnostic and flag-free. Adding a
