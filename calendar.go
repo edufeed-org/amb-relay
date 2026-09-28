@@ -18,18 +18,50 @@ import (
 // Unix seconds (date-based "YYYY-MM-DD" starts are parsed to start-of-day UTC);
 // geohash/status/location are present only on the kinds that carry them.
 type CalendarDocument struct {
-	ID        string    `json:"id"`
-	D         string    `json:"d"`
-	Title     string    `json:"title,omitempty"`
-	Summary   string    `json:"summary,omitempty"`
-	Content   string    `json:"content,omitempty"`
-	Location  string    `json:"location,omitempty"`
-	Start     int64     `json:"start,omitempty"`
-	End       int64     `json:"end,omitempty"`
-	Geohash   string    `json:"geohash,omitempty"`
-	Status    string    `json:"status,omitempty"` // RSVP (31925): accepted/declined/tentative
+	ID       string   `json:"id"`
+	D        string   `json:"d"`
+	Title    string   `json:"title,omitempty"`
+	Summary  string   `json:"summary,omitempty"`
+	Content  string   `json:"content,omitempty"`
+	Location string   `json:"location,omitempty"`
+	Start    int64    `json:"start,omitempty"`
+	End      int64    `json:"end,omitempty"`
+	Geohash  string   `json:"geohash,omitempty"`
+	Status   string   `json:"status,omitempty"`   // RSVP (31925): accepted/declined/tentative
+	Keywords []string `json:"keywords,omitempty"` // `t` tags; the shared query path maps #t here
+
+	// Concept URIs (`<facet>:id` values), filterable with #about:id etc.
+	// See calendarConceptIDFacets.
+	AboutID            []string `json:"aboutId,omitempty"`
+	AudienceID         []string `json:"audienceId,omitempty"`
+	EducationalLevelID []string `json:"educationalLevelId,omitempty"`
+
 	Embedding []float32 `json:"embedding,omitempty"`
 	structuredEnvelope
+}
+
+// calendarConceptIDFacets lists the AMB concept facets a calendar event may
+// carry (Zielgruppe, Fach, Bildungsstufe in the edufeed calendar guide), with
+// their Typesense field and document slot. Like tkConceptIDFacets it drives
+// projection, schema and the #<facet>:id tag mapping together.
+var calendarConceptIDFacets = []struct {
+	facet, field string
+	slot         func(*CalendarDocument) *[]string
+}{
+	{"about", "aboutId", func(d *CalendarDocument) *[]string { return &d.AboutID }},
+	{"audience", "audienceId", func(d *CalendarDocument) *[]string { return &d.AudienceID }},
+	{"educationalLevel", "educationalLevelId", func(d *CalendarDocument) *[]string { return &d.EducationalLevelID }},
+}
+
+// calendarTagFields is the nostr-tag -> Typesense-field mapping for the
+// calendar collection. #t needs no entry: the shared query path maps it to
+// `keywords`, which the schema now declares.
+func calendarTagFields() map[string]string {
+	m := make(map[string]string, len(calendarConceptIDFacets))
+	for _, f := range calendarConceptIDFacets {
+		m[f.facet+":id"] = f.field
+	}
+	return m
 }
 
 // nostrToCalendar projects a NIP-52 event into a CalendarDocument. For the
@@ -84,6 +116,18 @@ func nostrToCalendar(event *nostr.Event) (*CalendarDocument, error) {
 			doc.Summary = tag[1]
 		case "status":
 			doc.Status = tag[1]
+		case "t":
+			doc.Keywords = append(doc.Keywords, tag[1])
+		default:
+			if facet, ok := strings.CutSuffix(tag[0], ":id"); ok {
+				for _, f := range calendarConceptIDFacets {
+					if f.facet == facet {
+						slot := f.slot(doc)
+						*slot = append(*slot, tag[1])
+						break
+					}
+				}
+			}
 		}
 	}
 	return doc, nil
@@ -147,10 +191,14 @@ func calendarFetch(boltFetch, tsFetch fetchFunc) fetchFunc {
 // reconstructs events identically; start/end are int64 facets for range
 // filtering, geohash/status string facets.
 func calendarSchema(name string) typesense30142.CollectionSchema {
+	idFields := make([]typesense30142.Field, 0, len(calendarConceptIDFacets))
+	for _, f := range calendarConceptIDFacets {
+		idFields = append(idFields, typesense30142.Field{Name: f.field, Type: "string[]", Optional: true, Facet: true})
+	}
 	return typesense30142.CollectionSchema{
 		Name:                name,
 		DefaultSortingField: "eventCreatedAt",
-		Fields: append([]typesense30142.Field{
+		Fields: append(append([]typesense30142.Field{
 			{Name: "id", Type: "string"},
 			{Name: "d", Type: "string"},
 			{Name: "title", Type: "string", Optional: true},
@@ -161,7 +209,8 @@ func calendarSchema(name string) typesense30142.CollectionSchema {
 			{Name: "end", Type: "int64", Optional: true, Facet: true},
 			{Name: "geohash", Type: "string", Optional: true, Facet: true},
 			{Name: "status", Type: "string", Optional: true, Facet: true},
+			{Name: "keywords", Type: "string[]", Optional: true, Facet: true},
 			{Name: "embedding", Type: "float[]", NumDim: 768, VecDistMetric: "cosine", Optional: true},
-		}, structuredEnvelopeFields()...),
+		}, idFields...), structuredEnvelopeFields()...),
 	}
 }

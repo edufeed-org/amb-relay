@@ -42,6 +42,21 @@ type TransferkioskDocument struct {
 	Objective       []string `json:"objective,omitempty"`
 	Transferability []string `json:"transferability,omitempty"`
 
+	// Concept URIs (`<facet>:id` values) of the same facets, filterable with
+	// a NIP-01 tag filter such as #audience:id. See tkConceptIDFacets.
+	AboutID                   []string `json:"aboutId,omitempty"`
+	AudienceID                []string `json:"audienceId,omitempty"`
+	ActivityID                []string `json:"activityId,omitempty"`
+	ActionFieldID             []string `json:"actionFieldId,omitempty"`
+	ActionScopeID             []string `json:"actionScopeId,omitempty"`
+	StudyModelID              []string `json:"studyModelId,omitempty"`
+	ObjectiveID               []string `json:"objectiveId,omitempty"`
+	TransferabilityID         []string `json:"transferabilityId,omitempty"`
+	ExtTkFachbezugID          []string `json:"extTkFachbezugId,omitempty"`
+	ExtTkProjectCyclePhaseID  []string `json:"extTkProjectCyclePhaseId,omitempty"`
+	ExtTkEvaluationMethodID   []string `json:"extTkEvaluationMethodId,omitempty"`
+	ExtTkQualityDevelopmentID []string `json:"extTkQualityDevelopmentId,omitempty"`
+
 	// Scalar facets.
 	Status         string `json:"status,omitempty"`
 	FunderName     string `json:"funderName,omitempty"`
@@ -53,6 +68,40 @@ type TransferkioskDocument struct {
 
 	Embedding []float32 `json:"embedding,omitempty"`
 	structuredEnvelope
+}
+
+// tkConceptIDFacets lists the concept facets whose URIs are indexed: the tag
+// base before ":id", the Typesense field, and the document slot. It drives the
+// projection, the schema and the #<facet>:id tag mapping, so the three cannot
+// drift apart. The shared query path would otherwise map #audience:id to the
+// dotted `audience.id`, which only the nested AMB collection has — here that
+// returned found:0 for every input.
+var tkConceptIDFacets = []struct {
+	facet, field string
+	slot         func(*TransferkioskDocument) *[]string
+}{
+	{"about", "aboutId", func(d *TransferkioskDocument) *[]string { return &d.AboutID }},
+	{"audience", "audienceId", func(d *TransferkioskDocument) *[]string { return &d.AudienceID }},
+	{"activity", "activityId", func(d *TransferkioskDocument) *[]string { return &d.ActivityID }},
+	{"actionField", "actionFieldId", func(d *TransferkioskDocument) *[]string { return &d.ActionFieldID }},
+	{"actionScope", "actionScopeId", func(d *TransferkioskDocument) *[]string { return &d.ActionScopeID }},
+	{"studyModel", "studyModelId", func(d *TransferkioskDocument) *[]string { return &d.StudyModelID }},
+	{"objective", "objectiveId", func(d *TransferkioskDocument) *[]string { return &d.ObjectiveID }},
+	{"transferability", "transferabilityId", func(d *TransferkioskDocument) *[]string { return &d.TransferabilityID }},
+	{"ext:tk:fachbezug", "extTkFachbezugId", func(d *TransferkioskDocument) *[]string { return &d.ExtTkFachbezugID }},
+	{"ext:tk:projectCyclePhase", "extTkProjectCyclePhaseId", func(d *TransferkioskDocument) *[]string { return &d.ExtTkProjectCyclePhaseID }},
+	{"ext:tk:evaluationMethod", "extTkEvaluationMethodId", func(d *TransferkioskDocument) *[]string { return &d.ExtTkEvaluationMethodID }},
+	{"ext:tk:qualityDevelopment", "extTkQualityDevelopmentId", func(d *TransferkioskDocument) *[]string { return &d.ExtTkQualityDevelopmentID }},
+}
+
+// transferkioskTagFields is the nostr-tag -> Typesense-field mapping for the
+// transferkiosk collection: #<facet>:id resolves to the flat URI field.
+func transferkioskTagFields() map[string]string {
+	m := make(map[string]string, len(tkConceptIDFacets))
+	for _, f := range tkConceptIDFacets {
+		m[f.facet+":id"] = f.field
+	}
+	return m
 }
 
 // tkNarrativeTags are free-text narrative fields folded into SearchText.
@@ -111,6 +160,18 @@ func nostrToTransferkiosk(event *nostr.Event) (*TransferkioskDocument, error) {
 				doc.Objective = append(doc.Objective, val)
 			case "transferability":
 				doc.Transferability = append(doc.Transferability, val)
+			}
+			continue
+		}
+
+		// Concept URI: "<facet>:id".
+		if facet, ok := strings.CutSuffix(key, ":id"); ok {
+			for _, f := range tkConceptIDFacets {
+				if f.facet == facet {
+					slot := f.slot(doc)
+					*slot = append(*slot, val)
+					break
+				}
 			}
 			continue
 		}
@@ -191,10 +252,14 @@ func transferkioskSchema(name string) typesense30142.CollectionSchema {
 	strArr := func(n string) typesense30142.Field {
 		return typesense30142.Field{Name: n, Type: "string[]", Facet: true, Optional: true}
 	}
+	idFields := make([]typesense30142.Field, 0, len(tkConceptIDFacets))
+	for _, f := range tkConceptIDFacets {
+		idFields = append(idFields, strArr(f.field))
+	}
 	return typesense30142.CollectionSchema{
 		Name:                name,
 		DefaultSortingField: "eventCreatedAt",
-		Fields: append([]typesense30142.Field{
+		Fields: append(append([]typesense30142.Field{
 			{Name: "id", Type: "string"},
 			{Name: "d", Type: "string"},
 			{Name: "type", Type: "string", Facet: true},
@@ -219,6 +284,6 @@ func transferkioskSchema(name string) typesense30142.CollectionSchema {
 			str("startDate", true),
 			str("endDate", true),
 			{Name: "embedding", Type: "float[]", NumDim: 768, VecDistMetric: "cosine", Optional: true},
-		}, structuredEnvelopeFields()...),
+		}, idFields...), structuredEnvelopeFields()...),
 	}
 }

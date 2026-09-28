@@ -214,6 +214,18 @@ func TestSharesTagFilters_ResolveToDeclaredFields(t *testing.T) {
 // test exists to catch, so it is worth being explicit about where to look.
 func sharesFilterBy(t *testing.T, filter nostr.Filter) (string, bool) {
 	t.Helper()
+	return stubFilterBy(t, &typesense30142.TSBackend{
+		CollectionName: "community_shares",
+		SearchFields:   "eventID",
+		TagFields:      sharesTagFields(),
+	}, filter)
+}
+
+// stubFilterBy runs filter through ts.CountEvents against a stub Typesense and
+// returns the filter_by it sent, and whether any request was sent at all. Host
+// and ApiKey are overwritten; the caller sets collection, search and tag fields.
+func stubFilterBy(t *testing.T, ts *typesense30142.TSBackend, filter nostr.Filter) (string, bool) {
+	t.Helper()
 	var gotFilterBy string
 	var called bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -237,13 +249,8 @@ func sharesFilterBy(t *testing.T, filter nostr.Filter) (string, bool) {
 	}))
 	defer srv.Close()
 
-	ts := &typesense30142.TSBackend{
-		Host:           srv.URL,
-		ApiKey:         "k",
-		CollectionName: "community_shares",
-		SearchFields:   "eventID",
-		TagFields:      sharesTagFields(),
-	}
+	ts.Host = srv.URL
+	ts.ApiKey = "k"
 	if _, err := ts.CountEvents(filter); err != nil {
 		t.Fatalf("CountEvents: %v", err)
 	}
