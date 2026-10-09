@@ -1,6 +1,6 @@
 # Mapping expansion for concept filters — Design
 
-Status: design approved in brainstorming 2026-10-10, pending written-spec review.
+Status: approved 2026-10-10 (written spec reviewed); amendments from planning at the end.
 
 ## Goal
 
@@ -221,3 +221,33 @@ Runtime changes via NIP-86 are out of scope for this revision.
   are dropped at index time — Konfi facets are unfilterable today; separate fix.
 - Runtime configuration via NIP-86; web-of-trust based trust.
 - 1:n mappings in expansion.
+
+## Implementation amendments (2026-10-10, from planning)
+
+Findings in the code while writing the plan; they refine, not change, the
+decisions above.
+
+1. **No reindex rerouting needed.** `concepts` is computed inside nostrlib
+   `NostrToAMB`, which both write paths call (amb-relay `prepareBatch` and
+   nostrlib `PrepareBatch` behind `BatchUpsertEvents`). The "route reindex
+   through `prepareBatch`" item in §Testing is dropped.
+2. **Rewrite target: aliased tag keys.** Both a single `#concepts` tag and
+   `concepts:` search tokens would OR all concept filters together (one field,
+   one clause). The expander writes `concepts_0 … concepts_7`, each aliased to
+   `concepts` via the AMB backend's `TagFields`; separate keys are separate
+   `&&` clauses. No nostrlib query-builder change.
+3. **Rerank guard.** Chunk-rerank post-filters with `filter.Matches`, which
+   rejects events lacking `concepts_<n>` tags, so `rerankOwns` refuses
+   filters carrying them.
+4. **Scope.** Expansion applies only when every requested kind is 30142.
+   Live subscriptions (events after EOSE) match the original, unexpanded
+   filter.
+5. **On-demand sources.** A failed per-query load is not retried for 1 minute;
+   at most 32 on-demand sources are cached (least recently used evicted).
+   An empty relay answer counts as a failed load (keeps the last good data).
+6. **NIP-11.** Advertising `expand:` waits for the open
+   `pr/nip11-search-extensions` (amb-relay) / `fix/nip50-ignore-unknown`
+   (nostrlib) work; until then it is documented in the README only.
+7. **Identifiers verbatim.** Published vocab ids and resource tags agree today
+   (KIM levels and HCRT `https://`, KIM Schulfächer `http://`), so no URI
+   normalisation is added.
