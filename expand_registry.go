@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -20,6 +21,11 @@ const (
 	mappingRetryAfter      = time.Minute
 	maxOnDemandSources     = 32
 	mappingPageSize        = 300
+
+	// maxOnDemandLoadsPerQuery bounds how many not-yet-loaded sources a
+	// single Graph call will attempt; the rest load on a later query. Keeps
+	// the hot path bounded even when a Trust lists many unknown sources.
+	maxOnDemandLoadsPerQuery = 4
 )
 
 // Trust is the set of mapping sources a query expands with: concordances
@@ -66,6 +72,11 @@ type MappingRegistry struct {
 	relays   []string
 	defaults Trust
 
+	// onDemandTimeout bounds a whole Graph on-demand load loop (not each
+	// source within it). A registry field, not the bare const, so tests can
+	// shrink it instead of waiting out mappingOnDemandTimeout for real.
+	onDemandTimeout time.Duration
+
 	mu       sync.Mutex
 	entries  map[string]*sourceEntry
 	failedAt map[string]time.Time
@@ -77,10 +88,11 @@ type MappingRegistry struct {
 func NewMappingRegistry(src mappingSource, relays []string, defaults Trust) *MappingRegistry {
 	return &MappingRegistry{
 		src: src, relays: relays, defaults: defaults,
-		entries:  map[string]*sourceEntry{},
-		failedAt: map[string]time.Time{},
-		graphs:   map[string]*vocabmap.Graph{},
-		stopCh:   make(chan struct{}),
+		onDemandTimeout: mappingOnDemandTimeout,
+		entries:         map[string]*sourceEntry{},
+		failedAt:        map[string]time.Time{},
+		graphs:          map[string]*vocabmap.Graph{},
+		stopCh:          make(chan struct{}),
 	}
 }
 
@@ -97,21 +109,34 @@ func (r *MappingRegistry) isDefault(key string) bool {
 
 // Graph returns the expansion graph for trust. ok is false when none of its
 // sources is loaded; the caller then runs the query unexpanded.
+//
+// On-demand loads for sources not yet cached share a single
+// onDemandTimeout for the whole call (not one timeout per source — a
+// Trust naming several unknown sources must not cost N * onDemandTimeout
+// sequentially on the query path) and are capped at
+// maxOnDemandLoadsPerQuery; any remainder is simply not attempted this
+// call and loads on a later query instead.
 func (r *MappingRegistry) Graph(ctx context.Context, trust Trust) (*vocabmap.Graph, bool) {
 	keys := trust.sourceKeys()
 	if len(keys) == 0 {
 		return nil, false
 	}
-	for _, k := range r.toLoad(keys) {
-		lctx, cancel := context.WithTimeout(ctx, mappingOnDemandTimeout)
-		e, err := r.load(lctx, k)
-		cancel()
-		if err != nil {
-			log.Printf("expand: load %s: %v", k, err)
-			r.markFailed(k)
-			continue
+	toLoad := r.toLoad(keys)
+	if len(toLoad) > maxOnDemandLoadsPerQuery {
+		toLoad = toLoad[:maxOnDemandLoadsPerQuery]
+	}
+	if len(toLoad) > 0 {
+		lctx, cancel := context.WithTimeout(ctx, r.onDemandTimeout)
+		for _, k := range toLoad {
+			e, err := r.load(lctx, k)
+			if err != nil {
+				log.Printf("expand: load %s: %v", k, err)
+				r.markFailed(k)
+				continue
+			}
+			r.store(k, e)
 		}
-		r.store(k, e)
+		cancel()
 	}
 	return r.graphFor(strings.Join(keys, ","), keys)
 }
@@ -377,6 +402,12 @@ func (r *MappingRegistry) StartRefreshLoop(interval time.Duration) {
 
 func (r *MappingRegistry) Stop() { r.stopOnce.Do(func() { close(r.stopCh) }) }
 
+// pageFetcher fetches one page (one relay, one already-limited-and-cursored
+// filter) of events. poolMappingSource.fetchPage is the production
+// implementation; tests inject a fake one to exercise the paging/dedupe
+// logic in pageRelay without a network.
+type pageFetcher func(ctx context.Context, url string, filter nostr.Filter) ([]nostr.Event, error)
+
 // poolMappingSource pages each relay separately (until-paging a merged
 // multi-relay stream skips events only one relay holds) and dedupes by id.
 type poolMappingSource struct {
@@ -386,33 +417,8 @@ type poolMappingSource struct {
 func (s poolMappingSource) Fetch(ctx context.Context, relays []string, filter nostr.Filter) ([]nostr.Event, error) {
 	byID := map[nostr.ID]nostr.Event{}
 	for _, url := range relays {
-		var until nostr.Timestamp
-		for {
-			f := filter
-			f.Limit = mappingPageSize
-			f.Until = until
-			n, unseen := 0, 0
-			var oldest nostr.Timestamp
-			for ev := range s.pool.FetchMany(ctx, []string{url}, f, nostr.SubscriptionOptions{}) {
-				n++
-				if oldest == 0 || ev.CreatedAt < oldest {
-					oldest = ev.CreatedAt
-				}
-				if _, ok := byID[ev.ID]; !ok {
-					byID[ev.ID] = ev.Event
-					unseen++
-				}
-			}
-			if err := ctx.Err(); err != nil {
-				return nil, fmt.Errorf("%s: %w", url, err)
-			}
-			if n < mappingPageSize {
-				break
-			}
-			if unseen == 0 {
-				return nil, fmt.Errorf("%s: more than %d events share created_at %d", url, mappingPageSize, oldest)
-			}
-			until = oldest
+		if err := pageRelay(ctx, url, filter, byID, s.fetchPage); err != nil {
+			return nil, err
 		}
 	}
 	out := make([]nostr.Event, 0, len(byID))
@@ -420,4 +426,99 @@ func (s poolMappingSource) Fetch(ctx context.Context, relays []string, filter no
 		out = append(out, ev)
 	}
 	return out, nil
+}
+
+// pageRelay pages one relay via fetch, merging every page into byID — the
+// global, cross-relay dedupe set. The "did this page move the cursor
+// forward" guard uses seen, a set scoped to this relay call alone: a
+// second, mirrored relay returning its own first page full of events byID
+// already holds (from an earlier relay) must not look like a relay stuck
+// replaying the same page forever. seen only answers "is this new to THIS
+// relay's pagination", never "is this new overall".
+func pageRelay(ctx context.Context, url string, filter nostr.Filter, byID map[nostr.ID]nostr.Event, fetch pageFetcher) error {
+	seen := map[nostr.ID]bool{}
+	var until nostr.Timestamp
+	for {
+		f := filter
+		f.Limit = mappingPageSize
+		f.Until = until
+		evs, err := fetch(ctx, url, f)
+		if err != nil {
+			return fmt.Errorf("%s: %w", url, err)
+		}
+		n := len(evs)
+		var oldest nostr.Timestamp
+		newToRelay := 0
+		for _, ev := range evs {
+			if oldest == 0 || ev.CreatedAt < oldest {
+				oldest = ev.CreatedAt
+			}
+			if !seen[ev.ID] {
+				seen[ev.ID] = true
+				newToRelay++
+			}
+			byID[ev.ID] = ev
+		}
+		if n < mappingPageSize {
+			return nil
+		}
+		if newToRelay == 0 {
+			return fmt.Errorf("%s: more than %d events share created_at %d", url, mappingPageSize, oldest)
+		}
+		until = oldest
+	}
+}
+
+// fetchPage is the production pageFetcher for one relay, one page.
+//
+// It reads the pool's channels through select rather than `range`, so a
+// slow dial (pool.EnsureRelay blocks on pool.Context, not ctx, while
+// connecting) still responds to ctx being done immediately instead of
+// waiting out the dial.
+//
+// It uses FetchManyNotifyClosed rather than FetchMany, and treats any
+// CLOSED message as an error: subManyEose otherwise returns a page's
+// events silently and successfully even when the relay closed the
+// subscription mid-stream, which previously could be read as "a short,
+// complete page" and overwrite good cached data with a truncated one.
+//
+// MaxWaitForEOSE is disabled (set to the sentinel documented on
+// SubscriptionOptions that turns the fake-EOSE timer off) so ctx is the
+// only timeout in play; without this, the pool's own fake EOSE could fire
+// before the relay finished sending a page and be indistinguishable from a
+// genuine end of stored events, which is the other way the old code could
+// mistake a truncated page for a complete one. There is no public signal
+// on Subscription (eoseTimedOut is unexported, inside package nostr) to
+// tell a real EOSE from a fake one after the fact, so disabling the fake
+// one is the only avenue available from this package.
+//
+// Not addressed (not observable through this package's public Pool API):
+// if the relay connection dies between EnsureRelay succeeding and any
+// EOSE/CLOSED, subManyEose's per-url goroutine returns via its `evt, more
+// := <-sub.Events; if !more { return }` branch with no CLOSED message and
+// no error — indistinguishable, from here, from the subscription simply
+// having nothing left to deliver. See the fix report for task 6 fix round
+// 1 for detail.
+func (s poolMappingSource) fetchPage(ctx context.Context, url string, filter nostr.Filter) ([]nostr.Event, error) {
+	events, closedChan := s.pool.FetchManyNotifyClosed(ctx, []string{url}, filter, nostr.SubscriptionOptions{
+		MaxWaitForEOSE: time.Duration(math.MaxInt64),
+	})
+	var out []nostr.Event
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				return out, nil
+			}
+			out = append(out, ev.Event)
+		case rc, ok := <-closedChan:
+			if !ok {
+				closedChan = nil // drained; never select it again
+				continue
+			}
+			return nil, fmt.Errorf("CLOSED: %s", rc.Reason)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
