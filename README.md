@@ -326,6 +326,58 @@ Test with nak:
 nak req --search "photosynthese" -k 30142 -k 21142 --limit 5 ws://localhost:3334
 ```
 
+## Concept expansion
+
+A query that filters on a concept (e.g. a KIM educational level) also finds
+resources tagged only with a *mapped* concept from another vocabulary. For
+example, a filter on `educationalLevel:id`
+`https://w3id.org/kim/educationalLevel/level_2` (Sekundarbereich I) also
+matches a resource tagged only `ext:ekw:gradeLevel:id =
+nostr:39738:<pubkey>:5-6` (Klassenstufe 5–6), once a trusted NIP-VOCAB
+standalone-mapping concordance (kind 39741) links the two identifiers. The
+relay loads these concordances and their member mappings
+(kind 39740) and in-scheme concept hierarchies (kind 39738) from
+`EXPAND_READ_RELAYS`, builds an expansion graph, and rewrites matching concept
+filters before querying Typesense — so REQ and COUNT expand identically.
+
+Expansion applies only to queries whose `kinds` is exactly `[30142]`, and only
+to concept filters: tag filters `#educationalLevel:id`, `#about:id`,
+`#learningResourceType:id`, `#audience:id`, `#ext:<ns>:<facet>:id`, and their
+NIP-50 field-filter forms (`educationalLevel.id:…`, `ext.<ns>.<facet>.id:…`).
+Any other filter (free text, other tags/fields) is left untouched, and a
+concept filter with no mappings is left untouched too — expansion never
+narrows a result set and never fails a query.
+
+By default, each matched identifier expands to its transitive `exactMatch`
+closure, the `closeMatch` neighbours of that closure (one hop), and
+everything narrower than those (in-scheme `narrower` plus mappings in the
+narrowing direction), each traversed with its own exact closure. A search can
+tune this per query with `expand:` tokens in NIP-50 `search` (relays that
+don't support the extension simply ignore them):
+
+| Token | Effect |
+|---|---|
+| (none) | default trust set (`EXPAND_CONCORDANCES`), default relations |
+| `expand:off` | no expansion |
+| `expand:<naddr1…>` (repeatable) | use these concordances instead of the default set |
+| `expand:<npub1…>` (repeatable) | additionally trust all mappings authored by this pubkey |
+| `expand:related` | additionally follow `relatedMatch` |
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `EXPAND_CONCORDANCES` | Comma-separated `naddr`s of default concordances (kind 39741); empty = no default expansion (expansion only via `expand:` on request) | empty |
+| `EXPAND_READ_RELAYS` | Relays to load vocab/mapping events from | `wss://relay.edufeed.org` |
+| `EXPAND_REFRESH_INTERVAL` | Registry refresh interval (Go duration) | `10m` |
+| `EXPAND_DEBUG` | Log original → expanded identifiers per query | `false` |
+
+Live subscriptions (events arriving after EOSE) are matched against the
+original, unexpanded filter — expansion is a query-time rewrite of the
+initial stored-event fetch only.
+
+NIP-11 advertisement of the `expand:` extension is pending the search-extensions
+work (`pr/nip11-search-extensions`); until then this README is the only
+documentation of the feature.
+
 ## Access control & authentication
 
 By default the relay is **open for reads and restricted for writes** to the kinds
