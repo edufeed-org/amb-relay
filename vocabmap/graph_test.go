@@ -99,3 +99,55 @@ func TestExpandUnknownID(t *testing.T) {
 		t.Fatalf("got %v %v", ids, truncated)
 	}
 }
+
+// TestExpandOrderIndependent guards against Expand's output depending on the
+// order of NewGraph's input slices: adjacency lists must be sorted so that
+// which identifiers survive once MaxResults truncates is deterministic.
+func TestExpandOrderIndependent(t *testing.T) {
+	root := vocabmap.Concept{ID: "R", Address: "39738:pk:r"}
+	c1 := vocabmap.Concept{ID: "C1", Address: "39738:pk:c1", Broader: []string{"39738:pk:r"}}
+	c2 := vocabmap.Concept{ID: "C2", Address: "39738:pk:c2", Broader: []string{"39738:pk:r"}}
+	c3 := vocabmap.Concept{ID: "C3", Address: "39738:pk:c3", Broader: []string{"39738:pk:r"}}
+	concepts := []vocabmap.Concept{root, c1, c2, c3}
+
+	mappings := []vocabmap.Mapping{
+		mp("R", "exactMatch", "R2"),
+		mp("R", "closeMatch", "K1"),
+		mp("R", "closeMatch", "K2"),
+		mp("R", "closeMatch", "K3"),
+		mp("R", "relatedMatch", "X1"),
+		mp("R", "relatedMatch", "X2"),
+		mp("R", "relatedMatch", "X3"),
+	}
+
+	reverse := func(cs []vocabmap.Concept) []vocabmap.Concept {
+		out := make([]vocabmap.Concept, len(cs))
+		for i, c := range cs {
+			out[len(cs)-1-i] = c
+		}
+		return out
+	}
+	reverseM := func(ms []vocabmap.Mapping) []vocabmap.Mapping {
+		out := make([]vocabmap.Mapping, len(ms))
+		for i, m := range ms {
+			out[len(ms)-1-i] = m
+		}
+		return out
+	}
+
+	forward := vocabmap.NewGraph(concepts, mappings)
+	reversed := vocabmap.NewGraph(reverse(concepts), reverseM(mappings))
+
+	gotForward, truncForward := forward.Expand("R", true)
+	gotReversed, truncReversed := reversed.Expand("R", true)
+
+	if !reflect.DeepEqual(gotForward, gotReversed) || truncForward != truncReversed {
+		t.Fatalf("Expand depends on input order: forward=%v (truncated=%v), reversed=%v (truncated=%v)",
+			gotForward, truncForward, gotReversed, truncReversed)
+	}
+
+	want := []string{"R", "R2", "K1", "K2", "K3", "C1", "C2", "C3", "X1", "X2", "X3"}
+	if !reflect.DeepEqual(gotForward, want) {
+		t.Fatalf("Expand(R, true) = %v, want %v", gotForward, want)
+	}
+}

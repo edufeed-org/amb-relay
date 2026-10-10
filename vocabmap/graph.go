@@ -1,5 +1,7 @@
 package vocabmap
 
+import "sort"
+
 const (
 	// MaxDepth bounds the narrowing step of Expand.
 	MaxDepth = 4
@@ -95,6 +97,11 @@ func NewGraph(concepts []Concept, mappings []Mapping) *Graph {
 			g.link("narrower", b, a)
 		case "narrowMatch": // b is narrower than a
 			g.link("narrower", a, b)
+		}
+	}
+	for _, adj := range []map[string][]string{g.exact, g.close, g.related, g.narrower} {
+		for _, list := range adj {
+			sort.Strings(list)
 		}
 	}
 	return g
