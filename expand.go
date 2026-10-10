@@ -6,6 +6,8 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/typesense30142"
@@ -51,6 +53,24 @@ func ensureConceptsField(schema *typesense30142.CollectionSchema) {
 	}
 	schema.Fields = append(schema.Fields, typesense30142.Field{Name: "concepts", Type: "string[]", Optional: true})
 }
+
+// rateLimitedWarning lets a warning through at most once per
+// noGraphWarnEvery, lock-free across concurrent queries.
+type rateLimitedWarning struct{ last atomic.Int64 }
+
+const noGraphWarnEvery = time.Minute
+
+func (w *rateLimitedWarning) allow(now time.Time) bool {
+	prev := w.last.Load()
+	if prev != 0 && now.Sub(time.Unix(0, prev)) < noGraphWarnEvery {
+		return false
+	}
+	return w.last.CompareAndSwap(prev, now.UnixNano())
+}
+
+// noGraphWarning rate-limits the spec §2 warning for queries that name
+// trusted sources while none of them is loaded (relay unreachable, cold start).
+var noGraphWarning rateLimitedWarning
 
 type graphProvider interface {
 	Defaults() Trust
@@ -243,8 +263,12 @@ func expandConceptFilters(ctx context.Context, filter nostr.Filter, reg graphPro
 	if len(groups) == 0 {
 		return out
 	}
-	g, ok := reg.Graph(ctx, opts.trust(reg.Defaults()))
+	trust := opts.trust(reg.Defaults())
+	g, ok := reg.Graph(ctx, trust)
 	if !ok {
+		if len(trust.sourceKeys()) > 0 && noGraphWarning.allow(time.Now()) {
+			log.Printf("expand: no mapping graph available; running unexpanded")
+		}
 		return out
 	}
 

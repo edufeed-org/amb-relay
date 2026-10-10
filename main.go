@@ -1039,7 +1039,9 @@ func main() {
 
 	// Dual-write eventstore wiring (query from Typesense, persist to both)
 	relay.QueryStored = func(ctx context.Context, filter nostr.Filter) iter.Seq[nostr.Event] {
-		filter = expandConceptFilters(ctx, filter, expandReg, expandDebug)
+		if !khatru.IsNegentropySession(ctx) { // negentropy syncs the stored set as-is
+			filter = expandConceptFilters(ctx, filter, expandReg, expandDebug)
+		}
 		maxLimit := 250
 		if khatru.IsNegentropySession(ctx) {
 			maxLimit = 250 * 20

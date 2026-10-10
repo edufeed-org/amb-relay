@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/typesense30142"
@@ -169,5 +174,35 @@ func TestExpandSkipsClientConceptSlots(t *testing.T) {
 		nostr.Filter{Kinds: amb, Tags: nostr.TagMap{"concepts_0": {"Q"}, "about:id": {"SA"}}}, testGraphs(), false)
 	if !reflect.DeepEqual(got.Tags, nostr.TagMap{"concepts_0": {"Q"}, "concepts_1": {"SA", "SB"}}) {
 		t.Fatalf("tags = %v", got.Tags)
+	}
+}
+
+// Final review, finding 4: a missing graph is logged, at most once a minute.
+func TestNoGraphWarningRateLimited(t *testing.T) {
+	var w rateLimitedWarning
+	t0 := time.Unix(1_000_000, 0)
+	if !w.allow(t0) {
+		t.Fatal("first warning must be logged")
+	}
+	if w.allow(t0.Add(30 * time.Second)) {
+		t.Error("a second warning within a minute must be suppressed")
+	}
+	if !w.allow(t0.Add(61 * time.Second)) {
+		t.Error("a warning after a minute must be logged again")
+	}
+}
+
+func TestExpandWarnsWhenGraphUnavailable(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	noGraphWarning = rateLimitedWarning{}
+
+	g := testGraphs()
+	g.ok = false
+	expandConceptFilters(context.Background(), nostr.Filter{Kinds: amb, Tags: nostr.TagMap{"about:id": {"SA"}}}, g, false)
+	expandConceptFilters(context.Background(), nostr.Filter{Kinds: amb, Tags: nostr.TagMap{"about:id": {"SA"}}}, g, false)
+	if n := strings.Count(buf.String(), "expand: no mapping graph available; running unexpanded"); n != 1 {
+		t.Errorf("want exactly one warning, got %d: %q", n, buf.String())
 	}
 }
