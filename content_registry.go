@@ -166,11 +166,14 @@ func searchHasFieldFilters(search string) bool {
 // Search field, so the field filter would be silently dropped and the query
 // answered WIDER than asked. Fail closed on ranking, never on filtering —
 // the plain path honours the filter and loses only passage ordering and
-// snippets (issue #22).
+// snippets (issue #22). Expanded concept filters (concepts_<n> tags,
+// expand.go) also refuse it: events never carry those tags, so the rerank
+// post-filter would drop every hit.
 func (r *registry) rerankOwns(filter nostr.Filter) bool {
 	return r.targetsChunked(filter) &&
 		searchHasFreeText(filter.Search) &&
-		!searchHasFieldFilters(filter.Search)
+		!searchHasFieldFilters(filter.Search) &&
+		!hasConceptTags(filter)
 }
 
 // count sums event counts across the content types a filter targets.

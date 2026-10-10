@@ -285,19 +285,21 @@ func TestRerankOwnsSearch(t *testing.T) {
 		name   string
 		kinds  []nostr.Kind
 		search string
+		tags   nostr.TagMap
 		want   bool
 	}{
-		{"plain free text", []nostr.Kind{30142}, "mathematik", true},
-		{"empty search", []nostr.Kind{30142}, "", false},
-		{"pure field filter", []nostr.Kind{30142}, "publisher.name:e-teaching.org", false},
-		{"free text plus field filter", []nostr.Kind{30142}, "forschung publisher.name:e-teaching.org", false},
-		{"free text plus community filter", []nostr.Kind{30142}, "mathematik community:abcdef", false},
-		{"free text plus sort directive", []nostr.Kind{30142}, "mathematik sort:datePublished", true},
-		{"non-chunked kinds", []nostr.Kind{31923}, "mathematik", false},
+		{"plain free text", []nostr.Kind{30142}, "mathematik", nil, true},
+		{"empty search", []nostr.Kind{30142}, "", nil, false},
+		{"pure field filter", []nostr.Kind{30142}, "publisher.name:e-teaching.org", nil, false},
+		{"free text plus field filter", []nostr.Kind{30142}, "forschung publisher.name:e-teaching.org", nil, false},
+		{"free text plus community filter", []nostr.Kind{30142}, "mathematik community:abcdef", nil, false},
+		{"free text plus sort directive", []nostr.Kind{30142}, "mathematik sort:datePublished", nil, true},
+		{"non-chunked kinds", []nostr.Kind{31923}, "mathematik", nil, false},
+		{name: "free text plus expanded concept filter", kinds: []nostr.Kind{30142}, search: "mathematik", tags: nostr.TagMap{"concepts_0": {"L2"}}, want: false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			f := nostr.Filter{Kinds: c.kinds, Search: c.search}
+			f := nostr.Filter{Kinds: c.kinds, Search: c.search, Tags: c.tags}
 			if got := reg.rerankOwns(f); got != c.want {
 				t.Errorf("rerankOwns(kinds=%v, search=%q) = %v, want %v", c.kinds, c.search, got, c.want)
 			}
