@@ -346,7 +346,17 @@ to concept filters: tag filters `#educationalLevel:id`, `#about:id`,
 NIP-50 field-filter forms (`educationalLevel.id:…`, `ext.<ns>.<facet>.id:…`).
 Any other filter (free text, other tags/fields) is left untouched, and a
 concept filter with no mappings is left untouched too — expansion never
-narrows a result set and never fails a query.
+fails a query, and on a fully reindexed collection it never narrows a result
+set.
+
+**Upgrading:** expanded filters match the indexed `concepts` field, which
+documents indexed before this feature do not have — an expanded query would
+silently miss them. Run the NIP-86 `reindex` after upgrading and *before*
+setting `EXPAND_CONCORDANCES` or sending `expand:<…>` queries.
+
+A free-text search combined with an expanded concept filter takes the plain
+full-text path rather than chunk-rerank (no passage ordering or snippets) —
+by design, since the rerank path cannot carry the expanded filter.
 
 By default, each matched identifier expands to its transitive `exactMatch`
 closure, the `closeMatch` neighbours of that closure (one hop), and
@@ -366,13 +376,19 @@ don't support the extension simply ignore them):
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `EXPAND_CONCORDANCES` | Comma-separated `naddr`s of default concordances (kind 39741); empty = no default expansion (expansion only via `expand:` on request) | empty |
-| `EXPAND_READ_RELAYS` | Relays to load vocab/mapping events from | `wss://relay.edufeed.org` |
+| `EXPAND_READ_RELAYS` | Relays to load vocab/mapping events from. **Every** listed relay must answer for a source to load (one failing relay fails the load; the last good data is kept) — a single relay is recommended | `wss://relay.edufeed.org` |
 | `EXPAND_REFRESH_INTERVAL` | Registry refresh interval (Go duration) | `10m` |
 | `EXPAND_DEBUG` | Log original → expanded identifiers per query | `false` |
 
 Live subscriptions (events arriving after EOSE) are matched against the
 original, unexpanded filter — expansion is a query-time rewrite of the
-initial stored-event fetch only.
+initial stored-event fetch only. Negentropy (NIP-77) sync sessions are never
+expanded: they reconcile the stored set exactly as filtered.
+
+If expansion is configured (or requested via `expand:`) but no mapping graph
+is loaded — read relays unreachable, cold start — queries run unexpanded and
+the relay logs `expand: no mapping graph available; running unexpanded` at
+most once a minute.
 
 NIP-11 advertisement of the `expand:` extension is pending the search-extensions
 work (`pr/nip11-search-extensions`); until then this README is the only
