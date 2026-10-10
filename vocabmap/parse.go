@@ -237,14 +237,14 @@ func Members(c Concordance, ms []Mapping) []Mapping {
 	return out
 }
 
-// LatestByAddress keeps the newest event per address (ties: larger id),
-// sorted by address.
+// LatestByAddress keeps the newest event per address (ties: smaller id
+// (NIP-01)), sorted by address.
 func LatestByAddress(evs []nostr.Event) []nostr.Event {
 	best := map[string]nostr.Event{}
 	for _, ev := range evs {
 		a := Address(ev)
 		prev, ok := best[a]
-		if !ok || ev.CreatedAt > prev.CreatedAt || (ev.CreatedAt == prev.CreatedAt && ev.ID.Hex() > prev.ID.Hex()) {
+		if !ok || ev.CreatedAt > prev.CreatedAt || (ev.CreatedAt == prev.CreatedAt && ev.ID.Hex() < prev.ID.Hex()) {
 			best[a] = ev
 		}
 	}

@@ -109,3 +109,18 @@ func TestLatestByAddress(t *testing.T) {
 		t.Fatalf("latest = %+v", got)
 	}
 }
+
+// Same address, same CreatedAt: NIP-01 keeps the smaller id, matching the
+// relay's own store so the graph is built from the same version it serves.
+func TestLatestByAddressTieBreak(t *testing.T) {
+	smaller := vt.Concept(vt.Owner, "s", "a", "https://smaller")
+	smaller.ID = nostr.ID{0: 0x01}
+	larger := vt.Concept(vt.Owner, "s", "a", "https://larger")
+	larger.ID = nostr.ID{0: 0xff}
+	for _, order := range [][]nostr.Event{{smaller, larger}, {larger, smaller}} {
+		got := vocabmap.LatestByAddress(order)
+		if len(got) != 1 || got[0].Tags.Find("i")[1] != "https://smaller" {
+			t.Fatalf("tie-break with order %+v = %+v, want smaller id to win", order, got)
+		}
+	}
+}
