@@ -26,6 +26,13 @@ const (
 	// single Graph call will attempt; the rest load on a later query. Keeps
 	// the hot path bounded even when a Trust lists many unknown sources.
 	maxOnDemandLoadsPerQuery = 4
+
+	// maxCachedGraphs and maxFailedSources bound the per-trust-set graph
+	// cache and the negative cache: both are keyed by client-chosen
+	// expand:<…> sources, so unbounded maps would let any client grow
+	// memory at will.
+	maxCachedGraphs  = 64
+	maxFailedSources = 1024
 )
 
 // Trust is the set of mapping sources a query expands with: concordances
@@ -147,7 +154,7 @@ func (r *MappingRegistry) Graph(ctx context.Context, trust Trust) (*vocabmap.Gra
 		}
 		cancel()
 	}
-	return r.graphFor(strings.Join(keys, ","), keys)
+	return r.graphFor(keys)
 }
 
 // toLoad: keys not loaded yet, not defaults, not failed within mappingRetryAfter.
@@ -167,10 +174,28 @@ func (r *MappingRegistry) toLoad(keys []string) []string {
 	return out
 }
 
+// markFailed records a failed load. Entries older than mappingRetryAfter
+// carry no information (toLoad ignores them) and are pruned; beyond
+// maxFailedSources the oldest entry is dropped.
 func (r *MappingRegistry) markFailed(key string) {
 	r.mu.Lock()
-	r.failedAt[key] = time.Now()
-	r.mu.Unlock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	for k, t := range r.failedAt {
+		if now.Sub(t) >= mappingRetryAfter {
+			delete(r.failedAt, k)
+		}
+	}
+	for len(r.failedAt) >= maxFailedSources {
+		var oldest string
+		for k, t := range r.failedAt {
+			if oldest == "" || t.Before(r.failedAt[oldest]) {
+				oldest = k
+			}
+		}
+		delete(r.failedAt, oldest)
+	}
+	r.failedAt[key] = now
 }
 
 func (r *MappingRegistry) store(key string, e *sourceEntry) {
@@ -203,20 +228,26 @@ func (r *MappingRegistry) store(key string, e *sourceEntry) {
 	}
 }
 
-func (r *MappingRegistry) graphFor(cacheKey string, keys []string) (*vocabmap.Graph, bool) {
+// graphFor builds (or returns the cached) graph over the loaded subset of
+// keys. The cache key is that loaded subset only, so trust sets differing
+// just in unknown/unloadable sources share one graph.
+func (r *MappingRegistry) graphFor(keys []string) (*vocabmap.Graph, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
 	var present []*sourceEntry
+	var presentKeys []string
 	for _, k := range keys {
 		if e, ok := r.entries[k]; ok {
 			e.lastUsed = now
 			present = append(present, e)
+			presentKeys = append(presentKeys, k)
 		}
 	}
 	if len(present) == 0 {
 		return nil, false
 	}
+	cacheKey := strings.Join(presentKeys, ",")
 	if g, ok := r.graphs[cacheKey]; ok {
 		return g, true
 	}
@@ -238,6 +269,9 @@ func (r *MappingRegistry) graphFor(cacheKey string, keys []string) (*vocabmap.Gr
 		}
 	}
 	g := vocabmap.NewGraph(concepts, mappings)
+	if len(r.graphs) >= maxCachedGraphs {
+		r.graphs = map[string]*vocabmap.Graph{}
+	}
 	r.graphs[cacheKey] = g
 	return g, true
 }

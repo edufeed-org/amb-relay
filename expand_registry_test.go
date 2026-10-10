@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"sync"
@@ -289,5 +290,79 @@ func TestPageRelayMirroredRelaysDoNotFalselyFail(t *testing.T) {
 		if _, ok := byID[fakeEventID(i)]; !ok {
 			t.Fatalf("byID missing event %d", i)
 		}
+	}
+}
+
+// --- Final review, finding 1: unauthenticated clients naming random
+// expand:<npub> sources must not grow the registry's memory without bound. ---
+
+func TestMappingRegistryUnknownSourcesStayBounded(t *testing.T) {
+	events, conc := levelWorld()
+	src := &fakeMappingSource{events: events}
+	r := NewMappingRegistry(src, []string{"wss://r"}, Trust{Concordances: []string{conc}})
+	r.refresh(context.Background())
+
+	for i := 0; i < 300; i++ {
+		trust := Trust{Concordances: []string{conc}, Authors: []string{nostr.Generate().Public().Hex()}}
+		if _, ok := r.Graph(context.Background(), trust); !ok {
+			t.Fatalf("query %d: defaults are loaded, Graph must be ok", i)
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.graphs) > 1 {
+		t.Errorf("unknown sources must share the defaults' cached graph: %d graphs", len(r.graphs))
+	}
+	if len(r.failedAt) > maxFailedSources {
+		t.Errorf("failedAt grew to %d (cap %d)", len(r.failedAt), maxFailedSources)
+	}
+}
+
+func TestMappingRegistryGraphCacheBounded(t *testing.T) {
+	r := NewMappingRegistry(&fakeMappingSource{}, nil, Trust{})
+	// Distinct loaded source sets each get their own graph; the cache must
+	// still not exceed maxCachedGraphs.
+	for i := 0; i < maxCachedGraphs*3; i++ {
+		key := fmt.Sprintf("p:%064x", i)
+		r.mu.Lock()
+		r.entries[key] = &sourceEntry{}
+		r.mu.Unlock()
+		if _, ok := r.graphFor([]string{key}); !ok {
+			t.Fatalf("graphFor(%s) not ok", key)
+		}
+		r.mu.Lock()
+		n := len(r.graphs)
+		r.mu.Unlock()
+		if n > maxCachedGraphs {
+			t.Fatalf("graph cache grew to %d (cap %d)", n, maxCachedGraphs)
+		}
+	}
+}
+
+func TestMappingRegistryFailedAtPrunedAndCapped(t *testing.T) {
+	r := NewMappingRegistry(&fakeMappingSource{}, nil, Trust{})
+	stale := time.Now().Add(-2 * mappingRetryAfter)
+	r.mu.Lock()
+	for i := 0; i < 10; i++ {
+		r.failedAt[fmt.Sprintf("p:stale%d", i)] = stale
+	}
+	r.mu.Unlock()
+	r.markFailed("p:fresh")
+	r.mu.Lock()
+	if len(r.failedAt) != 1 {
+		t.Errorf("stale entries must be pruned: %v", r.failedAt)
+	}
+	r.mu.Unlock()
+
+	for i := 0; i < maxFailedSources*2; i++ {
+		r.markFailed(fmt.Sprintf("p:%d", i))
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.failedAt) > maxFailedSources {
+		t.Errorf("failedAt grew to %d (cap %d)", len(r.failedAt), maxFailedSources)
+	}
+	if _, ok := r.failedAt[fmt.Sprintf("p:%d", maxFailedSources*2-1)]; !ok {
+		t.Error("the newest failure must be kept")
 	}
 }
