@@ -189,13 +189,51 @@ func TestMappingRegistryGraphSharedTimeoutCapsOnDemandLoads(t *testing.T) {
 
 	// A per-source timeout would serialize to roughly 6 * onDemandTimeout
 	// (300ms); a shared one keeps the whole call to roughly one
-	// onDemandTimeout, since once it expires every further load call sees
-	// an already-done context and returns immediately.
+	// onDemandTimeout — the first source consumes the whole shared budget,
+	// and every further source is then skipped outright (round 2, finding
+	// B: an already-expired context is never "attempted").
 	if elapsed > 250*time.Millisecond {
 		t.Fatalf("Graph blocked for %v, want ~one onDemandTimeout shared across the whole call", elapsed)
 	}
 	if calls := src.callCount(); calls > maxOnDemandLoadsPerQuery {
 		t.Fatalf("attempted %d on-demand loads for 6 unknown sources, want at most %d", calls, maxOnDemandLoadsPerQuery)
+	}
+}
+
+// --- Fix round 2, finding B: a regression from fix round 1 — once one
+// slow source exhausts the shared deadline, the remaining capped keys must
+// not be "attempted" with an already-expired context, fail instantly, and
+// get markFailed for mappingRetryAfter despite never really having been
+// tried. The untried remainder must stay unmarked so a later Graph call
+// (fresh deadline) attempts them. ---
+
+func TestMappingRegistryGraphLeavesUnattemptedSourcesUnmarked(t *testing.T) {
+	src := &blockingMappingSource{}
+	r := NewMappingRegistry(src, []string{"wss://r"}, Trust{})
+	r.onDemandTimeout = 50 * time.Millisecond
+
+	authors := []string{
+		nostr.GetPublicKey([32]byte{31: 1}).Hex(),
+		nostr.GetPublicKey([32]byte{31: 2}).Hex(),
+	}
+	trust := Trust{Authors: authors}
+
+	if _, ok := r.Graph(context.Background(), trust); ok {
+		t.Fatal("blocked sources must not yield a graph")
+	}
+	if calls := src.callCount(); calls != 1 {
+		t.Fatalf("first Graph call attempted %d sources, want exactly 1 (the shared deadline is exhausted by the first blocking load)", calls)
+	}
+
+	// A following Graph call gets a fresh deadline. If the second
+	// (never-tried) source had wrongly been markFailed in round 1, it
+	// would now be skipped by the mappingRetryAfter backoff and the call
+	// count would stay at 1.
+	if _, ok := r.Graph(context.Background(), trust); ok {
+		t.Fatal("still-blocked sources must not yield a graph")
+	}
+	if calls := src.callCount(); calls != 2 {
+		t.Fatalf("after a second Graph call, total attempts = %d, want 2 (the untried source from round 1 must have been attempted now, not skipped as already-failed)", calls)
 	}
 }
 

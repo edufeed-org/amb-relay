@@ -128,6 +128,15 @@ func (r *MappingRegistry) Graph(ctx context.Context, trust Trust) (*vocabmap.Gra
 	if len(toLoad) > 0 {
 		lctx, cancel := context.WithTimeout(ctx, r.onDemandTimeout)
 		for _, k := range toLoad {
+			if lctx.Err() != nil {
+				// The shared deadline is already exhausted (an earlier
+				// source in this same call used it all up): stop rather
+				// than "attempt" and immediately fail the rest, which
+				// would markFailed them for mappingRetryAfter even though
+				// they were never really tried. Leave them unmarked so a
+				// later query attempts them with a fresh deadline.
+				break
+			}
 			e, err := r.load(lctx, k)
 			if err != nil {
 				log.Printf("expand: load %s: %v", k, err)
@@ -469,54 +478,83 @@ func pageRelay(ctx context.Context, url string, filter nostr.Filter, byID map[no
 	}
 }
 
-// fetchPage is the production pageFetcher for one relay, one page.
+// fetchPage is the production pageFetcher for one relay, one page. It uses
+// the Relay-level API directly (EnsureRelay + Subscribe) instead of the
+// Pool's FetchMany/FetchManyNotifyClosed, because only at that level is a
+// real EOSE distinguishable from every other way a subscription can end —
+// Pool.subManyEose folds all of those into either a silent channel close or
+// a CLOSED message, discarding exactly the distinction this needs.
 //
-// It reads the pool's channels through select rather than `range`, so a
-// slow dial (pool.EnsureRelay blocks on pool.Context, not ctx, while
-// connecting) still responds to ctx being done immediately instead of
-// waiting out the dial.
-//
-// It uses FetchManyNotifyClosed rather than FetchMany, and treats any
-// CLOSED message as an error: subManyEose otherwise returns a page's
-// events silently and successfully even when the relay closed the
-// subscription mid-stream, which previously could be read as "a short,
-// complete page" and overwrite good cached data with a truncated one.
-//
-// MaxWaitForEOSE is disabled (set to the sentinel documented on
-// SubscriptionOptions that turns the fake-EOSE timer off) so ctx is the
-// only timeout in play; without this, the pool's own fake EOSE could fire
-// before the relay finished sending a page and be indistinguishable from a
-// genuine end of stored events, which is the other way the old code could
-// mistake a truncated page for a complete one. There is no public signal
-// on Subscription (eoseTimedOut is unexported, inside package nostr) to
-// tell a real EOSE from a fake one after the fact, so disabling the fake
-// one is the only avenue available from this package.
-//
-// Not addressed (not observable through this package's public Pool API):
-// if the relay connection dies between EnsureRelay succeeding and any
-// EOSE/CLOSED, subManyEose's per-url goroutine returns via its `evt, more
-// := <-sub.Events; if !more { return }` branch with no CLOSED message and
-// no error — indistinguishable, from here, from the subscription simply
-// having nothing left to deliver. See the fix report for task 6 fix round
-// 1 for detail.
+//   - pool.EnsureRelay(url) dials using pool.Context, not this call's ctx, so
+//     it runs in a goroutine and the result is raced against ctx.Done().
+//   - relay.Subscribe(ctx, filter, opts) with MaxWaitForEOSE disabled (set to
+//     the sentinel documented on SubscriptionOptions, time.Duration(math.MaxInt64))
+//     so the pool's fake-EOSE timer never fires — ctx is the only timeout.
+//     Without this, a fake EOSE firing mid-page is indistinguishable from a
+//     real one once it reaches sub.EndOfStoredEvents, which is the failure
+//     mode this whole rewrite exists to close.
+//   - the read loop selects on sub.Events, sub.EndOfStoredEvents,
+//     sub.ClosedReason and ctx.Done():
+//       - sub.EndOfStoredEvents fired ⇒ a genuine EOSE: dispatchEose() (in
+//         package nostr's subscription.go) only sends on it after
+//         storedwg.Wait(), i.e. once every event stored before the EOSE has
+//         already been delivered through sub.Events and received below, so
+//         the page is complete.
+//       - sub.Events closing (more == false) before that ⇒ the subscription
+//         ended some other way (connection dropped, Unsub elsewhere, relay
+//         gone) — an error, not a short-but-complete page. The reason is
+//         read from context.Cause(sub.Context), the cause PrepareSubscription
+//         and the connection-death goroutine in relay.go actually cancel it
+//         with.
+//       - sub.ClosedReason ⇒ the relay sent CLOSED: an error.
+//       - ctx.Done() ⇒ ctx.Err().
+//   - EnsureRelay/Subscribe failing is now itself an error (previously, an
+//     unreachable relay silently produced zero events — indistinguishable
+//     from a short, complete, empty page).
+//   - sub.Unsub() always runs on return (success or error) via defer, per
+//     Subscribe's own doc comment ("remember to cancel subscriptions").
 func (s poolMappingSource) fetchPage(ctx context.Context, url string, filter nostr.Filter) ([]nostr.Event, error) {
-	events, closedChan := s.pool.FetchManyNotifyClosed(ctx, []string{url}, filter, nostr.SubscriptionOptions{
+	type relayResult struct {
+		relay *nostr.Relay
+		err   error
+	}
+	relayCh := make(chan relayResult, 1)
+	go func() {
+		relay, err := s.pool.EnsureRelay(url)
+		relayCh <- relayResult{relay, err}
+	}()
+
+	var relay *nostr.Relay
+	select {
+	case res := <-relayCh:
+		if res.err != nil {
+			return nil, fmt.Errorf("%s: connect: %w", url, res.err)
+		}
+		relay = res.relay
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	sub, err := relay.Subscribe(ctx, filter, nostr.SubscriptionOptions{
 		MaxWaitForEOSE: time.Duration(math.MaxInt64),
 	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: subscribe: %w", url, err)
+	}
+	defer sub.Unsub()
+
 	var out []nostr.Event
 	for {
 		select {
-		case ev, ok := <-events:
+		case evt, ok := <-sub.Events:
 			if !ok {
-				return out, nil
+				return nil, fmt.Errorf("%s: subscription ended before EOSE: %w", url, context.Cause(sub.Context))
 			}
-			out = append(out, ev.Event)
-		case rc, ok := <-closedChan:
-			if !ok {
-				closedChan = nil // drained; never select it again
-				continue
-			}
-			return nil, fmt.Errorf("CLOSED: %s", rc.Reason)
+			out = append(out, evt)
+		case <-sub.EndOfStoredEvents:
+			return out, nil
+		case reason := <-sub.ClosedReason:
+			return nil, fmt.Errorf("%s: CLOSED: %s", url, reason)
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
