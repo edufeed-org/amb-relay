@@ -11,6 +11,9 @@
       "id": "https://w3id.org/kim/schulfaecher/s1017"
     }
   ],
+  "concepts": [
+    "https://w3id.org/kim/schulfaecher/s1017"
+  ],
   "eventID": "665c5d48bf1a6045ca73ac941598dbc8e7aa4f13f8ee4d8f3d75cf22fef0838c",
   "eventKind": 30142,
   "eventPubKey": "0000000000000000000000000000000000000000000000000000000000000001",

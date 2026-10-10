@@ -194,6 +194,7 @@ func main() {
 		StopwordsSet:    stopwordsSet,
 		StopwordsList:   stopwordsList,
 		StopwordsLocale: "de",
+		TagFields:       conceptTagFields(),
 	}
 
 	// Load custom schema from BoltDB if one was stored; otherwise start from
@@ -211,6 +212,7 @@ func main() {
 		effectiveSchema = typesense30142.DefaultSchema()
 	}
 	ensureContentFields(&effectiveSchema)
+	ensureConceptsField(&effectiveSchema)
 	tsDB.Schema = &effectiveSchema
 
 	if err := tsDB.Init(); err != nil {

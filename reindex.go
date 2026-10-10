@@ -116,6 +116,7 @@ func (r *Reindexer) run() {
 		schema = &def
 	}
 	ensureContentFields(schema)
+	ensureConceptsField(schema)
 
 	// Recreate the collection with the (possibly updated) schema
 	if err := r.tsDB.RecreateCollection(schema); err != nil {
