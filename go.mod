@@ -2,7 +2,7 @@ module github.com/edufeed-org/amb-relay
 
 go 1.25
 
-replace fiatjaf.com/nostr => /home/laoc/coding/edufeed/nostrlib.worktrees/concepts-field
+replace fiatjaf.com/nostr => git.edufeed.org/edufeed/nostrlib v0.0.0-20261011192926-924588a67a13
 
 require (
 	fiatjaf.com/nostr v0.0.0
