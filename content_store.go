@@ -14,6 +14,7 @@ const (
 	ContentStatusLicenseDenied = "license_denied" // license not on allowlist; vectors-only (no text)
 	ContentStatusUnsupported   = "unsupported"    // content-type not handled
 	ContentStatusFailed        = "failed"         // fetch/extract exhausted retries
+	ContentStatusTDMReserved   = "tdm_reserved"   // TDM reservation (§44b UrhG); no text, no chunks
 )
 
 // ContentEntry is the BoltDB payload for fetched resource fulltext.
