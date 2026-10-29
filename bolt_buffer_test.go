@@ -291,9 +291,7 @@ func TestBoltBuffer_QueueAfterCloseDropsWithoutPanic(t *testing.T) {
 // goroutines while Close() runs, asserting the send never panics. Uses
 // unsignedEvent (built once, single-threaded, before any goroutine starts,
 // reused by value across all producers) rather than mkEvent/Sign — see
-// unsignedEvent's doc comment: nostrlib's Sign/SetID path has a
-// pre-existing checkptr bug that intermittently trips `go test -race` on
-// its own, unrelated to concurrency in the code under test here.
+// unsignedEvent's doc comment.
 func TestBoltBuffer_HammerCloseNoPanic(t *testing.T) {
 	w := &fakeBoltWriter{}
 	buf := NewBoltWriteBuffer(w)

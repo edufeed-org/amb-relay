@@ -94,14 +94,10 @@ func mkEvent(t *testing.T, sk nostr.SecretKey, d string, ts int64) nostr.Event {
 }
 
 // unsignedEvent builds a nostr.Event with a synthetic (non-cryptographic)
-// ID and no signature, deliberately WITHOUT calling Sign()/SetID(). Those
-// call into nostrlib's serializedHash/writeJSONString path, which has a
-// pre-existing checkptr bug that intermittently trips `go test -race`
-// (confirmed independent of anything in this bundle: pre-existing tests
-// using the ordinary Sign-based mkEvent above trip the same panic on their
-// own under -race). The buffer/Queue machinery under test never validates
-// signatures or recomputes the ID, so a synthetic event is enough — and it
-// keeps -race clean for the panic-safety/deadline properties the tests
+// ID and no signature, deliberately WITHOUT calling Sign()/SetID(). The
+// buffer/Queue machinery under test never validates signatures or
+// recomputes the ID, so a synthetic event is enough — and cheaper to build
+// than a signed one for the panic-safety/deadline properties the tests
 // below actually check.
 func unsignedEvent(sk nostr.SecretKey, d string) nostr.Event {
 	var id nostr.ID
@@ -526,9 +522,7 @@ func TestTSWriteBuffer_QueueAfterCloseDropsWithoutPanic(t *testing.T) {
 //
 // Uses unsignedEvent (built once, single-threaded, before any goroutine
 // starts, reused by value across all producers) rather than mkEvent/Sign —
-// see unsignedEvent's doc comment for why: nostrlib's Sign/SetID path has a
-// pre-existing checkptr bug that intermittently trips `go test -race` on
-// its own, unrelated to concurrency in the code under test here.
+// see unsignedEvent's doc comment for why.
 func TestTSWriteBuffer_HammerCloseNoPanic(t *testing.T) {
 	w := &fakeWriter{}
 	buf := newProjectorBuffer(w, 20, 5*time.Millisecond)
