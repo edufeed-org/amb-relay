@@ -31,6 +31,10 @@ type projectionTask struct {
 	Event   nostr.Event
 	Content *ContentEntry
 	Stamp   *stampPatch
+	// Delete != nil → flush the pending batch, then delete every doc whose
+	// eventID is *Delete. Serializing deletes behind queued upserts is what
+	// keeps an in-flight projection from re-creating a just-deleted doc.
+	Delete *nostr.ID
 }
 
 // projectorWriter is the buffer's interface to Typesense. Production wires
@@ -39,6 +43,7 @@ type projectorWriter interface {
 	Upsert(events []nostr.Event) (indexed int, errs []error)
 	Patch(event nostr.Event, content ContentEntry) error
 	PatchCommunity(docID string, communities []string) error
+	Delete(id nostr.ID) error
 }
 
 // TSWriteBuffer queues projection tasks and serializes them through a
@@ -63,6 +68,12 @@ type TSWriteBuffer struct {
 	// calling Close — see the set-then-drain ordering argument on Close)
 	// so tests can exercise deadline-abandonment without a 90s wait.
 	drainDeadline time.Duration
+
+	// skip, when set, is re-checked for every event right before it is
+	// written (ManagementStore.isBlocked in production). An event banned or
+	// deleted while its projection sat in the queue is dropped instead of
+	// re-creating the Typesense doc the ban/deletion just removed.
+	skip func(nostr.Event) bool
 }
 
 // tsDrainDeadline bounds Close()'s drain loop. A single flush can itself
@@ -78,6 +89,12 @@ const tsDrainDeadline = 90 * time.Second
 
 // newProjectorBuffer is the test-friendly constructor (writer is injected).
 func newProjectorBuffer(writer projectorWriter, batchSize int, flushInterval time.Duration) *TSWriteBuffer {
+	return newProjectorBufferWithSkip(writer, batchSize, flushInterval, nil)
+}
+
+// newProjectorBufferWithSkip is newProjectorBuffer with a write-time gate
+// (see TSWriteBuffer.skip). skip may be nil.
+func newProjectorBufferWithSkip(writer projectorWriter, batchSize int, flushInterval time.Duration, skip func(nostr.Event) bool) *TSWriteBuffer {
 	if batchSize < 1 {
 		batchSize = 1
 	}
@@ -88,6 +105,7 @@ func newProjectorBuffer(writer projectorWriter, batchSize int, flushInterval tim
 		flushInterval: flushInterval,
 		done:          make(chan struct{}),
 		drainDeadline: tsDrainDeadline,
+		skip:          skip,
 	}
 	b.wg.Add(1)
 	go b.run()
@@ -127,6 +145,18 @@ func (b *TSWriteBuffer) QueueCommunityPatch(docID string, communities []string) 
 		return
 	}
 	b.ch <- projectionTask{Stamp: &stampPatch{DocID: docID, Communities: communities}}
+}
+
+// QueueDelete enqueues a delete-by-event-id that runs after every projection
+// queued before it (the pending batch is flushed first). It backs up the
+// synchronous delete in the ban/NIP-09 path: that one reports errors to the
+// caller, this one guarantees no already-queued upsert lands afterwards.
+func (b *TSWriteBuffer) QueueDelete(id nostr.ID) {
+	if b.closed.Load() {
+		log.Printf("ts-buffer: dropping queued delete for %s, buffer closed for shutdown", id.Hex())
+		return
+	}
+	b.ch <- projectionTask{Delete: &id}
 }
 
 // Close signals shutdown and waits for the drain (bounded by
@@ -183,7 +213,19 @@ func (b *TSWriteBuffer) run() {
 	// events are durable in BoltDB and recoverable via reindex. This avoids
 	// the embed-amplification cascade that took down the host on 2026-06-11.
 	flushBatch := func() {
+		if b.skip != nil {
+			kept := batch[:0]
+			for _, ev := range batch {
+				if b.skip(ev) {
+					log.Printf("ts-buffer: dropping projection of %s, banned/deleted since it was queued", ev.ID.Hex())
+					continue
+				}
+				kept = append(kept, ev)
+			}
+			batch = kept
+		}
 		if len(batch) == 0 {
+			pendingDocIDs = make(map[string]struct{}, b.batchSize)
 			return
 		}
 		if b.upsertOnce(batch) {
@@ -198,6 +240,11 @@ func (b *TSWriteBuffer) run() {
 	// flush-before-patch ordering guarantee.
 	process := func(task projectionTask) {
 		switch {
+		case task.Delete != nil:
+			flushBatch()
+			if err := b.writer.Delete(*task.Delete); err != nil {
+				log.Printf("ts-buffer: delete %s: %v", task.Delete.Hex(), err)
+			}
 		case task.Stamp != nil:
 			// Community-patch task: only force a flush when this doc's
 			// own upsert is still pending in the batch (see
@@ -218,6 +265,9 @@ func (b *TSWriteBuffer) run() {
 			// ride without breaking the upsert-before-patch guarantee.
 			addToBatch(task.Event)
 			flushBatch()
+			if b.skip != nil && b.skip(task.Event) {
+				return // dropped by flushBatch; patching would 404 or, worse, race a re-create
+			}
 			if err := b.writer.Patch(task.Event, *task.Content); err != nil {
 				log.Printf("ts-buffer: patch %s: %v", task.Event.ID.Hex(), err)
 			}
@@ -470,6 +520,10 @@ func (p *productionWriter) Patch(event nostr.Event, content ContentEntry) error 
 	return PatchContent(p.host, p.apiKey, p.colName, docID, content)
 }
 
+func (p *productionWriter) Delete(id nostr.ID) error {
+	return p.tsDB.DeleteEvent(id)
+}
+
 func (p *productionWriter) PatchCommunity(docID string, communities []string) error {
 	if communities == nil {
 		communities = []string{}
@@ -478,12 +532,12 @@ func (p *productionWriter) PatchCommunity(docID string, communities []string) er
 }
 
 // NewTSWriteBuffer is the production constructor used by main.go.
-func NewTSWriteBuffer(tsDB *typesense30142.TSBackend, batchSize int, flushInterval time.Duration) *TSWriteBuffer {
+func NewTSWriteBuffer(tsDB *typesense30142.TSBackend, batchSize int, flushInterval time.Duration, skip func(nostr.Event) bool) *TSWriteBuffer {
 	w := &productionWriter{
 		tsDB:    tsDB,
 		host:    tsDB.Host,
 		apiKey:  tsDB.ApiKey,
 		colName: tsDB.CollectionName,
 	}
-	return newProjectorBuffer(w, batchSize, flushInterval)
+	return newProjectorBufferWithSkip(w, batchSize, flushInterval, skip)
 }

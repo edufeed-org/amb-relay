@@ -23,6 +23,8 @@ type fakeWriter struct {
 	communityPatches []communityPatchCall
 	upsertErr        []error
 	patchErr         error
+	deletes          []nostr.ID
+	ops              []string // "upsert:<d>" / "delete:<id8>" in arrival order
 }
 
 type patchCall struct {
@@ -43,6 +45,9 @@ func (f *fakeWriter) Upsert(events []nostr.Event) (int, []error) {
 		ids = append(ids, e.ID)
 	}
 	f.upsertBatches = append(f.upsertBatches, ids)
+	for _, e := range events {
+		f.ops = append(f.ops, "upsert:"+e.Tags.GetD())
+	}
 	if f.upsertErr != nil {
 		// Return the recorded errs for THIS call only, then clear.
 		errs := f.upsertErr
@@ -57,6 +62,14 @@ func (f *fakeWriter) Patch(event nostr.Event, content ContentEntry) error {
 	defer f.mu.Unlock()
 	f.patches = append(f.patches, patchCall{EventID: event.ID.Hex(), Content: content})
 	return f.patchErr
+}
+
+func (f *fakeWriter) Delete(id nostr.ID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deletes = append(f.deletes, id)
+	f.ops = append(f.ops, "delete:"+id.Hex()[:8])
+	return nil
 }
 
 func (f *fakeWriter) PatchCommunity(docID string, communities []string) error {
@@ -573,6 +586,7 @@ func (w *blockingWriter) Upsert(events []nostr.Event) (int, []error) {
 }
 func (w *blockingWriter) Patch(nostr.Event, ContentEntry) error { return nil }
 func (w *blockingWriter) PatchCommunity(string, []string) error { return nil }
+func (w *blockingWriter) Delete(nostr.ID) error                 { return nil }
 
 // TestTSWriteBuffer_DrainDeadlineHonored verifies Close() returns within
 // drainDeadline even when the writer's Upsert call never returns, and logs

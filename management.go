@@ -53,7 +53,7 @@ func (m *ManagementStore) Init(db *bbolt.DB) error {
 	}
 	m.Store = store
 	return db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range [][]byte{bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketFetchedContent, bucketNeedsRefetch, bucketProfileQueue, bucketDeletedEvents} {
+		for _, bucket := range [][]byte{bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketFetchedContent, bucketNeedsRefetch, bucketProfileQueue, bucketDeletedEvents, bucketDeletedCoords} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
@@ -342,4 +342,3 @@ func (m *ManagementStore) ListProfileQueue() ([]string, error) {
 	})
 	return result, err
 }
-

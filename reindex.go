@@ -145,6 +145,11 @@ func (r *Reindexer) run() {
 
 	// Iterate all events from BoltDB
 	for event := range r.boltDB.QueryEvents(nostr.Filter{Kinds: []nostr.Kind{30142}}, reindexMaxEvents) {
+		// The walk can outlive a concurrent ban/deletion of an event it
+		// already read; never project a blocked event (tombstone.go).
+		if r.mgmt.isBlocked(event) {
+			continue
+		}
 		r.total.Add(1)
 		eventIDHex := event.ID.Hex()
 		// Every walked version stays in the live set: it exists in BoltDB, so
@@ -334,7 +339,7 @@ func (r *Reindexer) reindexStructured(t structuredReindexTarget) {
 	}
 	total, indexed, superseded, errs := reindexStructuredEvents(
 		t.label,
-		r.boltDB.QueryEvents(nostr.Filter{Kinds: t.kinds}, reindexMaxEvents),
+		gateSeq(r.boltDB.QueryEvents(nostr.Filter{Kinds: t.kinds}, reindexMaxEvents), r.mgmt.isBlocked),
 		t.reproject,
 	)
 	r.total.Add(total)

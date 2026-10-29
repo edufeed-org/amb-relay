@@ -36,6 +36,12 @@ type BoltWriteBuffer struct {
 	// calling Close) so tests can exercise deadline-abandonment without a
 	// 45s wait.
 	drainDeadline time.Duration
+
+	// skip, when set, is checked right before each write (production:
+	// ManagementStore.isBlocked). An event banned, deleted, or covered by a
+	// NIP-09 'a' tombstone while it sat in the queue is dropped — otherwise
+	// the queued write would re-insert what the ban/deletion just removed.
+	skip func(nostr.Event) bool
 }
 
 type boltOp struct {
@@ -57,7 +63,14 @@ const boltDrainDeadline = 45 * time.Second
 // NewBoltWriteBuffer creates and starts a background buffer that processes
 // BoltDB writes sequentially. Call Close() to drain and shut down.
 func NewBoltWriteBuffer(boltDB boltEventWriter) *BoltWriteBuffer {
+	return NewBoltWriteBufferWithSkip(boltDB, nil)
+}
+
+// NewBoltWriteBufferWithSkip is NewBoltWriteBuffer with a write-time gate
+// (see BoltWriteBuffer.skip). skip may be nil.
+func NewBoltWriteBufferWithSkip(boltDB boltEventWriter, skip func(nostr.Event) bool) *BoltWriteBuffer {
 	buf := &BoltWriteBuffer{
+		skip:          skip,
 		boltDB:        boltDB,
 		ch:            make(chan boltOp, boltBufSize),
 		done:          make(chan struct{}),
@@ -168,6 +181,10 @@ func isPermanentRejection(err error) bool {
 }
 
 func (b *BoltWriteBuffer) process(op boltOp) {
+	if b.skip != nil && b.skip(op.event) {
+		log.Printf("bolt-buffer: dropping event %s, banned/deleted since it was queued", op.event.ID)
+		return
+	}
 	for attempt := range boltMaxRetries {
 		var err error
 		if op.replace {

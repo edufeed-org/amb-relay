@@ -441,7 +441,10 @@ func main() {
 			PageSize:     250,
 		}
 		hctx, hcancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		stats, verify, err := hydrate.Run(hctx, hydrateCfg, &boltDB, &boltDB, nil)
+		// Gated: a banned/deleted event whose TS doc outlived its purge must
+		// not be copied back into Bolt.
+		gated := gatedRawStore{hydrateStore: &boltDB, blocked: mgmt.isBlocked}
+		stats, verify, err := hydrate.Run(hctx, hydrateCfg, gated, gated, nil)
 		hcancel()
 		if err != nil {
 			fmt.Printf("Warning: HYDRATE_ON_START failed: %v (continuing startup)\n", err)
@@ -454,9 +457,9 @@ func main() {
 
 	// Write buffers: queue events for async persistence
 	// tsBuf deferred first so boltBuf drains before tsBuf on shutdown (LIFO)
-	tsBuf := NewTSWriteBuffer(&tsDB, 100, 500*time.Millisecond)
+	tsBuf := NewTSWriteBuffer(&tsDB, 100, 500*time.Millisecond, mgmt.isBlocked)
 	defer tsBuf.Close()
-	boltBuf := NewBoltWriteBuffer(&boltDB)
+	boltBuf := NewBoltWriteBufferWithSkip(&boltDB, mgmt.isBlocked)
 	defer boltBuf.Close()
 
 	// Content-type registry: one registration per kind the relay serves. AMB
@@ -766,7 +769,12 @@ func main() {
 		profileMgr = NewProfileManager(
 			&mgmt,
 			poolSource{pool: nostr.NewPool()},
-			func(e nostr.Event, nip05Verified bool) { storeProfile(profilesEnabled, profilesDB, e, nip05Verified) },
+			func(e nostr.Event, nip05Verified bool) {
+				if mgmt.isBlocked(e) { // fetched from elsewhere: OnEvent never saw it
+					return
+				}
+				storeProfile(profilesEnabled, profilesDB, e, nip05Verified)
+			},
 			func() []nostr.PubKey {
 				return backfillProfileCandidates(&boltDB, profileContentKinds, communityKinds, 1_000_000)
 			},
@@ -923,6 +931,9 @@ func main() {
 			},
 			validate: reg.validate,
 			store: func(e nostr.Event) {
+				if mgmt.isBlocked(e) { // fetched from elsewhere: OnEvent never saw it
+					return
+				}
 				boltBuf.Queue(e, false)
 				reg.store(e)
 				if profileMgr != nil {
@@ -1048,6 +1059,9 @@ func main() {
 		} else {
 			results = reg.fetch(filter, maxLimit)
 		}
+		// Never serve a banned/deleted event, even when a search doc
+		// outlived its purge (tombstone.go).
+		results = gateSeq(results, mgmt.isBlocked)
 		return boundedSeq(results, queryFetchBudget)
 	}
 	// COUNT has the same serial fan-out hazard as QueryStored (registry.count
@@ -1056,6 +1070,36 @@ func main() {
 	boundedRegCount := boundedCount(reg.count, queryFetchBudget)
 	relay.Count = func(ctx context.Context, filter nostr.Filter) (uint32, error) {
 		return boundedRegCount(filter)
+	}
+	// NIP-09 author deletions (khatru 'e' targets + our 'a' handling) and
+	// NIP-86 banevent share one purge path — see purge.go for the ordering
+	// (tombstone/ban first, sync delete, then a buffer-serialized backstop).
+	purger := &eventPurger{
+		bolt:        &boltDB,
+		mgmt:        &mgmt,
+		content:     contentStore,
+		reg:         reg,
+		queueDelete: tsBuf.QueueDelete,
+		beforeDelete: func(id nostr.ID) func() {
+			if stamper == nil {
+				return nil
+			}
+			var deletedShareRef *shareRef
+			for ev := range boltDB.QueryEvents(nostr.Filter{IDs: []nostr.ID{id}, Limit: 1}, 1) {
+				if ev.Kind == 16 || ev.Kind == 30222 {
+					if ref, ok := shareToRef(ev); ok {
+						r := ref
+						deletedShareRef = &r
+					}
+				}
+			}
+			if deletedShareRef == nil {
+				return nil
+			}
+			r := *deletedShareRef
+			return func() { go stamper.reconcile(r.Coord, r.Kind, r.Pubkey, r.DTag) }
+		},
+		logf: func(format string, args ...any) { fmt.Printf(format, args...) },
 	}
 	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error {
 		if !boltBuf.Queue(event, false) {
@@ -1067,6 +1111,11 @@ func main() {
 			return errors.New("error: relay is shutting down, please retry")
 		}
 		reg.store(event)
+		if event.Kind == nostr.KindDeletion {
+			// NIP-09 'a' targets: tombstone + remove versions up to the
+			// request's created_at (khatru handles the 'e' targets next).
+			purger.applyCoordDeletions(ctx, event)
+		}
 		if profileMgr != nil {
 			profileMgr.Enqueue(event.PubKey)
 		}
@@ -1109,34 +1158,7 @@ func main() {
 		}
 		return nil
 	}
-	relay.DeleteEvent = func(ctx context.Context, id nostr.ID) error {
-		var deletedShareRef *shareRef
-		if stamper != nil {
-			for ev := range boltDB.QueryEvents(nostr.Filter{IDs: []nostr.ID{id}, Limit: 1}, 1) {
-				if ev.Kind == 16 || ev.Kind == 30222 {
-					if ref, ok := shareToRef(ev); ok {
-						r := ref
-						deletedShareRef = &r
-					}
-				}
-			}
-		}
-		boltDB.DeleteEvent(id)
-		if err := mgmt.MarkEventDeleted(id.Hex()); err != nil {
-			fmt.Printf("mark deleted %s: %v\n", id.Hex(), err)
-		}
-		_ = contentStore.Delete(id.Hex()) // idempotent; safe when no content row existed
-		// The id carries no kind, so try every collection (each delete is a
-		// no-op when the id lives elsewhere).
-		err := reg.deleteEverywhere(id, func(err error) {
-			fmt.Printf("delete %s (secondary collection): %v\n", id.Hex(), err)
-		})
-		if deletedShareRef != nil {
-			r := *deletedShareRef
-			go stamper.reconcile(r.Coord, r.Kind, r.Pubkey, r.DTag)
-		}
-		return err
-	}
+	relay.DeleteEvent = purger.authorDelete
 
 	// NIP-09: a deletion request must not delete another deletion request
 	// ("publishing a deletion request event against a deletion request has
@@ -1151,14 +1173,10 @@ func main() {
 
 	// Event validation + ban check
 	relay.OnEvent = func(ctx context.Context, event nostr.Event) (reject bool, msg string) {
-		if mgmt.IsPubKeyBanned(event.PubKey) {
-			return true, "pubkey is banned"
-		}
-		if mgmt.IsEventBanned(event.ID) {
-			return true, "event is banned"
-		}
-		if mgmt.IsEventDeleted(event.ID.Hex()) {
-			return true, "blocked: event was deleted by its author"
+		// Bans, NIP-09 'e' deletions, and NIP-09 'a' tombstones (a version
+		// at or before the author's deletion request) — see tombstone.go.
+		if reason := mgmt.BlockReason(event); reason != "" {
+			return true, reason
 		}
 		if acl.IsWriteRestricted() && !admins.IsAdmin(event.PubKey) && !acl.IsWriteAllowed(event.PubKey.Hex()) {
 			return true, "restricted: pubkey not on write allowlist"
@@ -1234,16 +1252,9 @@ func main() {
 	relay.ManagementAPI.AllowPubKey = func(ctx context.Context, pubkey nostr.PubKey, reason string) error {
 		return mgmt.AllowPubKey(pubkey)
 	}
-	relay.ManagementAPI.BanEvent = func(ctx context.Context, id nostr.ID, reason string) error {
-		boltDB.DeleteEvent(id)
-		_ = contentStore.Delete(id.Hex()) // idempotent
-		if err := reg.deleteEverywhere(id, func(e error) {
-			fmt.Printf("ban-delete %s (secondary collection): %v\n", id.Hex(), e)
-		}); err != nil {
-			return err
-		}
-		return mgmt.BanEvent(id, reason)
-	}
+	// Ban first, then purge (purge.go): a purge error leaves the ban in
+	// place — the event is no longer served — and re-calling banevent retries.
+	relay.ManagementAPI.BanEvent = purger.ban
 	relay.ManagementAPI.ListBannedEvents = func(ctx context.Context) ([]nip86.IDReason, error) {
 		return mgmt.ListBannedEvents()
 	}
