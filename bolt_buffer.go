@@ -18,6 +18,11 @@ import (
 type boltEventWriter interface {
 	SaveEvent(nostr.Event) error
 	ReplaceEvent(nostr.Event) ([]nostr.Event, error)
+
+	// DeleteEvent backs process()'s post-write self-heal (see skip field
+	// doc): *boltdb.BoltBackend already implements it for purge.go's
+	// rawEventStore, and it is the same instance wired in here (main.go).
+	DeleteEvent(nostr.ID) error
 }
 
 // BoltWriteBuffer queues BoltDB writes and processes them in a background
@@ -37,10 +42,25 @@ type BoltWriteBuffer struct {
 	// 45s wait.
 	drainDeadline time.Duration
 
-	// skip, when set, is checked right before each write (production:
+	// skip, when set, is checked right before every write attempt —
+	// including each retry, not just the first (production:
 	// ManagementStore.isBlocked). An event banned, deleted, or covered by a
-	// NIP-09 'a' tombstone while it sat in the queue is dropped — otherwise
-	// the queued write would re-insert what the ban/deletion just removed.
+	// NIP-09 'a' tombstone while it sat in the queue, or while a prior
+	// attempt was sleeping in retry backoff, is dropped — otherwise the
+	// queued write would re-insert what the ban/deletion just removed:
+	// purge.go deletes synchronously as soon as the ban/tombstone is
+	// recorded, so a write that lands later re-creates a row purge.go will
+	// never be asked to remove again.
+	//
+	// Re-checking before each attempt still leaves one narrow window: the
+	// ban can be recorded in the instant between a given attempt's skip()
+	// check and that attempt's write call returning, racing purge.go's
+	// synchronous delete against a row that doesn't exist yet. process()
+	// closes that window too, by re-checking skip() once more immediately
+	// after a write succeeds and self-deleting if it now reports blocked —
+	// safe because purge.go always records the ban/tombstone strictly
+	// before it deletes, so observing skip()==true there means the row is
+	// genuinely supposed to be gone, never a stale read.
 	skip func(nostr.Event) bool
 }
 
@@ -181,11 +201,12 @@ func isPermanentRejection(err error) bool {
 }
 
 func (b *BoltWriteBuffer) process(op boltOp) {
-	if b.skip != nil && b.skip(op.event) {
-		log.Printf("bolt-buffer: dropping event %s, banned/deleted since it was queued", op.event.ID)
-		return
-	}
 	for attempt := range boltMaxRetries {
+		if b.skip != nil && b.skip(op.event) {
+			log.Printf("bolt-buffer: dropping event %s, banned/deleted since it was queued", op.event.ID)
+			return
+		}
+
 		var err error
 		if op.replace {
 			_, err = b.boltDB.ReplaceEvent(op.event)
@@ -193,6 +214,7 @@ func (b *BoltWriteBuffer) process(op boltOp) {
 			err = b.boltDB.SaveEvent(op.event)
 		}
 		if err == nil {
+			b.selfHealIfBanned(op.event)
 			return
 		}
 
@@ -200,7 +222,9 @@ func (b *BoltWriteBuffer) process(op boltOp) {
 			// Routine: khatru's pre-write duplicate check can miss under
 			// Typesense projection lag, so the event is already in Bolt by
 			// the time we get here. Success-equivalent — not worth a retry
-			// or a log line.
+			// or a log line, but the event is now confirmed present, so it
+			// still needs the same self-heal check as a normal success.
+			b.selfHealIfBanned(op.event)
 			return
 		}
 
@@ -218,6 +242,24 @@ func (b *BoltWriteBuffer) process(op boltOp) {
 		b.sleepFn(backoff)
 	}
 	log.Printf("bolt-buffer: dropping event %s after %d retries (client can re-send)", op.event.ID, boltMaxRetries)
+}
+
+// selfHealIfBanned re-checks skip() right after a write that just landed the
+// event in Bolt (a plain success, or ErrDupEvent confirming it was already
+// there). If the event is now blocked, the ban/tombstone must have been
+// recorded in the narrow window between this attempt's skip() check and the
+// write returning — purge.go's own synchronous delete can only have raced
+// against a row that didn't exist yet. Deleting it here closes that window;
+// see the skip field's doc comment for the full race argument.
+func (b *BoltWriteBuffer) selfHealIfBanned(event nostr.Event) {
+	if b.skip == nil || !b.skip(event) {
+		return
+	}
+	if err := b.boltDB.DeleteEvent(event.ID); err != nil {
+		log.Printf("bolt-buffer: self-heal delete of banned/deleted event %s failed: %v", event.ID, err)
+		return
+	}
+	log.Printf("bolt-buffer: self-healed event %s, banned/deleted while its write was in flight", event.ID)
 }
 
 // Close signals the buffer to drain (bounded by boltDrainDeadline) and waits

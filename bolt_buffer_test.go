@@ -26,6 +26,13 @@ type fakeBoltWriter struct {
 
 	saveCalls    []nostr.Event
 	replaceCalls []nostr.Event
+	deleteCalls  []nostr.ID
+
+	// onWrite, when set, runs synchronously inside SaveEvent/ReplaceEvent
+	// right after the call is recorded, before nextErr() is consulted —
+	// used to simulate a ban/deletion landing concurrently, "during" the
+	// write itself.
+	onWrite func()
 }
 
 func (f *fakeBoltWriter) nextErr() error {
@@ -43,6 +50,9 @@ func (f *fakeBoltWriter) SaveEvent(evt nostr.Event) error {
 	f.mu.Lock()
 	f.saveCalls = append(f.saveCalls, evt)
 	f.mu.Unlock()
+	if f.onWrite != nil {
+		f.onWrite()
+	}
 	return f.nextErr()
 }
 
@@ -50,7 +60,17 @@ func (f *fakeBoltWriter) ReplaceEvent(evt nostr.Event) ([]nostr.Event, error) {
 	f.mu.Lock()
 	f.replaceCalls = append(f.replaceCalls, evt)
 	f.mu.Unlock()
+	if f.onWrite != nil {
+		f.onWrite()
+	}
 	return nil, f.nextErr()
+}
+
+func (f *fakeBoltWriter) DeleteEvent(id nostr.ID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleteCalls = append(f.deleteCalls, id)
+	return nil
 }
 
 func (f *fakeBoltWriter) callCount() int {
@@ -335,6 +355,10 @@ func (w *blockingBoltWriter) ReplaceEvent(nostr.Event) ([]nostr.Event, error) {
 	return nil, nil
 }
 
+func (w *blockingBoltWriter) DeleteEvent(nostr.ID) error {
+	return nil
+}
+
 // TestBoltBuffer_DrainDeadlineHonored verifies drain() returns within
 // drainDeadline even when the writer's SaveEvent call never returns, and
 // logs the abandoned queue depth instead of hanging shutdown indefinitely.
@@ -373,5 +397,70 @@ func TestBoltBuffer_DrainDeadlineHonored(t *testing.T) {
 	}
 	if !strings.Contains(logBuf.String(), "drain deadline") {
 		t.Errorf("expected a 'drain deadline' log line, got: %q", logBuf.String())
+	}
+}
+
+// TestBoltBuffer_BanDuringRetryBackoffSkipsWrite is the regression test for
+// the review finding: skip() used to be checked only once, before the retry
+// loop started. A ban/NIP-09 deletion recorded while a transient-error retry
+// was sleeping in backoff therefore had no effect — the retry went on to
+// write the event anyway, leaking a banned/deleted row into Bolt that
+// nothing would ever purge again (purge.go's synchronous DeleteEvent had
+// already run, against a row that didn't exist yet).
+//
+// Here the write fails once (transient), the ban "lands" during the backoff
+// sleep (sleepFn flips the flag skip() reads), and the retry must see it:
+// exactly one SaveEvent call, never a second — i.e. the event never actually
+// reaches Bolt.
+func TestBoltBuffer_BanDuringRetryBackoffSkipsWrite(t *testing.T) {
+	w := &fakeBoltWriter{errs: []error{errors.New("i/o error: disk full")}}
+	var banned atomic.Bool
+	buf := &BoltWriteBuffer{
+		boltDB: w,
+		skip:   func(nostr.Event) bool { return banned.Load() },
+	}
+	buf.sleepFn = func(time.Duration) {
+		// Simulate: a ban/deletion is recorded by purge.go while this
+		// retry sits in its backoff sleep.
+		banned.Store(true)
+	}
+
+	sk := nostr.Generate()
+	evt := mkEvent(t, sk, "d1", 1_700_000_000)
+
+	buf.process(boltOp{event: evt, replace: false})
+
+	if got := w.callCount(); got != 1 {
+		t.Fatalf("expected exactly 1 write attempt (retry must be skipped once banned), got %d; event reached Bolt after being banned", got)
+	}
+}
+
+// TestBoltBuffer_SelfHealsBanLandedDuringWrite covers the narrower race the
+// per-attempt check alone cannot close: the ban lands in the instant between
+// skip()'s check and the write call returning, i.e. purge.go's synchronous
+// DeleteEvent ran against a row that didn't exist yet, and then our write
+// lands right after. process() re-checks skip() once more immediately after
+// a successful write and, if now blocked, deletes what it just wrote —
+// consistent with purge.go's ordering (ban/tombstone is always recorded
+// before any delete, so observing skip()==true here means the row is
+// genuinely supposed to be gone).
+func TestBoltBuffer_SelfHealsBanLandedDuringWrite(t *testing.T) {
+	var banned atomic.Bool
+	w := &fakeBoltWriter{onWrite: func() { banned.Store(true) }}
+	buf := &BoltWriteBuffer{
+		boltDB: w,
+		skip:   func(nostr.Event) bool { return banned.Load() },
+	}
+
+	sk := nostr.Generate()
+	evt := mkEvent(t, sk, "d1", 1_700_000_000)
+
+	buf.process(boltOp{event: evt, replace: false})
+
+	if got := w.callCount(); got != 1 {
+		t.Fatalf("expected exactly 1 SaveEvent call, got %d", got)
+	}
+	if len(w.deleteCalls) != 1 || w.deleteCalls[0] != evt.ID {
+		t.Fatalf("expected a self-heal DeleteEvent(%s) call, got %v", evt.ID, w.deleteCalls)
 	}
 }

@@ -1,9 +1,12 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
+	"time"
 
 	"fiatjaf.com/nostr"
+	"go.etcd.io/bbolt"
 )
 
 func TestEventCoord(t *testing.T) {
@@ -93,5 +96,39 @@ func TestBlockReason_BansAndDeletions(t *testing.T) {
 	}
 	if r := m.BlockReason(ev3); r != "pubkey is banned" {
 		t.Fatalf("banned-pubkey reason = %q", r)
+	}
+}
+
+// BenchmarkBlockReason measures the hot write/read-path gate check. It was
+// folded from 4 separate bbolt.View transactions (IsPubKeyBanned,
+// IsEventBanned, IsEventDeleted, CoordDeletedUntil) into 1; run with
+// -benchmem to see allocs/op alongside ns/op.
+func BenchmarkBlockReason(b *testing.B) {
+	path := filepath.Join(b.TempDir(), "bench-mgmt.db")
+	db, err := bbolt.Open(path, 0600, &bbolt.Options{Timeout: 5 * time.Second})
+	if err != nil {
+		b.Fatalf("open bbolt: %v", err)
+	}
+	b.Cleanup(func() { db.Close() })
+
+	mgmt := &ManagementStore{}
+	if err := mgmt.Init(db); err != nil {
+		b.Fatalf("mgmt init: %v", err)
+	}
+
+	sk := nostr.Generate()
+	ev := nostr.Event{
+		PubKey:    nostr.GetPublicKey(sk),
+		CreatedAt: 1_700_000_000,
+		Kind:      30142,
+		Tags:      nostr.Tags{{"d", "bench"}},
+	}
+	if err := ev.Sign(sk); err != nil {
+		b.Fatalf("sign: %v", err)
+	}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		mgmt.BlockReason(ev)
 	}
 }

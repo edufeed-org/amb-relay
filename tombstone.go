@@ -26,6 +26,19 @@ import (
 // it. Versions with created_at <= that value are rejected on re-publication.
 var bucketDeletedCoords = []byte("deleted_coords")
 
+// bucketBannedPubKeys and bucketBannedEvents mirror the private bucket names
+// relaykit.Store uses (khatru/relaykit/store.go). ManagementStore embeds that
+// Store, which creates these buckets via NewStore, and m.DB is the same
+// *bbolt.DB — so BlockReason reads them by the same literal names inside its
+// own single transaction below instead of going through IsPubKeyBanned/
+// IsEventBanned (each of which opens its own View). There is no exported
+// handle to borrow these from relaykit; if it ever renames them, this needs
+// to follow.
+var (
+	bucketBannedPubKeys = []byte("banned_pubkeys")
+	bucketBannedEvents  = []byte("banned_events")
+)
+
 // eventCoord returns the NIP-01 coordinate of a replaceable ("kind:pubkey:")
 // or addressable ("kind:pubkey:d") event. Regular events have none.
 func eventCoord(ev nostr.Event) (string, bool) {
@@ -67,22 +80,42 @@ func (m *ManagementStore) CoordDeletedUntil(coord string) (nostr.Timestamp, bool
 
 // BlockReason returns why ev must not be stored or served, or "" when it may.
 // The reasons are the exact OK-message strings OnEvent has always returned.
+//
+// All four checks (pubkey ban, event ban, NIP-09 'e' deletion, NIP-09 'a'
+// tombstone) run inside one bbolt.View transaction rather than the four
+// separate ones a naive call-through to IsPubKeyBanned/IsEventBanned/
+// IsEventDeleted/CoordDeletedUntil would open — same behavior (identical
+// bucket reads, same precedence/short-circuit order), one transaction
+// instead of four per event checked. See BenchmarkBlockReason.
 func (m *ManagementStore) BlockReason(ev nostr.Event) string {
-	if m.IsPubKeyBanned(ev.PubKey) {
-		return "pubkey is banned"
-	}
-	if m.IsEventBanned(ev.ID) {
-		return "event is banned"
-	}
-	if m.IsEventDeleted(ev.ID.Hex()) {
-		return "blocked: event was deleted by its author"
-	}
-	if coord, ok := eventCoord(ev); ok {
-		if until, ok := m.CoordDeletedUntil(coord); ok && ev.CreatedAt <= until {
-			return "blocked: event was deleted by its author"
+	coord, hasCoord := eventCoord(ev)
+	pubKeyKey := []byte(ev.PubKey.Hex())
+	idKey := []byte(ev.ID.Hex())
+
+	var reason string
+	m.DB.View(func(tx *bbolt.Tx) error {
+		if tx.Bucket(bucketBannedPubKeys).Get(pubKeyKey) != nil {
+			reason = "pubkey is banned"
+			return nil
 		}
-	}
-	return ""
+		if tx.Bucket(bucketBannedEvents).Get(idKey) != nil {
+			reason = "event is banned"
+			return nil
+		}
+		if tx.Bucket(bucketDeletedEvents).Get(idKey) != nil {
+			reason = "blocked: event was deleted by its author"
+			return nil
+		}
+		if hasCoord {
+			if v := tx.Bucket(bucketDeletedCoords).Get([]byte(coord)); len(v) == 8 {
+				if until := nostr.Timestamp(binary.BigEndian.Uint64(v)); ev.CreatedAt <= until {
+					reason = "blocked: event was deleted by its author"
+				}
+			}
+		}
+		return nil
+	})
+	return reason
 }
 
 // isBlocked is BlockReason as a predicate, the shape the write buffers take.
