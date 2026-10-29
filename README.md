@@ -92,7 +92,9 @@ validator runs:
 
 1. Author pubkey is banned → `pubkey is banned`
 2. Event id is banned → `event is banned`
-3. Event was previously deleted by its author → `blocked: event was deleted by its author`
+3. Event was previously deleted by its author — by id (`e`), or as a version of
+   an addressable/replaceable coordinate at or before the author's `a`-tag
+   deletion request → `blocked: event was deleted by its author`
 4. Writes are restricted and the author is neither an admin nor write-allowlisted
    → `restricted: pubkey not on write allowlist` (see [Access control](#access-control--authentication))
 5. The registered validator for the event's kind
@@ -109,6 +111,38 @@ deletion request may not target another deletion request (per NIP-09,
 Deleted ids are recorded so the exact event cannot be re-published. Deletion
 requests are themselves stored and served — NIP-09 says relays SHOULD continue
 to publish them — filterable by `kinds`, `authors`, `ids`, `#e`, `#a` and `#k`.
+
+What each reference does:
+
+- **`e` (event id)** removes exactly that event — from BoltDB, the ContentStore
+  and every Typesense collection — and blocks re-publication of that id. Search
+  documents of addressable kinds are keyed by coordinate (`<pubkey>:<d>`, or
+  `<kind>:<pubkey>:<d>` in multi-kind collections), but every document carries
+  its `eventID`, and deletion matches on that, so an `e` reference reaches an
+  addressable resource too.
+- **`a` (`<kind>:<pubkey>:<d>`)** removes every stored version of that
+  coordinate whose `created_at` is at or before the deletion request's, and
+  records a tombstone for the coordinate: a later re-publication of any version
+  with `created_at` ≤ the request's is rejected, while a newer version is
+  accepted (the author has re-published the resource). Only coordinates whose
+  pubkey is the deletion request's author count; others are ignored.
+
+### Removing an addressable resource (operators)
+
+| Who | How | Effect |
+|---|---|---|
+| The author | NIP-09 kind 5 with `a=30142:<pubkey>:<d>` (see [nak CLI](#nak-cli)) | All versions up to the request's `created_at` removed everywhere; older/equal versions can never come back; a newer version is accepted. The preferred way: it is signed by the author and propagates to other relays. |
+| An admin | NIP-86 `banevent <event-id>` | That event id is put on the ban list, then removed from BoltDB, the ContentStore and every Typesense collection. Its re-publication is rejected. A *different* version of the same coordinate (another id) is not covered — ban that id too, or ban the pubkey. |
+| An admin | NIP-86 `banpubkey <pubkey>` | Everything from the pubkey is rejected on write and is no longer served, but stored events are **not** purged; follow up with `banevent` per id to free the storage. |
+
+The ban/tombstone is recorded before anything is deleted, and both write
+buffers (BoltDB and the AMB Typesense projection), reindex, startup hydration
+and the read path re-check it. A projection that was already queued when the
+ban landed therefore cannot re-create the document, and a search document that
+outlived its purge is never served. `banevent` is idempotent: re-calling it for
+an already-banned id retries the purge (e.g. after a Typesense error).
+
+To list what an admin has banned: `nak admin --sec <admin-nsec> listbannedevents <relay-host>`.
 
 ### Canonical queries
 
@@ -617,10 +651,10 @@ any granted via `grantadmin`) are authorized.
 | Method | Description |
 |--------|-------------|
 | `supportedmethods` | Lists the *typed* NIP-86 handlers this relay implements. The custom methods documented below are dispatched through khatru's generic handler and appear only as `generic` — they are **not** enumerated here |
-| `banpubkey` | Ban a pubkey from publishing |
+| `banpubkey` | Ban a pubkey: rejects its new events and stops serving its stored ones (they are not purged from storage) |
 | `listbannedpubkeys` | List all banned pubkeys |
 | `allowpubkey` | Remove a pubkey ban |
-| `banevent` | Delete an event by ID and block resubmission. Removes from BoltDB, ContentStore, and Typesense, then records the id on the ban list so the same event cannot be re-published. |
+| `banevent` | Ban an event id, then delete it from BoltDB, the ContentStore and every Typesense collection (addressable docs included — they are matched by `eventID`). The same id can never be re-published or served. Idempotent; re-calling retries the purge. See [Removing an addressable resource](#removing-an-addressable-resource-operators) |
 | `listbannedevents` | List all banned event IDs |
 | `allowevent` | Remove an event ban (does **not** restore the event — the data is gone; only clears the resubmission block) |
 | `grantadmin` | Grant NIP-86 access to a pubkey, persisted in BoltDB. Empty `methods` grants full access |
