@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"sync"
 	"testing"
+	"time"
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/boltdb"
@@ -296,5 +298,137 @@ func TestBackfillCoordTombstones_CancelledContextDoesNotSetMarker(t *testing.T) 
 	}
 	if !h.inBolt(v1.ID) {
 		t.Fatal("a run cancelled before processing any event must not have purged v1")
+	}
+}
+
+// TestApplyCoordDeletions_CtxCancelledBetweenCoordinatesStopsEarly exercises
+// the per-coordinate ctx check added to applyCoordDeletions (purge.go): a
+// single kind-5 event with two same-author 'a' tags, where cancellation is
+// triggered, deterministically and without any sleep/timing, as a side
+// effect of finishing the FIRST coordinate's purge. The second coordinate
+// must never be reached.
+func TestApplyCoordDeletions_CtxCancelledBetweenCoordinatesStopsEarly(t *testing.T) {
+	db := openTestBolt(t)
+	mgmt := &ManagementStore{}
+	if err := mgmt.Init(db.DB); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelOnDelete := contentType{
+		kinds:    []nostr.Kind{30142},
+		validate: func(nostr.Event) (bool, string) { return false, "" },
+		store:    func(nostr.Event) {},
+		fetch:    func(nostr.Filter, int) iter.Seq[nostr.Event] { return func(func(nostr.Event) bool) {} },
+		count:    func(nostr.Filter) (uint32, error) { return 0, nil },
+		deleteID: func(nostr.ID) error { cancel(); return nil },
+	}
+	reg := newRegistry(cancelOnDelete, deletionContentType(db, map[nostr.Kind]bool{30142: true}))
+	purger := &eventPurger{bolt: db, mgmt: mgmt, content: &ContentStore{DB: db.DB}, reg: reg, logf: t.Logf}
+
+	sk := nostr.Generate()
+	v0 := signedEvent(t, sk, 30142, 1000, nostr.Tags{{"d", "res-0"}})
+	v1 := signedEvent(t, sk, 30142, 1000, nostr.Tags{{"d", "res-1"}})
+	for _, ev := range []nostr.Event{v0, v1} {
+		if err := db.SaveEvent(ev); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+	}
+	del := signedEvent(t, sk, nostr.KindDeletion, 2000, nostr.Tags{
+		{"a", coordOf(v0)}, {"a", coordOf(v1)}, {"k", "30142"},
+	})
+
+	tombstoned, purged, errs := purger.applyCoordDeletions(ctx, del)
+	if tombstoned != 1 || purged != 1 || errs != 0 {
+		t.Fatalf("got (tombstoned=%d, purged=%d, errs=%d), want exactly the first coordinate processed (1, 1, 0) before cancellation stopped the loop",
+			tombstoned, purged, errs)
+	}
+	if _, ok := mgmt.CoordDeletedUntil(coordOf(v0)); !ok {
+		t.Fatal("the first coordinate should have been tombstoned before cancellation took effect")
+	}
+	if _, ok := mgmt.CoordDeletedUntil(coordOf(v1)); ok {
+		t.Fatal("the second coordinate must not have been reached after cancellation")
+	}
+}
+
+// TestBackfillCoordTombstones_CancelMidRunJoinsPromptlyAndSkipsMarker mirrors
+// main.go's goroutine + WaitGroup join pattern: the backfill runs in its own
+// goroutine, the test cancels its context while that goroutine is
+// synchronously blocked mid-purge (via a channel handshake, not a sleep —
+// deterministic), and then joins the goroutine the same bounded way main.go
+// does. The goroutine must exit, the join must complete well within the
+// bound, and the marker must not be set.
+func TestBackfillCoordTombstones_CancelMidRunJoinsPromptlyAndSkipsMarker(t *testing.T) {
+	db := openTestBolt(t)
+	mgmt := &ManagementStore{}
+	if err := mgmt.Init(db.DB); err != nil {
+		t.Fatal(err)
+	}
+
+	midPurge := make(chan struct{})
+	proceed := make(chan struct{})
+	var once sync.Once
+	blockOnFirstDelete := contentType{
+		kinds:    []nostr.Kind{30142},
+		validate: func(nostr.Event) (bool, string) { return false, "" },
+		store:    func(nostr.Event) {},
+		fetch:    func(nostr.Filter, int) iter.Seq[nostr.Event] { return func(func(nostr.Event) bool) {} },
+		count:    func(nostr.Filter) (uint32, error) { return 0, nil },
+		deleteID: func(nostr.ID) error {
+			once.Do(func() { close(midPurge) })
+			<-proceed
+			return nil
+		},
+	}
+	reg := newRegistry(blockOnFirstDelete, deletionContentType(db, map[nostr.Kind]bool{30142: true}))
+	purger := &eventPurger{bolt: db, mgmt: mgmt, content: &ContentStore{DB: db.DB}, reg: reg, logf: t.Logf}
+
+	sk := nostr.Generate()
+	tags := nostr.Tags{{"d", "res"}}
+	v1 := signedEvent(t, sk, 30142, 1000, tags)
+	del := signedEvent(t, sk, nostr.KindDeletion, 2000, nostr.Tags{{"a", coordOf(v1)}, {"k", "30142"}})
+	for _, ev := range []nostr.Event{v1, del} {
+		if err := db.SaveEvent(ev); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	var runErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runErr = backfillCoordTombstones(ctx, db, mgmt, purger)
+	}()
+
+	select {
+	case <-midPurge:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backfill never reached the purge step")
+	}
+	cancel()       // cancel while the goroutine is synchronously blocked mid-purge
+	close(proceed) // let it continue; it must observe the cancellation and stop
+
+	joined := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(joined)
+	}()
+	select {
+	case <-joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backfill goroutine did not exit/join within 5s of cancellation")
+	}
+
+	if runErr == nil {
+		t.Fatal("a run cancelled mid-flight must return an error")
+	}
+	done, derr := mgmt.MigrationDone(migrationCoordTombstonesV1)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	if done {
+		t.Fatal("marker must not be set when the run was cancelled mid-flight")
 	}
 }

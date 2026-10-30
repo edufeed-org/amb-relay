@@ -163,11 +163,24 @@ func sameAuthorCoords(del nostr.Event) []coordRef {
 // run is clean enough to mark complete. Live callers (main.go's StoreEvent)
 // ignore the return values; errors still reach the operator via p.log either
 // way.
+//
+// ctx is checked between coordinates (cheap: one select per 'a' tag), not
+// just once per call, so a caller batching many deletions — the backfill —
+// can be interrupted without first finishing every coordinate of whichever
+// single kind-5 event it happens to be on. A deletion with only one 'a' tag
+// behaves exactly as before. The backfill treats an early return here as
+// incomplete and does not mark itself done; see backfillCoordTombstones's
+// trailing ctx check for why a per-coordinate check alone isn't sufficient.
 func (p *eventPurger) applyCoordDeletions(ctx context.Context, del nostr.Event) (tombstoned, purged, errs int) {
 	if del.Kind != nostr.KindDeletion {
 		return 0, 0, 0
 	}
 	for _, c := range sameAuthorCoords(del) {
+		select {
+		case <-ctx.Done():
+			return tombstoned, purged, errs
+		default:
+		}
 		if err := p.mgmt.MarkCoordDeleted(c.raw, del.CreatedAt); err != nil {
 			p.log("tombstone %s: %v\n", c.raw, err)
 			errs++

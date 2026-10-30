@@ -14,6 +14,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -1747,18 +1748,48 @@ func main() {
 	// background rather than blocking startup — launched here, concurrently
 	// with (not before) the relay accepting connections below. Correctness
 	// doesn't depend on ordering: the read/write gate protects a coordinate
-	// the instant its tombstone is written, same as for a live deletion. The
-	// backfill context is cancelled on the same SIGINT/SIGTERM that triggers
-	// graceful shutdown, so a run in flight aborts instead of racing the
-	// drain below; a cancelled, errored, or mismatched run never records its
-	// completion marker and is retried whole on the next startup. See
-	// coord_tombstone_backfill.go; COORD_TOMBSTONE_BACKFILL_FORCE=true forces
-	// a re-run even if the marker says it already completed.
+	// the instant its tombstone is written, same as for a live deletion.
+	//
+	// backfillWG is joined explicitly below, in a defer registered after
+	// this point — Go defers run LIFO, and nothing else is deferred later in
+	// main(), so this is the FIRST deferred call to run, ahead of every
+	// store-teardown defer registered earlier (boltDB.Close, tsBuf.Close,
+	// boltBuf.Close, …). Without that explicit join, a write the backfill
+	// goroutine is still mid-way through could race those closes; today
+	// that race only happens to be safe incidentally, via bbolt's own
+	// locking (Close blocks for in-flight transactions). The join is
+	// bounded (10s) so a stuck backfill cannot hang shutdown forever — it
+	// logs a warning and the stores close anyway if that's exceeded.
+	//
+	// The backfill's ctx is cancelled on the same SIGINT/SIGTERM that
+	// triggers graceful shutdown, and explicitly in the join defer too (for
+	// a non-signal shutdown path, e.g. a listener error), so a run in
+	// flight aborts instead of racing the drain below; a cancelled,
+	// errored, or mismatched run never records its completion marker and is
+	// retried whole on the next startup. See coord_tombstone_backfill.go;
+	// COORD_TOMBSTONE_BACKFILL_FORCE=true forces a re-run even if the
+	// marker says it already completed.
 	backfillCtx, cancelBackfill := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancelBackfill()
+	var backfillWG sync.WaitGroup
+	backfillWG.Add(1)
 	go func() {
+		defer backfillWG.Done()
 		if err := backfillCoordTombstones(backfillCtx, &boltDB, &mgmt, purger); err != nil {
 			fmt.Printf("Warning: coord tombstone backfill failed: %v (will retry next startup)\n", err)
+		}
+	}()
+	defer func() {
+		cancelBackfill() // no-op if a shutdown signal already did this
+		const backfillJoinTimeout = 10 * time.Second
+		joined := make(chan struct{})
+		go func() {
+			backfillWG.Wait()
+			close(joined)
+		}()
+		select {
+		case <-joined:
+		case <-time.After(backfillJoinTimeout):
+			fmt.Printf("Warning: coord tombstone backfill did not exit within %s of shutdown; closing stores anyway\n", backfillJoinTimeout)
 		}
 	}()
 

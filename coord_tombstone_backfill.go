@@ -137,6 +137,18 @@ func backfillCoordTombstones(ctx context.Context, bolt backfillEventStore, mgmt 
 		return fmt.Errorf("coord tombstone backfill: %d tombstone/purge error(s) across %d kind-5 event(s) scanned — not marking complete, will retry next startup", errs, scanned)
 	}
 
+	// applyCoordDeletions also checks ctx between coordinates (purge.go), so
+	// a cancellation landing mid-way through the LAST event's coordinates
+	// would otherwise return here with errs==0 and no further per-event
+	// check left to catch it — the loop above only checks ctx before each
+	// event, not after the last one. This closes that gap: no cancellation
+	// anywhere in the run, by either check, reaches the marker write.
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("coord tombstone backfill: cancelled after %d/%d kind-5 event(s) scanned: %w", scanned, len(dels), ctx.Err())
+	default:
+	}
+
 	if err := mgmt.MarkMigrationDone(migrationCoordTombstonesV1); err != nil {
 		return fmt.Errorf("coord tombstone backfill: record marker: %w", err)
 	}
