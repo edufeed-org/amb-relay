@@ -197,3 +197,9 @@ func assertTagFieldsDeclared(t *testing.T, schemaName string, s typesense30142.C
 		}
 	}
 }
+
+// The AMB backend aliases the expander's synthetic tag keys onto `concepts`;
+// the schema must declare that field or every expanded query fails.
+func TestAMBConceptTagFieldsDeclared(t *testing.T) {
+	assertTagFieldsDeclared(t, "DefaultSchema", typesense30142.DefaultSchema(), conceptTagFields())
+}

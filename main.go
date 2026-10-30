@@ -195,6 +195,7 @@ func main() {
 		StopwordsSet:    stopwordsSet,
 		StopwordsList:   stopwordsList,
 		StopwordsLocale: "de",
+		TagFields:       conceptTagFields(),
 	}
 
 	// Load custom schema from BoltDB if one was stored; otherwise start from
@@ -212,6 +213,7 @@ func main() {
 		effectiveSchema = typesense30142.DefaultSchema()
 	}
 	ensureContentFields(&effectiveSchema)
+	ensureConceptsField(&effectiveSchema)
 	tsDB.Schema = &effectiveSchema
 
 	if err := tsDB.Init(); err != nil {
@@ -1074,8 +1076,20 @@ func main() {
 		}
 	}
 
+	// Concept filter expansion through trusted NIP-VOCAB mappings (expand.go).
+	expandRelays, expandDefaults, expandRefresh, expandDebug := conceptExpansionConfig(os.Getenv)
+	expandReg := NewMappingRegistry(poolMappingSource{pool: nostr.NewPool()}, expandRelays, expandDefaults)
+	expandReg.Init()
+	expandReg.StartRefreshLoop(expandRefresh)
+	defer expandReg.Stop()
+	fmt.Printf("Concept expansion: %d default concordance(s) from %v, refresh every %s\n",
+		len(expandDefaults.Concordances), expandRelays, expandRefresh)
+
 	// Dual-write eventstore wiring (query from Typesense, persist to both)
 	relay.QueryStored = func(ctx context.Context, filter nostr.Filter) iter.Seq[nostr.Event] {
+		if !khatru.IsNegentropySession(ctx) { // negentropy syncs the stored set as-is
+			filter = expandConceptFilters(ctx, filter, expandReg, expandDebug)
+		}
 		maxLimit := 250
 		if khatru.IsNegentropySession(ctx) {
 			maxLimit = 250 * 20
@@ -1106,7 +1120,7 @@ func main() {
 	// the same budget wrapper. See boundedCount (query_budget.go).
 	boundedRegCount := boundedCount(reg.count, queryFetchBudget)
 	relay.Count = func(ctx context.Context, filter nostr.Filter) (uint32, error) {
-		return boundedRegCount(filter)
+		return boundedRegCount(expandConceptFilters(ctx, filter, expandReg, expandDebug))
 	}
 	// NIP-09 author deletions (khatru 'e' targets + our 'a' handling) and
 	// NIP-86 banevent share one purge path — see purge.go for the ordering

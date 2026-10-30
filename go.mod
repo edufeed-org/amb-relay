@@ -8,6 +8,7 @@ require (
 	fiatjaf.com/nostr v0.0.0
 	github.com/joho/godotenv v1.5.1
 	go.etcd.io/bbolt v1.4.2
+	golang.org/x/text v0.26.0
 )
 
 require (
