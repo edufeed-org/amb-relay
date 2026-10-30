@@ -22,6 +22,7 @@ var (
 	bucketNeedsRefetch    = []byte("needs_refetch")   // event_ids flagged for re-ingestion
 	bucketProfileQueue    = []byte("profile_queue")   // author pubkeys awaiting kind-0 fetch
 	bucketDeletedEvents   = []byte("deleted_events")  // NIP-09-deleted event ids; exact re-publication is rejected
+	bucketMigrations      = []byte("migrations")      // one-shot startup backfill markers (coord_tombstone_backfill.go)
 )
 
 const schemaKey = "current"
@@ -53,7 +54,7 @@ func (m *ManagementStore) Init(db *bbolt.DB) error {
 	}
 	m.Store = store
 	return db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range [][]byte{bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketFetchedContent, bucketNeedsRefetch, bucketProfileQueue, bucketDeletedEvents, bucketDeletedCoords} {
+		for _, bucket := range [][]byte{bucketTypesenseSchema, bucketSemanticConfig, bucketAccessControl, bucketWriteAllowlist, bucketReadAllowlist, bucketListReferences, bucketFetchedContent, bucketNeedsRefetch, bucketProfileQueue, bucketDeletedEvents, bucketDeletedCoords, bucketMigrations} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
@@ -341,4 +342,25 @@ func (m *ManagementStore) ListProfileQueue() ([]string, error) {
 		})
 	})
 	return result, err
+}
+
+// MigrationDone reports whether the one-shot startup migration identified by
+// key has already completed successfully (see coord_tombstone_backfill.go).
+func (m *ManagementStore) MigrationDone(key string) (bool, error) {
+	var done bool
+	err := m.DB.View(func(tx *bbolt.Tx) error {
+		done = tx.Bucket(bucketMigrations).Get([]byte(key)) != nil
+		return nil
+	})
+	return done, err
+}
+
+// MarkMigrationDone records that the one-shot startup migration identified
+// by key has completed. Callers should only call this after the migration's
+// full work has succeeded — the marker is what makes the migration run
+// exactly once across restarts.
+func (m *ManagementStore) MarkMigrationDone(key string) error {
+	return m.DB.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketMigrations).Put([]byte(key), []byte{1})
+	})
 }

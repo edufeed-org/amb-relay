@@ -127,6 +127,22 @@ What each reference does:
   accepted (the author has re-published the resource). Only coordinates whose
   pubkey is the deletion request's author count; others are ignored.
 
+Per-coordinate tombstones (the `a`-tag case above) were added after the relay
+had already been accepting kind-5 deletions for a while, so older deletion
+requests never ran the tombstoning logic — an older version of their
+coordinate could in theory still be re-published. A one-shot startup backfill
+closes that gap: after the stores open (before the listener does), every
+stored kind-5 is replayed through the exact same code path a live deletion
+takes — tombstone the coordinate, then purge every stored version at or
+before the deletion's `created_at`. It is not a separate, gentler pass; it
+purges exactly as a live `a`-tag deletion would, which is what NIP-09 ("relays
+SHOULD delete all versions") calls for either way. It runs once per database
+(a marker is recorded in BoltDB on success) and logs how many kind-5 events it
+scanned and how many tombstones it applied; set
+`COORD_TOMBSTONE_BACKFILL_FORCE=true` to force it to run again. A failed scan
+(e.g. a BoltDB error) does not record the marker, so it is retried on the next
+startup.
+
 ### Removing an addressable resource (operators)
 
 | Who | How | Effect |
@@ -217,6 +233,7 @@ unset falls back to the code default shown here.
 | `DB_PATH` | BoltDB file for raw event persistence, ban lists and the refetch queue | `./data/relay.db` |
 | `ADMIN_PUBKEYS` | Comma-separated hex pubkeys with NIP-86 management access, in addition to `PUBKEY` | empty |
 | `HYDRATE_ON_START` | When `true`, run an in-process Typesense→BoltDB reconciliation pass before the listener opens. Scans the **AMB collection only**. See [Recovering from BoltDB ↔ Typesense skew](#recovering-from-boltdb--typesense-skew) | `false` |
+| `COORD_TOMBSTONE_BACKFILL_FORCE` | When `true`, re-run the one-shot `a`-tag coordinate-tombstone backfill even if its marker says it already completed. See [Deletions](#deletions) | `false` |
 | `QUERY_FETCH_TIMEOUT_MS` | Budget for a single REQ's search fetch, and identically a NIP-45 COUNT. See below | `20000` |
 
 `QUERY_FETCH_TIMEOUT_MS` hardens against a degraded Typesense. A filter with no

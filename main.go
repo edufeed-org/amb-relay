@@ -1126,6 +1126,19 @@ func main() {
 		},
 		logf: func(format string, args ...any) { fmt.Printf(format, args...) },
 	}
+
+	// One-shot startup backfill: kind-5 deletions stored before per-coordinate
+	// tombstones existed (tombstone.go) never ran applyCoordDeletions, so an
+	// older version of their coordinate could still be re-published. Runs
+	// once per database (marker in mgmt, checked/set inside); fail-open like
+	// HYDRATE_ON_START above — a scan error is logged and retried on the next
+	// startup rather than blocking the relay from coming up. See
+	// coord_tombstone_backfill.go; COORD_TOMBSTONE_BACKFILL_FORCE=true forces
+	// a re-run.
+	if err := backfillCoordTombstones(context.Background(), &boltDB, &mgmt, purger); err != nil {
+		fmt.Printf("Warning: coord tombstone backfill failed: %v (will retry next startup)\n", err)
+	}
+
 	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error {
 		if !boltBuf.Queue(event, false) {
 			// Buffer is closed for shutdown: nothing was enqueued, so no OK
