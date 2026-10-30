@@ -249,6 +249,8 @@ relay-side indexes. Neither accepts client writes.
 | `PROFILE_RELAYS` | Comma-separated relays the kind-0 fetcher pulls from | `wss://relay.edufeed.org` |
 | `PROFILE_FALLBACK_RELAYS` | Queried only for authors whose kind-0 was not found on `PROFILE_RELAYS`, so a profile living on a non-standard relay is still indexed. Set empty to disable | `wss://purplepag.es,wss://relay.damus.io,wss://relay.nostr.band` |
 | `PROFILE_REFRESH_INTERVAL` | How often to re-fetch known authors' kind-0 (Go duration) | `6h` |
+| `PROFILE_NIP05_DIRECTORIES` | NIP-05 directories whose members are indexed even before they publish here: domains (`edufeed.org`) or full `nostr.json` URLs, comma-separated | (none) |
+| `PROFILE_NIP05_DIRECTORY_INTERVAL` | How often to re-read those directories for new members (Go duration) | `15m` |
 | `COMMUNITY_RELAYS` | Relays the community registry fetches kind-10222 definitions and kind-30000 member lists from. Active only with `COMMUNITY_SHARES_ENABLED=true` | `wss://relay.edufeed.org` |
 | `COMMUNITY_REFRESH_INTERVAL` | How often to re-resolve known communities (Go duration) | `6h` |
 

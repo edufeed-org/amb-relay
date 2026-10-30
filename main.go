@@ -766,6 +766,14 @@ func main() {
 				fmt.Printf("profile: bad PROFILE_REFRESH_INTERVAL %q, using %s\n", raw, refreshInterval)
 			}
 		}
+		// NIP-05 directories (PROFILE_NIP05_DIRECTORIES) add the deployment's
+		// members to the candidates, so they are searchable before they have
+		// published anything here.
+		var directory *NIP05Directory
+		directoryURLs := parseNIP05DirectoryURLs(os.Getenv("PROFILE_NIP05_DIRECTORIES"))
+		if len(directoryURLs) > 0 {
+			directory = NewNIP05Directory(directoryURLs, fetchNIP05Directory)
+		}
 		profileMgr = NewProfileManager(
 			&mgmt,
 			poolSource{pool: nostr.NewPool()},
@@ -776,7 +784,11 @@ func main() {
 				storeProfile(profilesEnabled, profilesDB, e, nip05Verified)
 			},
 			func() []nostr.PubKey {
-				return backfillProfileCandidates(&boltDB, profileContentKinds, communityKinds, 1_000_000)
+				candidates := backfillProfileCandidates(&boltDB, profileContentKinds, communityKinds, 1_000_000)
+				if directory != nil {
+					candidates = unionPubkeys(candidates, directory.Members())
+				}
+				return candidates
 			},
 			verifyNIP05,
 			profileRelays,
@@ -789,6 +801,19 @@ func main() {
 		profileMgr.StartRefreshLoop(refreshInterval)
 		defer profileMgr.Stop()
 		fmt.Printf("Profiles: fetching from %v (fallback %v), refresh every %s\n", profileRelays, fallbackRelays, refreshInterval)
+		if directory != nil {
+			directoryInterval := 15 * time.Minute
+			if raw := os.Getenv("PROFILE_NIP05_DIRECTORY_INTERVAL"); raw != "" {
+				if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+					directoryInterval = d
+				} else {
+					fmt.Printf("profile: bad PROFILE_NIP05_DIRECTORY_INTERVAL %q, using %s\n", raw, directoryInterval)
+				}
+			}
+			directory.Start(profileMgr.Enqueue, directoryInterval)
+			defer directory.Stop()
+			fmt.Printf("Profiles: seeding members of %v every %s\n", directoryURLs, directoryInterval)
+		}
 	}
 
 	var communityRelays []string
