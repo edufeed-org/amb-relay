@@ -131,17 +131,36 @@ Per-coordinate tombstones (the `a`-tag case above) were added after the relay
 had already been accepting kind-5 deletions for a while, so older deletion
 requests never ran the tombstoning logic — an older version of their
 coordinate could in theory still be re-published. A one-shot startup backfill
-closes that gap: after the stores open (before the listener does), every
-stored kind-5 is replayed through the exact same code path a live deletion
-takes — tombstone the coordinate, then purge every stored version at or
-before the deletion's `created_at`. It is not a separate, gentler pass; it
-purges exactly as a live `a`-tag deletion would, which is what NIP-09 ("relays
-SHOULD delete all versions") calls for either way. It runs once per database
-(a marker is recorded in BoltDB on success) and logs how many kind-5 events it
-scanned and how many tombstones it applied; set
-`COORD_TOMBSTONE_BACKFILL_FORCE=true` to force it to run again. A failed scan
-(e.g. a BoltDB error) does not record the marker, so it is retried on the next
-startup.
+closes that gap: every stored kind-5 is replayed through the exact same code
+path a live deletion takes — tombstone the coordinate, then purge every
+stored version at or before the deletion's `created_at`. It is not a
+separate, gentler pass; it purges exactly as a live `a`-tag deletion would,
+which is what NIP-09 ("relays SHOULD delete all versions") calls for either
+way.
+
+It runs in the background, **concurrently with** the relay serving traffic
+rather than before the listener opens — a production corpus can hold
+thousands of kind-5 events, each costing a Bolt write plus Typesense
+lookups/deletes, so blocking startup on it would delay the relay coming up by
+an unbounded amount. This is safe: the same read/write gate that enforces an
+existing tombstone also enforces one the backfill just wrote, so a coordinate
+is protected the instant its tombstone lands, same as for a live deletion. It
+logs progress every 100 kind-5 events scanned (count scanned/tombstoned/
+purged so far) plus a final summary, and runs once per database — a marker
+is recorded in BoltDB only after a full scan completes with zero tombstone or
+purge errors. Set `COORD_TOMBSTONE_BACKFILL_FORCE=true` to force it to run
+again regardless of the marker.
+
+The marker is deliberately conservative about what counts as "complete":
+BoltDB's query path can swallow a read error internally and simply yield
+fewer events, which would otherwise look identical to "that's all of them" —
+so the backfill cross-checks the number of kind-5 events it drained against
+an independent count and refuses to mark success on a mismatch. A Typesense
+purge error, a tombstone-write error, or the relay shutting down mid-scan
+(SIGINT/SIGTERM cancels the backfill's context) are all treated the same
+way: no marker, logged as a warning, retried from scratch on the next
+startup. Every write it performs is safe to repeat, so a retried scan after a
+partial previous attempt is not a problem.
 
 ### Removing an addressable resource (operators)
 

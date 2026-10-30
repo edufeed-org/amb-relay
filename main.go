@@ -1127,18 +1127,6 @@ func main() {
 		logf: func(format string, args ...any) { fmt.Printf(format, args...) },
 	}
 
-	// One-shot startup backfill: kind-5 deletions stored before per-coordinate
-	// tombstones existed (tombstone.go) never ran applyCoordDeletions, so an
-	// older version of their coordinate could still be re-published. Runs
-	// once per database (marker in mgmt, checked/set inside); fail-open like
-	// HYDRATE_ON_START above — a scan error is logged and retried on the next
-	// startup rather than blocking the relay from coming up. See
-	// coord_tombstone_backfill.go; COORD_TOMBSTONE_BACKFILL_FORCE=true forces
-	// a re-run.
-	if err := backfillCoordTombstones(context.Background(), &boltDB, &mgmt, purger); err != nil {
-		fmt.Printf("Warning: coord tombstone backfill failed: %v (will retry next startup)\n", err)
-	}
-
 	relay.StoreEvent = func(ctx context.Context, event nostr.Event) error {
 		if !boltBuf.Queue(event, false) {
 			// Buffer is closed for shutdown: nothing was enqueued, so no OK
@@ -1750,6 +1738,29 @@ func main() {
 		port = "3334"
 	}
 	fmt.Printf("running on :%s\n", port)
+
+	// One-shot startup backfill: kind-5 deletions stored before per-coordinate
+	// tombstones existed (tombstone.go) never ran applyCoordDeletions, so an
+	// older version of their coordinate could still be re-published. A
+	// production corpus can hold thousands of kind-5 events, each costing a
+	// Bolt write plus Typesense lookups/deletes, so this runs in the
+	// background rather than blocking startup — launched here, concurrently
+	// with (not before) the relay accepting connections below. Correctness
+	// doesn't depend on ordering: the read/write gate protects a coordinate
+	// the instant its tombstone is written, same as for a live deletion. The
+	// backfill context is cancelled on the same SIGINT/SIGTERM that triggers
+	// graceful shutdown, so a run in flight aborts instead of racing the
+	// drain below; a cancelled, errored, or mismatched run never records its
+	// completion marker and is retried whole on the next startup. See
+	// coord_tombstone_backfill.go; COORD_TOMBSTONE_BACKFILL_FORCE=true forces
+	// a re-run even if the marker says it already completed.
+	backfillCtx, cancelBackfill := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancelBackfill()
+	go func() {
+		if err := backfillCoordTombstones(backfillCtx, &boltDB, &mgmt, purger); err != nil {
+			fmt.Printf("Warning: coord tombstone backfill failed: %v (will retry next startup)\n", err)
+		}
+	}()
 
 	// Graceful shutdown: SIGTERM (docker stop / every deploy) and SIGINT must
 	// return from main() rather than kill the process outright, so the

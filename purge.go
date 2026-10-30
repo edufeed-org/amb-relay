@@ -156,13 +156,23 @@ func sameAuthorCoords(del nostr.Event) []coordRef {
 //
 // khatru's own NIP-09 pass runs after StoreEvent and finds nothing left for
 // these coordinates; it still handles the 'e' tags.
-func (p *eventPurger) applyCoordDeletions(ctx context.Context, del nostr.Event) {
+//
+// Returns how many coordinates were tombstoned, how many stored versions
+// were purged, and how many tombstone/purge attempts failed (errs) — used by
+// coord_tombstone_backfill.go to log progress and to decide whether a backfill
+// run is clean enough to mark complete. Live callers (main.go's StoreEvent)
+// ignore the return values; errors still reach the operator via p.log either
+// way.
+func (p *eventPurger) applyCoordDeletions(ctx context.Context, del nostr.Event) (tombstoned, purged, errs int) {
 	if del.Kind != nostr.KindDeletion {
-		return
+		return 0, 0, 0
 	}
 	for _, c := range sameAuthorCoords(del) {
 		if err := p.mgmt.MarkCoordDeleted(c.raw, del.CreatedAt); err != nil {
 			p.log("tombstone %s: %v\n", c.raw, err)
+			errs++
+		} else {
+			tombstoned++
 		}
 		f := nostr.Filter{
 			Kinds:   []nostr.Kind{c.kind},
@@ -191,9 +201,13 @@ func (p *eventPurger) applyCoordDeletions(ctx context.Context, del nostr.Event) 
 		for _, id := range targets {
 			if err := p.authorDelete(ctx, id); err != nil {
 				p.log("a-tag delete %s (%s): %v\n", id.Hex(), c.raw, err)
+				errs++
+				continue
 			}
+			purged++
 		}
 	}
+	return tombstoned, purged, errs
 }
 
 // gateSeq drops events the gate blocks from a query result: the read-side

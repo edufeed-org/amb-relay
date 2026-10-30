@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	"path/filepath"
+	"errors"
+	"iter"
 	"testing"
 
 	"fiatjaf.com/nostr"
@@ -160,40 +161,140 @@ func TestBackfillCoordTombstones_ForceEnvReRuns(t *testing.T) {
 	}
 }
 
-func TestBackfillCoordTombstones_FailedRunDoesNotSetMarker(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "events.db")
-	db := &boltdb.BoltBackend{Path: path}
-	if err := db.Init(); err != nil {
-		t.Fatal(err)
+// alwaysFailingDelete is a contentType registered for kind 30142 whose
+// deleteID always errors, standing in for a Typesense collection that is
+// unreachable during the backfill's purge step. Its validate/store/fetch are
+// no-ops; deleteID is the only thing applyCoordDeletions's purge path calls
+// on it (via registry.deleteEverywhere).
+func alwaysFailingDelete(kind nostr.Kind) contentType {
+	return contentType{
+		kinds:    []nostr.Kind{kind},
+		validate: func(nostr.Event) (bool, string) { return false, "" },
+		store:    func(nostr.Event) {},
+		fetch:    func(nostr.Filter, int) iter.Seq[nostr.Event] { return func(func(nostr.Event) bool) {} },
+		count:    func(nostr.Filter) (uint32, error) { return 0, nil },
+		deleteID: func(nostr.ID) error { return errors.New("typesense unreachable") },
 	}
+}
+
+// TestBackfillCoordTombstones_PurgeErrorDoesNotSetMarker exercises a REAL
+// failure in the scan (not merely a pre-check failure, which the earlier,
+// misleading version of this test relied on by closing the DB before the
+// first call): the coordinate's covered version lives in Bolt and is found
+// and tombstoned, but purging it from the (fake, always-failing) search
+// collection errors, exactly as a Typesense outage would during a live
+// deletion. The marker must not be set, so the scan is retried next startup.
+func TestBackfillCoordTombstones_PurgeErrorDoesNotSetMarker(t *testing.T) {
+	db := openTestBolt(t)
 	mgmt := &ManagementStore{}
 	if err := mgmt.Init(db.DB); err != nil {
 		t.Fatal(err)
 	}
-	reg := newRegistry(deletionContentType(db, map[nostr.Kind]bool{30142: true}))
+	reg := newRegistry(alwaysFailingDelete(30142), deletionContentType(db, map[nostr.Kind]bool{30142: true}))
 	purger := &eventPurger{bolt: db, mgmt: mgmt, content: &ContentStore{DB: db.DB}, reg: reg, logf: t.Logf}
 
-	db.Close()
-	if err := backfillCoordTombstones(context.Background(), db, mgmt, purger); err == nil {
-		t.Fatal("backfill against a closed DB must return an error")
+	sk := nostr.Generate()
+	tags := nostr.Tags{{"d", "res"}}
+	v1 := signedEvent(t, sk, 30142, 1000, tags)
+	del := signedEvent(t, sk, nostr.KindDeletion, 2000, nostr.Tags{{"a", coordOf(v1)}, {"k", "30142"}})
+	for _, ev := range []nostr.Event{v1, del} {
+		if err := db.SaveEvent(ev); err != nil {
+			t.Fatalf("save: %v", err)
+		}
 	}
 
-	// Reopen the same file: the marker must be absent, proving the failed
-	// attempt never recorded success.
-	db2 := &boltdb.BoltBackend{Path: path}
-	if err := db2.Init(); err != nil {
-		t.Fatal(err)
+	err := backfillCoordTombstones(context.Background(), db, mgmt, purger)
+	if err == nil {
+		t.Fatal("a purge error during the scan must be surfaced as an error")
 	}
-	t.Cleanup(db2.Close)
-	mgmt2 := &ManagementStore{}
-	if err := mgmt2.Init(db2.DB); err != nil {
-		t.Fatal(err)
-	}
-	done, err := mgmt2.MigrationDone(migrationCoordTombstonesV1)
-	if err != nil {
-		t.Fatal(err)
+
+	done, derr := mgmt.MigrationDone(migrationCoordTombstonesV1)
+	if derr != nil {
+		t.Fatal(derr)
 	}
 	if done {
-		t.Fatal("marker must not be set after a failed backfill")
+		t.Fatal("marker must not be set when a purge failed")
+	}
+}
+
+// TestBackfillCoordTombstones_CountMismatchDoesNotSetMarker covers the other
+// real failure mode item 2 asks for: QueryEvents silently swallowing a bbolt
+// read error and yielding fewer events than are actually stored, which would
+// otherwise look identical to "there were only this many kind-5 events" and
+// let the marker get set on an incomplete scan. A fake store whose
+// QueryEvents under-reports relative to its own CountEvents reproduces that
+// exact shape without needing to corrupt a real bbolt file.
+type mismatchedCountStore struct {
+	*boltdb.BoltBackend
+}
+
+func (m mismatchedCountStore) CountEvents(f nostr.Filter) (uint32, error) {
+	n, err := m.BoltBackend.CountEvents(f)
+	if err != nil {
+		return n, err
+	}
+	return n + 1, nil // claim one more than QueryEvents will actually yield
+}
+
+func TestBackfillCoordTombstones_CountMismatchDoesNotSetMarker(t *testing.T) {
+	h := newBackfillHarness(t)
+	sk := nostr.Generate()
+	tags := nostr.Tags{{"d", "res"}}
+	v1 := signedEvent(t, sk, 30142, 1000, tags)
+	del := signedEvent(t, sk, nostr.KindDeletion, 2000, nostr.Tags{{"a", coordOf(v1)}, {"k", "30142"}})
+	for _, ev := range []nostr.Event{v1, del} {
+		if err := h.bolt.SaveEvent(ev); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+	}
+
+	mismatched := mismatchedCountStore{BoltBackend: h.bolt}
+	err := backfillCoordTombstones(context.Background(), mismatched, h.mgmt, h.purger)
+	if err == nil {
+		t.Fatal("a Count/Query mismatch must be surfaced as an error")
+	}
+
+	done, derr := h.mgmt.MigrationDone(migrationCoordTombstonesV1)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	if done {
+		t.Fatal("marker must not be set when the drained count disagreed with CountEvents")
+	}
+}
+
+// TestBackfillCoordTombstones_CancelledContextDoesNotSetMarker: main.go
+// cancels the backfill's context on the same SIGINT/SIGTERM that triggers
+// graceful shutdown. A run that observes cancellation must stop, return an
+// error, and never record the completion marker.
+func TestBackfillCoordTombstones_CancelledContextDoesNotSetMarker(t *testing.T) {
+	h := newBackfillHarness(t)
+	sk := nostr.Generate()
+	tags := nostr.Tags{{"d", "res"}}
+	v1 := signedEvent(t, sk, 30142, 1000, tags)
+	del := signedEvent(t, sk, nostr.KindDeletion, 2000, nostr.Tags{{"a", coordOf(v1)}, {"k", "30142"}})
+	for _, ev := range []nostr.Event{v1, del} {
+		if err := h.bolt.SaveEvent(ev); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before the scan's per-event loop runs
+
+	err := backfillCoordTombstones(ctx, h.bolt, h.mgmt, h.purger)
+	if err == nil {
+		t.Fatal("a cancelled context must abort the backfill with an error")
+	}
+
+	done, derr := h.mgmt.MigrationDone(migrationCoordTombstonesV1)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	if done {
+		t.Fatal("marker must not be set when the run was cancelled")
+	}
+	if !h.inBolt(v1.ID) {
+		t.Fatal("a run cancelled before processing any event must not have purged v1")
 	}
 }
