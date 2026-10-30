@@ -53,7 +53,7 @@ func main() {
 	relay.Info.Version = getVersion()
 
 	// NIP-11: Supported NIPs (khatru defaults: 1, 11, 42, 70, 86)
-	relay.Info.AddSupportedNIPs([]int{9, 45, 50}) // deletion, count, search
+	relay.Info.AddSupportedNIPs([]string{"9", "45", "50"}) // deletion, count, search
 	// AMB-NIP reference (custom NIP for kind 30142 educational metadata)
 	relay.Info.SupportedNIPs = append(relay.Info.SupportedNIPs,
 		"naddr1qvzqqqrcvypzp0wzr7fmrcktw4sgemxh5zsq5auh08vnvlwf0x9anusn7pkft0zgqy28wumn8ghj7un9d3shjtnyv9kh2uewd9hsqzm9v36kvet9vskkzmtzvjvrtf")
